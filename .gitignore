@@ -1,0 +1,4 @@
+/csctl
+/state.json
+/.state-*
+*.test
