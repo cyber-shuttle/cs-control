@@ -2,3 +2,4 @@
 /state.json
 /.state-*
 *.test
+.pi/
