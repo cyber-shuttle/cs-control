@@ -2,19 +2,35 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
+	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/control"
+	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
+	"github.com/cyber-shuttle/cs-control/internal/gateway"
+	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
+	"github.com/cyber-shuttle/cs-control/internal/sshexec"
+)
+
+const (
+	defaultDevTunnelManagementURL = "https://global.rel.tunnels.api.visualstudio.com"
+	csctlVersion                  = "0.1.0"
 )
 
 func main() {
-	if err := run(context.Background(), os.Args[1:]); err != nil {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := run(ctx, os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "csctl:", err)
 		os.Exit(1)
 	}
@@ -27,6 +43,11 @@ func run(ctx context.Context, args []string) error {
 	stateDir := global.String("state-dir", defaultStateDir(), "local non-secret state directory")
 	sshBin := global.String("ssh-bin", envOr("CSCTL_SSH_BIN", "ssh"), "ssh executable")
 	timeout := global.Duration("timeout", 20*time.Second, "timeout for each SSH command")
+	linkspan := global.String("linkspan", envOr("CSCTL_LINKSPAN", "/usr/local/bin/linkspan"), "absolute remote Linkspan path (install under ~/.cybershuttle/bin and pass its resolved absolute path)")
+	runtimeBase := global.String("runtime-base", envOr("CSCTL_RUNTIME_BASE", ".cybershuttle/runtimes"), "remote private runtime directory relative to HOME")
+	userSSH := global.String("user-ssh-config", envOr("CSCTL_USER_SSH_CONFIG", defaultUserSSHConfig()), "user SSH config")
+	systemSSH := global.String("system-ssh-config", envOr("CSCTL_SYSTEM_SSH_CONFIG", "/etc/ssh/ssh_config"), "system SSH config")
+	devTunnelManagementURL := global.String("devtunnel-management-url", envOr("CSCTL_DEVTUNNEL_MANAGEMENT_URL", defaultDevTunnelManagementURL), "recognized HTTPS Dev Tunnels management endpoint")
 	if err := global.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -37,165 +58,143 @@ func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return usageError()
 	}
+	tunnelManager, err := devtunnel.NewClient(*devTunnelManagementURL, nil)
+	if err != nil {
+		return err
+	}
+	credentialDir, err := filepath.Abs(filepath.Join(*stateDir, "credentials"))
+	if err != nil {
+		return fmt.Errorf("resolve credential directory: %w", err)
+	}
 	service := control.Service{
-		Runner: control.Runner{SSHBin: *sshBin, Timeout: *timeout},
+		Runner: sshexec.Runner{SSHBin: *sshBin, Timeout: *timeout, ControlDir: filepath.Join(*stateDir, "ssh"),
+			Hosts: sshconfig.Config{UserPath: *userSSH, SystemPath: *systemSSH}},
 		Store:  control.Store{Dir: *stateDir},
+		Config: control.Config{LinkspanPath: *linkspan, RuntimeBase: *runtimeBase},
+		Logs:   control.NewRuntimeLogs(), Tunnels: tunnelManager,
+		Credentials: control.CredentialStore{Dir: credentialDir},
 	}
 	switch args[0] {
-	case "resource":
-		return runResource(ctx, service, args[1:])
-	case "runtime":
-		return runRuntime(ctx, service, args[1:])
+	case "serve":
+		return runServe(ctx, service, args[1:], net.Listen)
 	case "help", "-h", "--help":
 		printUsage()
+		return nil
+	case "version":
+		if len(args) != 1 {
+			return usageError()
+		}
+		fmt.Println(csctlVersion)
 		return nil
 	default:
 		return usageError()
 	}
 }
 
-func runResource(ctx context.Context, service control.Service, args []string) error {
-	if len(args) == 1 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help") {
-		fmt.Fprintln(os.Stderr, "Usage: csctl resource discover --ssh ALIAS [--json]")
-		return nil
-	}
-	if len(args) == 0 || args[0] != "discover" {
-		return errors.New("usage: csctl resource discover --ssh ALIAS [--json]")
-	}
-	flags := flag.NewFlagSet("resource discover", flag.ContinueOnError)
-	ssh := flags.String("ssh", "", "SSH config alias")
-	jsonOutput := flags.Bool("json", false, "print JSON")
-	if err := flags.Parse(args[1:]); err != nil {
+const (
+	serveReadHeaderTimeout = 10 * time.Second
+	serveShutdownTimeout   = 25 * time.Second
+)
+
+type serveComponents struct {
+	handler http.Handler
+	closers []func()
+}
+
+// listen is a parameter so a test can prove the configuration is rejected
+// before anything binds a port.
+func runServe(ctx context.Context, service control.Service, args []string, listen func(string, string) (net.Listener, error)) error {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	listenAddress := flags.String("listen", "127.0.0.1:8045", "loopback listen address")
+	oauthAuthority := flags.String("oauth-authority", "", "tenant-specific Microsoft Entra authority used for device authorization and OIDC discovery")
+	var allowedOrigins stringList
+	flags.Var(&allowedOrigins, "allowed-origin", "exact browser origin allowed to call the API (repeatable)")
+	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
 	}
-	if flags.NArg() != 0 || *ssh == "" {
-		return errors.New("usage: csctl resource discover --ssh ALIAS [--json]")
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	resource, err := service.Runner.Discover(ctx, *ssh)
+	if err := control.ValidateLoopbackListen(*listenAddress); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*oauthAuthority) == "" {
+		return errors.New("--oauth-authority is required")
+	}
+	components, err := newServeComponents(service, allowedOrigins, *oauthAuthority)
 	if err != nil {
 		return err
 	}
-	if *jsonOutput {
-		return printJSON(resource)
+	listener, err := listen("tcp", *listenAddress)
+	if err != nil {
+		components.close()
+		return err
 	}
-	fmt.Printf("Host: %s\nHome: %s\nAccounts:\n", resource.Host, resource.HomeDir)
-	for _, account := range resource.Accounts {
-		fmt.Printf("  %s\n", account)
+	server := &http.Server{
+		Handler:           components.handler,
+		ReadHeaderTimeout: serveReadHeaderTimeout,
 	}
-	fmt.Println("Partitions:")
-	for _, partition := range resource.Partitions {
-		fmt.Printf("  %s: %d CPUs, %s memory", partition.Name, partition.CPUCount, partition.Memory)
-		for _, gres := range partition.GRES {
-			fmt.Printf(", %s=%d", gres.Name, gres.Count)
+	serveErrors := make(chan error, 1)
+	go func() { serveErrors <- server.Serve(listener) }()
+
+	var result error
+	select {
+	case <-ctx.Done():
+	case serveErr := <-serveErrors:
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			result = serveErr
 		}
-		fmt.Println()
 	}
-	return nil
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), serveShutdownTimeout)
+	shutdownErr := server.Shutdown(shutdownCtx)
+	cancel()
+	if shutdownErr != nil {
+		shutdownErr = errors.Join(shutdownErr, server.Close())
+	}
+	components.close()
+	return errors.Join(result, shutdownErr)
 }
 
-func runRuntime(ctx context.Context, service control.Service, args []string) error {
-	if len(args) == 1 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help") {
-		fmt.Fprintln(os.Stderr, "Usage: csctl runtime create|list|get|stop")
-		return nil
+func newServeComponents(service control.Service, allowedOrigins []string, oauthAuthority string) (*serveComponents, error) {
+	validator, err := authn.NewMicrosoftOAuthValidator(defaultDevTunnelManagementURL, oauthAuthority, authn.DevTunnelsNativeClientID, nil)
+	if err != nil {
+		return nil, err
 	}
-	if len(args) == 0 {
-		return errors.New("usage: csctl runtime create|list|get|stop")
+	auth := gateway.NewSSHAuthManager(service.Runner)
+	api := control.NewHTTPHandler(service, auth)
+	// One closer stack, unwound on any construction failure and again on shutdown.
+	components := &serveComponents{closers: []func(){auth.Close, api.Close}}
+	oauthHandler, err := authn.NewOAuthBoundary(api, validator, allowedOrigins)
+	if err != nil {
+		components.close()
+		return nil, err
 	}
-	switch args[0] {
-	case "create":
-		flags := flag.NewFlagSet("runtime create", flag.ContinueOnError)
-		request := control.CreateRequest{}
-		flags.StringVar(&request.ID, "id", "", "runtime ID (generated when omitted)")
-		flags.StringVar(&request.SSH, "ssh", "", "SSH config alias")
-		flags.StringVar(&request.Partition, "partition", "", "SLURM partition")
-		flags.StringVar(&request.Account, "account", "", "SLURM account")
-		flags.IntVar(&request.CPUs, "cpus", 1, "CPU count")
-		flags.IntVar(&request.MemoryMB, "memory-mb", 1024, "memory in MiB")
-		flags.StringVar(&request.Walltime, "walltime", "01:00:00", "SLURM [days-]HH:MM:SS")
-		flags.StringVar(&request.Linkspan, "linkspan", "", "absolute remote Linkspan path")
-		flags.StringVar(&request.Workflow, "workflow", "", "absolute remote workflow path")
-		flags.StringVar(&request.RemoteRoot, "remote-root", "", "absolute remote runtime root")
-		jsonOutput := flags.Bool("json", false, "print JSON")
-		if err := flags.Parse(args[1:]); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return nil
-			}
-			return err
-		}
-		if flags.NArg() != 0 {
-			return errors.New("runtime create does not accept positional arguments")
-		}
-		runtime, err := service.Create(ctx, request)
-		if err != nil {
-			return err
-		}
-		return printRuntime(runtime, *jsonOutput)
-	case "list":
-		flags := flag.NewFlagSet("runtime list", flag.ContinueOnError)
-		jsonOutput := flags.Bool("json", false, "print JSON")
-		if err := flags.Parse(args[1:]); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return nil
-			}
-			return err
-		}
-		if flags.NArg() != 0 {
-			return errors.New("runtime list does not accept positional arguments")
-		}
-		runtimes, err := service.List(ctx)
-		if err != nil {
-			return err
-		}
-		if *jsonOutput {
-			return printJSON(runtimes)
-		}
-		for _, runtime := range runtimes {
-			fmt.Printf("%s\t%s\t%s\t%s\n", runtime.ID, runtime.State, runtime.SSH, runtime.JobID)
-		}
-		return nil
-	case "get", "stop":
-		flags := flag.NewFlagSet("runtime "+args[0], flag.ContinueOnError)
-		jsonOutput := flags.Bool("json", false, "print JSON")
-		if err := flags.Parse(args[1:]); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return nil
-			}
-			return err
-		}
-		if flags.NArg() != 1 {
-			return fmt.Errorf("usage: csctl runtime %s [--json] ID", args[0])
-		}
-		var runtime *control.Runtime
-		var err error
-		if args[0] == "get" {
-			runtime, err = service.Get(ctx, flags.Arg(0))
-		} else {
-			runtime, err = service.Stop(ctx, flags.Arg(0))
-		}
-		if err != nil {
-			return err
-		}
-		return printRuntime(runtime, *jsonOutput)
-	default:
-		return errors.New("usage: csctl runtime create|list|get|stop")
+	broker, err := authn.NewDeviceCodeBroker(oauthAuthority, allowedOrigins, nil)
+	if err != nil {
+		components.close()
+		return nil, err
 	}
+	components.closers = append([]func(){broker.Close}, components.closers...)
+	handler, err := authn.NewDeviceCodeRoutes(oauthHandler, broker)
+	if err != nil {
+		components.close()
+		return nil, err
+	}
+	components.handler = handler
+	return components, nil
 }
 
-func printRuntime(runtime *control.Runtime, jsonOutput bool) error {
-	if jsonOutput {
-		return printJSON(runtime)
+func (components *serveComponents) close() {
+	if components == nil {
+		return
 	}
-	fmt.Printf("%s\t%s\t%s\t%s\n", runtime.ID, runtime.State, runtime.SSH, runtime.JobID)
-	return nil
-}
-
-func printJSON(value any) error {
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(value)
+	for _, closer := range components.closers {
+		closer()
+	}
 }
 
 func defaultStateDir() string {
@@ -204,6 +203,14 @@ func defaultStateDir() string {
 		return ".cs-control"
 	}
 	return filepath.Join(home, ".cybershuttle", "control")
+}
+
+func defaultUserSSHConfig() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".ssh/config"
+	}
+	return filepath.Join(home, ".ssh", "config")
 }
 
 func envOr(name, fallback string) string {
@@ -220,9 +227,20 @@ func usageError() error {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  csctl [--state-dir DIR] resource discover --ssh ALIAS [--json]
-  csctl [--state-dir DIR] runtime create --ssh ALIAS --partition NAME --linkspan PATH --workflow PATH [options]
-  csctl [--state-dir DIR] runtime list [--json]
-  csctl [--state-dir DIR] runtime get [--json] ID
-  csctl [--state-dir DIR] runtime stop [--json] ID`)
+  csctl [global options] serve --oauth-authority AUTHORITY --allowed-origin ORIGIN [--allowed-origin ORIGIN ...]
+  csctl help
+  csctl version
+
+Trusted runtime configuration:
+  --linkspan PATH or CSCTL_LINKSPAN=PATH
+  --devtunnel-management-url URL or CSCTL_DEVTUNNEL_MANAGEMENT_URL=URL
+  Recommended remote install: ~/.cybershuttle/bin/linkspan (pass the resolved absolute path).`)
+}
+
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+func (s *stringList) Set(value string) error {
+	*s = append(*s, value)
+	return nil
 }

@@ -1,0 +1,16 @@
+{
+  "id": "rt-012345abcdef",
+  "generation": "g-0123456789abcdef",
+  "state": "READY",
+  "sshHost": "delta",
+  "account": "project-a",
+  "partition": "cpu",
+  "rootFolder": "$HOME/project",
+  "resources": {
+    "cores": 2,
+    "memoryMb": 2048,
+    "wallMinutes": 60
+  },
+  "createdAt": "2030-01-01T00:00:00Z",
+  "updatedAt": "2030-01-01T00:01:00Z"
+}
