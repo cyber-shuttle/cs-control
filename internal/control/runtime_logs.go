@@ -70,6 +70,19 @@ func NewRuntimeLogs() *RuntimeLogs {
 	}
 }
 
+// Forget drops a deleted runtime's tail so a reused process does not keep
+// output for an allocation the owner has removed.
+func (l *RuntimeLogs) Forget(runtimeID string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.tails, runtimeID)
+	delete(l.sensitive, runtimeID)
+	delete(l.cursors, runtimeID)
+}
+
 // Append sanitizes and appends one or more CR/LF-delimited lines. Repeating the
 // current final line is a no-op so periodic phase observations do not grow the
 // tail or advance its revision.

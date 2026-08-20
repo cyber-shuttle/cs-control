@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	pathpkg "path"
 	"slices"
 	"strings"
@@ -279,6 +280,44 @@ func (s Service) Stop(ctx context.Context, id string) (*Runtime, error) {
 		s.runtimeStatus(id, "Runtime stopped")
 	}
 	return result, errors.Join(managementErr, err)
+}
+
+// Delete removes an allocation the owner is finished with. Stop is the only
+// path that releases the job, tunnel, and credentials in the right order, so a
+// live allocation is stopped first and a record is only dropped once the
+// scheduler has confirmed the job is gone.
+func (s Service) Delete(ctx context.Context, id string) (*Runtime, error) {
+	stopped, err := s.Stop(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if stopped == nil || (stopped.State != "STOPPED" && stopped.State != "FAILED") {
+		return nil, apierr.New("runtime_not_stopped", "runtime is still stopping; delete it once the scheduler has released the job", http.StatusConflict)
+	}
+	auth, err := authn.TunnelAuthorizationFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var deleted *Runtime
+	if err := s.Store.withLock(func(store Store, current *state) error {
+		runtime := current.Runtimes[id]
+		if runtime == nil {
+			return errRuntimeNotFound
+		}
+		if runtime.Owner != auth.Principal {
+			return errOwnerMismatch
+		}
+		if runtime.State != "STOPPED" && runtime.State != "FAILED" {
+			return apierr.New("runtime_not_stopped", "runtime is no longer stopped", http.StatusConflict)
+		}
+		deleted = detached(runtime)
+		delete(current.Runtimes, id)
+		return store.save(current)
+	}); err != nil {
+		return nil, err
+	}
+	s.Logs.Forget(id)
+	return deleted, s.Credentials.Delete(id, deleted.Generation)
 }
 
 func (s Service) prepareRuntime(ctx context.Context, request CreateRequest) (*preparedRuntime, error) {

@@ -397,3 +397,38 @@ func TestLoopbackListenValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteRemovesATerminalRuntimeAndItsCredential(t *testing.T) {
+	service := testService(t)
+	runtime := pendingRuntime(runtimeLogIDOne, "delta", "12345")
+	setTestRuntimeMetadata(&runtime)
+	runtime.State = "FAILED"
+	putRuntimes(t, service, runtime)
+	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {
+		t.Fatal(err)
+	}
+	service.Logs.Append(runtime.ID, "status", "starting")
+
+	deleted, err := service.Delete(testTunnelContext(), runtime.ID)
+	if err != nil || deleted.ID != runtime.ID {
+		t.Fatalf("delete failed: %#v %v", deleted, err)
+	}
+	runtimes, err := service.ListCached()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, remaining := range runtimes {
+		if remaining.ID == runtime.ID {
+			t.Fatalf("deleted runtime is still listed: %#v", remaining)
+		}
+	}
+	if _, err := service.Credentials.Get(runtime.ID, runtime.Generation); err == nil {
+		t.Fatal("delete left the generation credential on disk")
+	}
+	if _, ok := service.Logs.Tail(runtime.ID); ok {
+		t.Fatal("delete left the runtime log tail in memory")
+	}
+	if _, err := service.Delete(testTunnelContext(), runtime.ID); err == nil {
+		t.Fatal("deleting an absent runtime should not succeed")
+	}
+}
