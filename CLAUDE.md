@@ -71,9 +71,11 @@ broker, or token persistence/logging.
   allocation. Keep validation and create as OAuth-authenticated API actions.
 - The batch script starts Jupyter Server in the background and then execs
   Linkspan with plain flags to host the allocation tunnel. Inject the Jupyter
-  identity token and the tunnel host token with fixed `sbatch --export`
-  arguments. Validation and submission scripts must be byte-identical and
-  contain no generated secret literal.
+  identity token, the tunnel host token, and the allocation identity the tunnel
+  only assigns at creation (its ID, cluster, and generation-derived ports) with
+  fixed `sbatch --export` arguments. Validation and submission scripts must be
+  byte-identical and contain no generated secret literal, so nothing that is
+  unknown at review time may be written into the script text.
 - Create one creator-owned Dev Tunnel per allocation generation, declaring both
   allocation ports at creation. Never request tunnel-wide anonymous access;
   grant anonymous connect only on the Jupyter port, whose authorization is

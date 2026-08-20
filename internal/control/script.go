@@ -21,12 +21,18 @@ func ambiguousSubmission(err error) bool {
 	return errors.As(err, &submit) && submit.ambiguous
 }
 
-func (s Service) submitRuntimeScript(ctx context.Context, host, jobName, script, jupyterToken string, secrets ...string) (string, error) {
+func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime Runtime, script, jupyterToken string, secrets ...string) (string, error) {
+	jobName := runtime.JobName
 	hostToken := ""
 	if len(secrets) > 0 {
 		hostToken = secrets[0]
 	}
-	export := "--export=ALL,CS_JUPYTER_TOKEN=" + jupyterToken + ",CS_TUNNEL_HOST_TOKEN=" + hostToken
+	// The allocation identity is only known once the tunnel exists, so it rides
+	// the job environment alongside the tokens and leaves the reviewed script
+	// byte-identical to the one Slurm validated.
+	ports := allocationPorts(runtime.ID, runtime.Generation)
+	export := fmt.Sprintf("--export=ALL,CS_JUPYTER_TOKEN=%s,CS_TUNNEL_HOST_TOKEN=%s,CS_JUPYTER_PORT=%d,CS_CONTROL_PORT=%d,CS_TUNNEL_ID=%s,CS_TUNNEL_CLUSTER=%s",
+		jupyterToken, hostToken, ports.jupyter, ports.control, runtime.Tunnel.ID, runtime.Tunnel.ClusterID)
 	remote := strings.Join([]string{sshexec.ShellQuote("sbatch"), sshexec.ShellQuote(export), sshexec.ShellQuote("--parsable")}, " ")
 	commandCtx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
 	defer cancel()
@@ -129,17 +135,15 @@ func buildScript(runtime Runtime, linkspan string) string {
 		}
 		lines = append(lines, gres+strconv.Itoa(runtime.Resources.GPUCount))
 	}
-	ports := allocationPorts(runtime.ID, runtime.Generation)
 	lines = append(lines,
 		"set -eu", "umask 077", `LOG_DIR="$HOME/.cybershuttle/logs"`, `install -d -m 700 "$LOG_DIR"`, `exec >"$LOG_DIR/`+runtime.ID+`.out" 2>"$LOG_DIR/`+runtime.ID+`.err"`, "unset XDG_RUNTIME_DIR TMPDIR",
 		"LINKSPAN_BIN="+sshexec.ShellQuote(linkspan),
 		"JUPYTER_PYTHON="+sshexec.ShellQuote(jupyterPython(runtime)),
 		// Jupyter Server owns its own token auth, CORS and root confinement; nothing proxies it.
 		// Both credentials arrive in the job environment, so neither appears in this script.
-		fmt.Sprintf(`"$JUPYTER_PYTHON" -m jupyter_server --no-browser --ip=127.0.0.1 --port=%d --ServerApp.root_dir=%s --ServerApp.allow_origin='*' --IdentityProvider.token="$CS_JUPYTER_TOKEN" &`,
-			ports.jupyter, sshexec.ShellQuote(runtime.WorkspaceRoot)),
-		fmt.Sprintf(`exec "$LINKSPAN_BIN" --port %d --tunnel-enable --tunnel-id %s --tunnel-cluster %s --tunnel-host-token "$CS_TUNNEL_HOST_TOKEN"`,
-			ports.control, sshexec.ShellQuote(runtime.Tunnel.ID), sshexec.ShellQuote(runtime.Tunnel.ClusterID)),
+		fmt.Sprintf(`"$JUPYTER_PYTHON" -m jupyter_server --no-browser --ip=127.0.0.1 --port="$CS_JUPYTER_PORT" --ServerApp.root_dir=%s --ServerApp.allow_origin='*' --IdentityProvider.token="$CS_JUPYTER_TOKEN" &`,
+			sshexec.ShellQuote(runtime.WorkspaceRoot)),
+		`exec "$LINKSPAN_BIN" --port "$CS_CONTROL_PORT" --tunnel-enable --tunnel-id "$CS_TUNNEL_ID" --tunnel-cluster "$CS_TUNNEL_CLUSTER" --tunnel-host-token "$CS_TUNNEL_HOST_TOKEN"`,
 		"")
 	return strings.Join(lines, "\n")
 }

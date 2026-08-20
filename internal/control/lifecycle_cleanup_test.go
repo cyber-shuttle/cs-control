@@ -1,9 +1,11 @@
 package control
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -41,13 +43,21 @@ exit 7
 	script = strings.Replace(script, "JUPYTER_PYTHON="+sshexec.ShellQuote(jupyterPython(runtime)), "JUPYTER_PYTHON="+sshexec.ShellQuote(python), 1)
 	command := exec.Command("bash")
 	command.Stdin = strings.NewReader(script)
+	const tunnelID, tunnelCluster = "rt-012345abcdef-g-0123456789abcdef", "usw3"
+	ports := allocationPorts(runtime.ID, runtime.Generation)
 	command.Env = append(os.Environ(), "HOME="+dir, "ARGS_LOG="+argsLog,
-		"JUPYTER_LOG="+filepath.Join(dir, "jupyter"), "CS_JUPYTER_TOKEN="+jupyterToken, "CS_TUNNEL_HOST_TOKEN="+hostToken)
+		"JUPYTER_LOG="+filepath.Join(dir, "jupyter"), "CS_JUPYTER_TOKEN="+jupyterToken, "CS_TUNNEL_HOST_TOKEN="+hostToken,
+		fmt.Sprintf("CS_JUPYTER_PORT=%d", ports.jupyter), fmt.Sprintf("CS_CONTROL_PORT=%d", ports.control),
+		"CS_TUNNEL_ID="+tunnelID, "CS_TUNNEL_CLUSTER="+tunnelCluster)
 	if err := command.Run(); err == nil || err.(*exec.ExitError).ExitCode() != 7 {
 		t.Fatalf("script did not exec Linkspan or preserve status 7: %v", err)
 	}
-	if got := string(mustRead(t, argsLog)); !strings.Contains(got, hostToken) || strings.Contains(got, "allocation") {
-		t.Fatalf("Linkspan argv = %q", got)
+	// An empty --tunnel-id makes Linkspan refuse the host token and the job dies
+	// on startup, so the identity has to survive the environment hand-off.
+	for _, required := range []string{hostToken, tunnelID, tunnelCluster, strconv.Itoa(int(ports.control))} {
+		if got := string(mustRead(t, argsLog)); !strings.Contains(got, required) || strings.Contains(got, "allocation") {
+			t.Fatalf("Linkspan argv missing %q: %q", required, got)
+		}
 	}
 	if got := string(mustRead(t, filepath.Join(dir, "jupyter"))); !strings.Contains(got, jupyterToken) {
 		t.Fatalf("Jupyter argv did not receive the environment token: %q", got)
