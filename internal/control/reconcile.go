@@ -125,7 +125,11 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					case "READY":
 						s.runtimeStatus(runtime.ID, "Allocation is running")
 					case "STOPPED":
-						s.runtimeStatus(runtime.ID, "Runtime stopped")
+						if class == schedulerExpired {
+							s.runtimeStatus(runtime.ID, "Runtime reached its walltime")
+						} else {
+							s.runtimeStatus(runtime.ID, "Runtime stopped")
+						}
 					case "FAILED":
 						s.runtimeStatus(runtime.ID, "Runtime failed")
 					}
@@ -169,6 +173,7 @@ const (
 	schedulerPending
 	schedulerActive
 	schedulerStopped
+	schedulerExpired
 	schedulerFailed
 )
 
@@ -184,7 +189,12 @@ func classifySchedulerState(raw string) schedulerClass {
 		return schedulerActive
 	case "COMPLETED", "CANCELLED", "STOPPED":
 		return schedulerStopped
-	case "BOOT_FAIL", "DEADLINE", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "REVOKED", "SPECIAL_EXIT", "TIMEOUT":
+	// An allocation that runs out its walltime has done exactly what it was
+	// asked to do, so it ends stopped rather than failed; the class is kept
+	// apart only so the owner is told which of the two happened.
+	case "TIMEOUT":
+		return schedulerExpired
+	case "BOOT_FAIL", "DEADLINE", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "REVOKED", "SPECIAL_EXIT":
 		return schedulerFailed
 	}
 	return schedulerUnknown
@@ -204,7 +214,7 @@ func nextState(current string, class schedulerClass) string {
 		return "READY"
 	case class == schedulerActive:
 		return "STARTING"
-	case class == schedulerStopped:
+	case class == schedulerStopped || class == schedulerExpired:
 		return "STOPPED"
 	}
 	return "FAILED"

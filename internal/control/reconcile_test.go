@@ -234,3 +234,26 @@ func TestReconcileDoesNotHoldStoreLockDuringSSHAndDoesNotOverwriteStop(t *testin
 		t.Fatalf("stale list overwrote stop intent: %#v", got)
 	}
 }
+
+// An allocation that runs out its walltime has done what it was asked to do.
+// Slurm reports that as TIMEOUT, which sits beside genuine faults in its
+// vocabulary and read as a failed runtime to the owner.
+func TestWalltimeExpiryStopsTheRuntimeRatherThanFailingIt(t *testing.T) {
+	for raw, want := range map[string]string{
+		"TIMEOUT":       "STOPPED",
+		"COMPLETED":     "STOPPED",
+		"CANCELLED":     "STOPPED",
+		"NODE_FAIL":     "FAILED",
+		"OUT_OF_MEMORY": "FAILED",
+		"FAILED":        "FAILED",
+		"BOOT_FAIL":     "FAILED",
+		"PREEMPTED":     "FAILED",
+	} {
+		if got := nextState("READY", classifySchedulerState(raw)); got != want {
+			t.Errorf("slurm %s left the runtime %s, want %s", raw, got, want)
+		}
+	}
+	if classifySchedulerState("TIMEOUT") == classifySchedulerState("COMPLETED") {
+		t.Error("a walltime expiry must stay distinguishable so the owner is told which stop it was")
+	}
+}
