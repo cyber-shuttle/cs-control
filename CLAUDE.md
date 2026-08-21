@@ -123,6 +123,9 @@ broker, or token persistence/logging.
   wait for that server to answer all happen inside the allocation, through the
   workflow Linkspan runs. Both binaries belong to the account, not to a
   workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens.
+  An allocation hosts a tunnel this control plane created, so its Linkspan must
+  accept `--tunnel-host-token`; preparation refuses a host whose Linkspan does
+  not, rather than letting the allocation die on its first flag.
   Preparation starts when a host is selected -- the discovery route begins it in
   the background, minutes before the same person submits -- and outlives the
   request that triggered it, so a caller that goes away leaves no half-built

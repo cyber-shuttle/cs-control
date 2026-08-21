@@ -79,18 +79,24 @@ else
     rm -f "$staged"; printf '%s\n' 'error=linkspan-install'; exit 80; }
   printf '%s\n' 'linkspan=installed'
 fi
+# An allocation hosts a tunnel the control plane created, which needs a
+# host-scoped token. A Linkspan without that flag starts, refuses the argument,
+# and takes the allocation with it, so it is refused here instead.
+"$linkspan" --help 2>&1 | grep -q -- '-tunnel-host-token' || {
+  printf '%s\n' 'error=linkspan-unsupported'; exit 81; }
 printf '%s\n' 'provision=complete'
 `
 
 // What each refusal means to the person who asked for a runtime.
 var provisionFailures = map[string]string{
-	"uv-install":         "could not install uv, which the allocation builds its environment with",
-	"uv-missing":         "uv is not executable after installation",
-	"arguments":          "the host was given paths it could not use",
-	"linkspan-directory": "could not create the directory the Linkspan binary belongs in",
-	"architecture":       "the host reports an architecture Linkspan is not released for",
-	"linkspan-download":  "could not download the Linkspan release",
-	"linkspan-install":   "could not install the downloaded Linkspan binary",
+	"uv-install":           "could not install uv, which the allocation builds its environment with",
+	"uv-missing":           "uv is not executable after installation",
+	"arguments":            "the host was given paths it could not use",
+	"linkspan-directory":   "could not create the directory the Linkspan binary belongs in",
+	"architecture":         "the host reports an architecture Linkspan is not released for",
+	"linkspan-download":    "could not download the Linkspan release",
+	"linkspan-install":     "could not install the downloaded Linkspan binary",
+	"linkspan-unsupported": "the Linkspan on this host has no --tunnel-host-token, so it cannot host the tunnel this runtime was given",
 }
 
 // provisionRuntime makes a host able to run a runtime before one is submitted

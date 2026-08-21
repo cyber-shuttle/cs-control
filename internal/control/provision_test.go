@@ -93,3 +93,21 @@ func TestSecondCreateIsRefusedWhileTheHostIsBeingPrepared(t *testing.T) {
 		t.Fatalf("create was still refused after preparation ended: %v", err)
 	}
 }
+
+// The allocation hosts a tunnel the control plane created, so a Linkspan that
+// predates host-scoped tokens cannot run one. It is refused while a runtime can
+// still be refused, rather than by an allocation that dies on its first flag.
+func TestCreateRefusesALinkspanThatCannotHostTheTunnel(t *testing.T) {
+	ssh, _, scriptLog, _ := fakeSSH(t)
+	t.Setenv("FAKE_PROVISION_FAIL", "1")
+	t.Setenv("FAKE_PROVISION_REPORT", "error=linkspan-unsupported")
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Logs: NewRuntimeLogs()}
+	configureTestTunnel(t, &service)
+	_, err := service.Create(testTunnelContext(), createRequest())
+	if failure := apierr.For(err); !strings.Contains(failure.Message, "tunnel-host-token") {
+		t.Fatalf("refusal does not name what is missing: %#v", failure)
+	}
+	if _, statErr := os.Stat(scriptLog); statErr == nil {
+		t.Fatal("a job was submitted to a host whose Linkspan cannot host the tunnel")
+	}
+}
