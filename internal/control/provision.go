@@ -58,7 +58,28 @@ else
   printf '%s\n' 'uv=installed'
 fi
 
-if [ -x "$linkspan" ]; then
+# Newest wins, and a tie goes to the release: a build made by hand carries a
+# version above the published one and is left alone, while a release that has
+# caught up (same tag or higher) replaces it. Both installers follow this rule,
+# so neither can undo the other.
+installed=""
+[ -x "$linkspan" ] && installed=$("$linkspan" --version 2>/dev/null | head -1 | tr -d 'v \r')
+latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+  https://github.com/cyber-shuttle/linkspan/releases/latest 2>/dev/null | sed 's#.*/##' | tr -d 'v \r')
+keep=0
+# Only a plain version number can win: an unversioned build ("dev") sorts above
+# every release under sort -V, which would make it permanent.
+case "$installed" in ''|*[!0-9.]*) installed="" ;; esac
+if [ -n "$installed" ]; then
+  if [ -z "$latest" ]; then
+    # Nothing to compare against; a working binary is worth more than a guess.
+    keep=1
+  elif [ "$installed" != "$latest" ] &&
+       [ "$(printf '%s\n%s\n' "$installed" "$latest" | sort -V | tail -1)" = "$installed" ]; then
+    keep=1
+  fi
+fi
+if [ "$keep" = 1 ]; then
   printf '%s\n' 'linkspan=present'
 else
   bin_dir=$(dirname "$linkspan")
