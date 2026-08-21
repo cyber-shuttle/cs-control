@@ -66,27 +66,20 @@ installed=""
 [ -x "$linkspan" ] && installed=$("$linkspan" --version 2>/dev/null | head -1 | tr -d 'v \r')
 latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
   https://github.com/cyber-shuttle/linkspan/releases/latest 2>/dev/null | sed 's#.*/##' | tr -d 'v \r')
-# A version is X.Y.Z for a release, or X.Y.Z.<commit> for a build ahead of one,
-# and nothing else. Anything else -- an unversioned build above all else --
-# sorts above every release under sort -V, which would make it permanent, so it
-# does not count as a version at all.
-shaped() {
-  printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9a-f]{7,40})?$'
-}
-release() { printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
-numbers() { printf '%s' "$1" | cut -d. -f1-3; }
+# What is installed is X.Y.Z for a release or X.Y.Z.<commit> for a build ahead
+# of one; anything else -- an unversioned build above all else -- sorts above
+# every release under sort -V, so it does not count as a version at all. What is
+# published is always a release, so equal numbers mean the release has caught up
+# and takes over, whether what is installed is a build or the same release.
+installed=$(printf '%s' "$installed" | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9a-f]{7,40})?$' | cut -d. -f1-3)
+latest=$(printf '%s' "$latest" | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+$')
 keep=0
-shaped "$installed" || installed=""
-shaped "$latest" || latest=""
 if [ -n "$installed" ]; then
   if [ -z "$latest" ]; then
-    # Nothing to compare against; a working binary is worth more than a guess.
+    # No published release to compare against; a working binary beats a guess.
     keep=1
-  elif [ "$(numbers "$installed")" != "$(numbers "$latest")" ]; then
-    [ "$(printf '%s\n%s\n' "$(numbers "$installed")" "$(numbers "$latest")" | sort -V | tail -1)" = "$(numbers "$installed")" ] && keep=1
-  elif release "$installed" && ! release "$latest"; then
-    # Same numbers: a release outranks a build made ahead of it, either way
-    # round, and two builds of the same numbers are never the same build.
+  elif [ "$installed" != "$latest" ] &&
+       [ "$(printf '%s\n%s\n' "$installed" "$latest" | sort -V | tail -1)" = "$installed" ]; then
     keep=1
   fi
 fi
