@@ -30,8 +30,12 @@ const provisionScript = `set -u
 LC_ALL=C
 LANG=C
 export LC_ALL LANG
+[ "$#" -eq 3 ]
+[ "$1" = csctl-provision ]
+shift
 workspace=$1
 linkspan=$2
+case "$workspace$linkspan" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
 env_dir="$workspace/.cybershuttle/jupyter-env"
 python="$env_dir/bin/python"
 imports='import ipykernel, jupyter_server, jupyter_server_terminals'
@@ -86,6 +90,7 @@ printf '%s\n' 'provision=complete'
 var provisionFailures = map[string]string{
 	"uv-install":         "could not install uv, which builds the managed Jupyter environment",
 	"uv-missing":         "uv is not executable after installation",
+	"arguments":          "the host was given paths it could not use",
 	"workspace":          "could not create the .cybershuttle directory in the workspace",
 	"python":             "could not create the Python " + provisionPythonVersion + " environment",
 	"jupyter":            "could not install Jupyter Server into the environment",
