@@ -117,10 +117,14 @@ broker, or token persistence/logging.
   home directory. It defaults to `$HOME/.cybershuttle/bin/linkspan`.
 - Creating a runtime prepares the host first: one constant script, run on the
   login node after Slurm validation and before any job exists, installs the
-  managed Jupyter environment under the workspace and the Linkspan release at
-  the resolved path when either is missing, and leaves a working host
-  untouched. A host that cannot be prepared is refused with the reason and
-  never receives a job.
+  managed Jupyter environment and the Linkspan release when either is missing,
+  and leaves a working host untouched. Both belong to the account, not to a
+  workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens.
+  Preparation outlives the request that triggered it, so a caller that goes
+  away leaves no half-built environment, and one preparation runs per host at a
+  time -- a second caller is refused with `runtime_provisioning_in_progress`
+  rather than made to wait behind work it cannot see. A host that cannot be
+  prepared is refused with the reason and never receives a job.
 - Host entries the API creates live between the `cybershuttle managed`
   markers in `~/.ssh/config`, written atomically at mode `0600`. Everything
   outside those markers is read and never rewritten, and only a managed alias

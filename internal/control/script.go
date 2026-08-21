@@ -147,9 +147,15 @@ func buildScript(runtime Runtime, linkspan string) string {
 	return strings.Join(lines, "\n")
 }
 
-// jupyterPython is the interpreter cs-control provisions per owner; the browser never computes paths.
+// jupyterPython is the interpreter cs-control provisions per account, beside the
+// binary it also installs. One account, one environment: a workspace chooses
+// what a server opens, not what runs it. The browser never computes paths.
 func jupyterPython(runtime Runtime) string {
-	return strings.TrimSuffix(runtime.WorkspaceRoot, "/") + "/.cybershuttle/jupyter-env/bin/python"
+	return jupyterEnvironment(runtime.HomeDir) + "/bin/python"
+}
+
+func jupyterEnvironment(home string) string {
+	return strings.TrimSuffix(home, "/") + "/.cybershuttle/jupyter-env"
 }
 
 func minutesToWalltime(minutes int) string {

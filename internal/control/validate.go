@@ -215,6 +215,12 @@ func safeRemotePath(value string) bool {
 // A remote executable may be anchored at $HOME, so one setting serves hosts
 // whose accounts do not share a home directory. Discovery resolves the anchor
 // before the path reaches a script.
+// A runtime stored before the home was recorded is still a valid record: the
+// home is read when a runtime is created, and a stored one is never resumed.
+func validStoredHome(runtime *Runtime) bool {
+	return runtime.HomeDir == "" || safeRemotePath(runtime.HomeDir)
+}
+
 func safeRemoteExecutable(value string) bool {
 	if rest, anchored := strings.CutPrefix(value, "$HOME/"); anchored {
 		return safeRemotePath("/" + rest)
@@ -234,7 +240,7 @@ func validateStoredRuntime(key string, runtime *Runtime) error {
 	if runtime == nil || !idPattern.MatchString(key) || runtime.ID != key || !knownState(runtime.State) {
 		return errors.New("runtime identity or state is invalid")
 	}
-	if !sshconfig.ValidAlias(runtime.SSHHost) || !namePattern.MatchString(runtime.Partition) || !validWorkspaceExpression(runtime.RootFolder) || !safeRemotePath(runtime.PrivateRoot) || !safeRemotePath(runtime.WorkspaceRoot) || !validStoredWorkspacePrivateLayout(runtime) {
+	if !sshconfig.ValidAlias(runtime.SSHHost) || !namePattern.MatchString(runtime.Partition) || !validWorkspaceExpression(runtime.RootFolder) || !safeRemotePath(runtime.PrivateRoot) || !safeRemotePath(runtime.WorkspaceRoot) || !validStoredHome(runtime) || !validStoredWorkspacePrivateLayout(runtime) {
 		return errors.New("runtime contains invalid fields")
 	}
 	if !validRuntimeJobName(runtime) || (runtime.JobID != "" && !jobPattern.MatchString(runtime.JobID)) || (runtime.Node != "" && !nodePattern.MatchString(runtime.Node)) {

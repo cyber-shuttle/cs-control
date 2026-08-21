@@ -58,3 +58,29 @@ func TestCreateRefusesAHostItCannotProvision(t *testing.T) {
 		t.Fatal("a job was submitted to a host that could not be prepared")
 	}
 }
+
+// A caller whose connection went away leaves an install running, so the next
+// one is told to come back rather than made to wait behind work it cannot see
+// or, worse, made to run a second uv against a half-built environment.
+func TestSecondCreateIsRefusedWhileTheHostIsBeingPrepared(t *testing.T) {
+	release, busy := hostPreparations.begin("delta")
+	if busy {
+		t.Fatal("host was already marked as being prepared")
+	}
+	ssh, _, scriptLog, _ := fakeSSH(t)
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Logs: NewRuntimeLogs()}
+	configureTestTunnel(t, &service)
+	_, err := service.Create(testTunnelContext(), createRequest())
+	failure := apierr.For(err)
+	if failure.Code != "runtime_provisioning_in_progress" || failure.Status != 409 {
+		t.Fatalf("unexpected refusal: %#v", failure)
+	}
+	if _, statErr := os.Stat(scriptLog); statErr == nil {
+		t.Fatal("a job was submitted while the host was still being prepared")
+	}
+	release()
+	// Once the preparation finishes, the same request goes through.
+	if _, err := service.Create(testTunnelContext(), createRequest()); err != nil {
+		t.Fatalf("create was still refused after preparation ended: %v", err)
+	}
+}

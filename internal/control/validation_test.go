@@ -41,11 +41,14 @@ func TestRuntimeWorkflowStartsJupyterWithoutSecretsOrExpansion(t *testing.T) {
 	runtime := Runtime{
 		RuntimeResponse: RuntimeResponse{ID: "rt-012345abcdef"},
 		PrivateRoot:     "/home/test/.cybershuttle/runtimes/rt-012345abcdef", WorkspaceRoot: "/home/test/project",
+		HomeDir: "/home/test",
 	}
 	document := runtimeWorkflow(runtime)
 	for _, required := range []string{
 		"action: shell.exec",
-		"/home/test/project/.cybershuttle/jupyter-env/bin/python -m jupyter_server",
+		// The interpreter belongs to the account; the workspace only says what
+		// the server opens.
+		"/home/test/.cybershuttle/jupyter-env/bin/python -m jupyter_server",
 		"--ServerApp.root_dir=/home/test/project",
 	} {
 		if !strings.Contains(document, required) {

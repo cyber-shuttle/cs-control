@@ -381,7 +381,7 @@ func (s Service) prepareRuntimeAfterContract(ctx context.Context, request Create
 	}
 	runtime := Runtime{
 		RuntimeResponse: RuntimeResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources},
-		JobName:         jobName(request.ID), PrivateRoot: privateRoot, WorkspaceRoot: workspaceRoot,
+		JobName:         jobName(request.ID), PrivateRoot: privateRoot, WorkspaceRoot: workspaceRoot, HomeDir: resource.HomeDir,
 	}
 	s.runtimeStatus(request.ID, "Runtime preparation complete")
 	linkspan := resolveRemoteExecutable(cfg.LinkspanPath, resource.HomeDir)

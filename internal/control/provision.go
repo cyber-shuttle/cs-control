@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
@@ -33,10 +34,10 @@ export LC_ALL LANG
 [ "$#" -eq 3 ]
 [ "$1" = csctl-provision ]
 shift
-workspace=$1
+home=$1
 linkspan=$2
-case "$workspace$linkspan" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
-env_dir="$workspace/.cybershuttle/jupyter-env"
+case "$home$linkspan" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
+env_dir="$home/.cybershuttle/jupyter-env"
 python="$env_dir/bin/python"
 imports='import ipykernel, jupyter_server, jupyter_server_terminals'
 
@@ -53,7 +54,7 @@ else
     uv="$HOME/.local/bin/uv"
   fi
   [ -x "$uv" ] || { printf '%s\n' 'error=uv-missing'; exit 72; }
-  install -d -m 700 "$workspace/.cybershuttle" || { printf '%s\n' 'error=workspace'; exit 73; }
+  install -d -m 700 "$home/.cybershuttle" || { printf '%s\n' 'error=home'; exit 73; }
   "$uv" venv --quiet --clear --python ` + provisionPythonVersion + ` "$env_dir" >/dev/null 2>&1 || {
     printf '%s\n' 'error=python'; exit 74; }
   "$uv" pip install --quiet --python "$python" jupyter-server ipykernel jupyter-server-terminals >/dev/null 2>&1 || {
@@ -91,7 +92,7 @@ var provisionFailures = map[string]string{
 	"uv-install":         "could not install uv, which builds the managed Jupyter environment",
 	"uv-missing":         "uv is not executable after installation",
 	"arguments":          "the host was given paths it could not use",
-	"workspace":          "could not create the .cybershuttle directory in the workspace",
+	"home":               "could not create the .cybershuttle directory in the account's home",
 	"python":             "could not create the Python " + provisionPythonVersion + " environment",
 	"jupyter":            "could not install Jupyter Server into the environment",
 	"jupyter-verify":     "the Jupyter environment is missing its own packages after installation",
@@ -105,13 +106,24 @@ var provisionFailures = map[string]string{
 // to it. A host that already has both is left untouched, so this costs one
 // round trip on every allocation after the first.
 func (s Service) provisionRuntime(ctx context.Context, alias string, prepared *preparedRuntime) error {
-	ctx, cancel := context.WithTimeout(ctx, provisionTimeout)
+	// One preparation per host at a time. A second caller is told to come back
+	// rather than made to wait behind an install it cannot see, and never runs
+	// a second uv against the environment the first one is building.
+	release, busy := hostPreparations.begin(alias)
+	if busy {
+		return apierr.New("runtime_provisioning_in_progress",
+			"The runtime environment on "+alias+" is still being prepared. Try again in a moment.", http.StatusConflict)
+	}
+	defer release()
+	// Installing an environment is the host's business, not this request's: a
+	// caller that goes away must not leave a half-built one behind.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionTimeout)
 	defer cancel()
 	s.runtimeStatus(prepared.runtime.ID, "Preparing the runtime environment")
 	remote := strings.Join([]string{
 		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-s"), sshexec.ShellQuote("--"),
 		sshexec.ShellQuote("csctl-provision"),
-		sshexec.ShellQuote(prepared.runtime.WorkspaceRoot), sshexec.ShellQuote(prepared.linkspan),
+		sshexec.ShellQuote(prepared.runtime.HomeDir), sshexec.ShellQuote(prepared.linkspan),
 	}, " ")
 	cmd, err := s.Runner.Command(ctx, alias, remote)
 	if err != nil {
@@ -144,6 +156,29 @@ func (s Service) provisionRuntime(ctx context.Context, alias string, prepared *p
 	}
 	s.runtimeStatus(prepared.runtime.ID, "Runtime environment ready")
 	return nil
+}
+
+// hostPreparations is process-wide because "is this host being prepared" is a
+// fact about the host, not about any one request.
+var hostPreparations = preparations{active: map[string]bool{}}
+
+type preparations struct {
+	mu     sync.Mutex
+	active map[string]bool
+}
+
+func (p *preparations) begin(alias string) (func(), bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.active[alias] {
+		return func() {}, true
+	}
+	p.active[alias] = true
+	return func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		delete(p.active, alias)
+	}, false
 }
 
 func provisionOutcome(output string) map[string]string {

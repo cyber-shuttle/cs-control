@@ -108,6 +108,9 @@ type Runtime struct {
 	Node          string          `json:"node,omitempty"`
 	PrivateRoot   string          `json:"privateRoot"`
 	WorkspaceRoot string          `json:"workspaceRoot"`
+	// The account's own home on this host. The interpreter a runtime starts is
+	// a tool of the account, not of the workspace it opens.
+	HomeDir string `json:"homeDir"`
 }
 
 type RuntimeList struct {
