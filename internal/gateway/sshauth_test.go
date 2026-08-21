@@ -596,6 +596,43 @@ func TestControlPathChangesForEveryEffectiveConfigurationSource(t *testing.T) {
 	}
 }
 
+// A second factor is answered on another device, so the connection carries
+// nothing while the person answers it. What keeps it open is the keep-alive.
+func TestPromptWaitKeepsTheConnectionAlive(t *testing.T) {
+	oldKeepAlive := authKeepAlive
+	authKeepAlive = 20 * time.Millisecond
+	defer func() { authKeepAlive = oldKeepAlive }()
+	service := newAuthTestService(t)
+	manager := NewSSHAuthManager(service)
+	defer manager.Close()
+	server := httptest.NewServer(serveSSHRoute(manager))
+	defer server.Close()
+
+	connection := dialAuthWithoutReading(t, server.URL)
+	defer connection.Close()
+	pings := make(chan struct{}, 4)
+	connection.SetPingHandler(func(string) error {
+		select {
+		case pings <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	// The helper is sitting at its password prompt: nothing else will arrive.
+	go func() {
+		for {
+			if _, _, err := connection.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-pings:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an idle prompt received no keep-alive")
+	}
+}
+
 func TestOwnedForegroundMasterShutdownDoesNotTouchForeignReplacement(t *testing.T) {
 	service := newAuthTestService(t)
 	t.Setenv("AUTH_HELPER_AUTO", "1")

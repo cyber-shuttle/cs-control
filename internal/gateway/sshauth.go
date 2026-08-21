@@ -41,6 +41,11 @@ const (
 
 var (
 	authWriteTimeout = 5 * time.Second
+	// Answering a second factor leaves this connection with nothing to carry for
+	// as long as the person takes, and an idle WebSocket is the first thing a
+	// proxy between the browser and here closes. The keep-alive is what makes a
+	// slow approval survive the wait.
+	authKeepAlive = 20 * time.Second
 )
 
 type authInputOp struct {
@@ -428,8 +433,14 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 
 	readiness := time.NewTicker(50 * time.Millisecond)
 	defer readiness.Stop()
+	keepAlive := time.NewTicker(authKeepAlive)
+	defer keepAlive.Stop()
 	for {
 		select {
+		case <-keepAlive.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(authWriteTimeout)); err != nil {
+				return
+			}
 		case data := <-output:
 			if err := writeBinary(conn, authWriteTimeout, data); err != nil {
 				return
