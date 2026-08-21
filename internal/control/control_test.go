@@ -148,6 +148,12 @@ case "$command" in
     [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ] || { echo 'scheduler temporarily unavailable' >&2; exit 1; }
     printf 'CANCELLED\n' > "$FAKE_STATUS"
     ;;
+  "sh -s -- csctl-provision "*)
+    cat > "${FAKE_PROVISION_LOG:-/dev/null}"
+    [ "${FAKE_PROVISION_FAIL:-0}" = 0 ] || { printf '%s\n' "${FAKE_PROVISION_REPORT:-error=jupyter}"; exit 75; }
+    printf '%s\n' "${FAKE_PROVISION_REPORT:-jupyter=present}"
+    printf 'linkspan=present\nprovision=complete\n'
+    ;;
   "printenv WORKSPACE") printf '%s\n' "${FAKE_WORKSPACE_ENV:-/scratch/tester}";;
   "printenv EMPTY") exit 1;;
   "printenv RELATIVE") printf 'relative/path\n';;

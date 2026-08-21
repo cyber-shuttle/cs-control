@@ -90,6 +90,15 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	}
 	s.runtimeStatus(request.ID, "Slurm validation passed")
 
+	// A host that has never run one of these has neither the interpreter the
+	// script starts nor the binary it execs. Both are installed before the job
+	// exists, so a bare host fails here with a reason rather than twenty
+	// seconds into an allocation.
+	if err := s.provisionRuntime(ctx, request.SSHHost, prepared); err != nil {
+		s.runtimeStatus(request.ID, "Runtime environment preparation failed")
+		return nil, err
+	}
+
 	var intent Runtime
 	var record devtunnel.Record
 	var transport string
@@ -375,7 +384,8 @@ func (s Service) prepareRuntimeAfterContract(ctx context.Context, request Create
 		JobName:         jobName(request.ID), PrivateRoot: privateRoot, WorkspaceRoot: workspaceRoot,
 	}
 	s.runtimeStatus(request.ID, "Runtime preparation complete")
-	return &preparedRuntime{request: request, runtime: runtime, script: buildScript(runtime, resolveRemoteExecutable(cfg.LinkspanPath, resource.HomeDir))}, nil
+	linkspan := resolveRemoteExecutable(cfg.LinkspanPath, resource.HomeDir)
+	return &preparedRuntime{request: request, runtime: runtime, script: buildScript(runtime, linkspan), linkspan: linkspan}, nil
 }
 
 func assignRuntimeID(request CreateRequest) (CreateRequest, error) {

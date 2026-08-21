@@ -109,7 +109,13 @@ broker, or token persistence/logging.
   failure.
 - The Linkspan path may be absolute or anchored at `$HOME/`, which discovery
   resolves per host, so one setting serves hosts whose accounts do not share a
-  home directory.
+  home directory. It defaults to `$HOME/.cybershuttle/bin/linkspan`.
+- Creating a runtime prepares the host first: one constant script, run on the
+  login node after Slurm validation and before any job exists, installs the
+  managed Jupyter environment under the workspace and the Linkspan release at
+  the resolved path when either is missing, and leaves a working host
+  untouched. A host that cannot be prepared is refused with the reason and
+  never receives a job.
 - Host entries the API creates live between the `cybershuttle managed`
   markers in `~/.ssh/config`, written atomically at mode `0600`. Everything
   outside those markers is read and never rewritten, and only a managed alias

@@ -158,6 +158,9 @@ type preparedRuntime struct {
 	request CreateRequest
 	runtime Runtime
 	script  string
+	// Where Linkspan belongs on this host, with any $HOME anchor already
+	// resolved, so provisioning and the script name the same file.
+	linkspan string
 }
 
 type commandResult struct {
@@ -170,6 +173,10 @@ type state struct {
 	Version  int                 `json:"version"`
 	Runtimes map[string]*Runtime `json:"runtimes"`
 }
+
+// DefaultLinkspanPath is where a runtime installs Linkspan when a host has
+// none: under the account's own home, which every account can write to.
+const DefaultLinkspanPath = "$HOME/.cybershuttle/bin/linkspan"
 
 type Config struct {
 	LinkspanPath string
@@ -196,7 +203,7 @@ func (s Service) SSHConfig() sshconfig.Config { return s.Runner.Hosts }
 func (s Service) effectiveConfig() Config {
 	cfg := s.Config
 	if !safeRemoteExecutable(cfg.LinkspanPath) {
-		cfg.LinkspanPath = "/usr/local/bin/linkspan"
+		cfg.LinkspanPath = DefaultLinkspanPath
 	}
 	if cfg.RuntimeBase == "" {
 		cfg.RuntimeBase = ".cybershuttle/runtimes"
