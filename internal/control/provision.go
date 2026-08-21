@@ -137,6 +137,11 @@ func (s Service) provisionRuntime(ctx context.Context, alias string, prepared *p
 			s.runtimeStatus(prepared.runtime.ID, "Installed "+installed.what)
 		}
 	}
+	// What the allocation is for travels with it: the workflow Linkspan runs is
+	// installed here, alongside the things it needs.
+	if err := s.installRuntimeWorkflow(ctx, alias, prepared.runtime); err != nil {
+		return err
+	}
 	s.runtimeStatus(prepared.runtime.ID, "Runtime environment ready")
 	return nil
 }

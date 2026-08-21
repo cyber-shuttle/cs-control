@@ -69,11 +69,16 @@ broker, or token persistence/logging.
   `POST /api/v1/runtimes/validate` returns the candidate script and Slurm
   validation result, and `POST /api/v1/runtimes` creates the reviewed
   allocation. Keep validation and create as OAuth-authenticated API actions.
-- The batch script starts Jupyter Server in the background and then execs
-  Linkspan with plain flags to host the allocation tunnel. Inject the Jupyter
-  identity token, the tunnel host token, and the allocation identity the tunnel
-  only assigns at creation (its ID, cluster, and generation-derived ports) with
-  fixed `sbatch --export` arguments. Validation and submission scripts must be
+- The batch script execs Linkspan and names no application. What runs inside
+  an allocation is the workflow's business: provisioning installs a per-runtime
+  workflow beside the allocation, and the script points Linkspan at it, so the
+  service starts through Linkspan once Linkspan is live. `shell.exec` runs
+  without a shell and expands nothing, so the workflow carries only validated
+  remote paths; the Jupyter identity token and port reach the server through
+  `JUPYTER_TOKEN` and `JUPYTER_PORT`, which it reads itself. Inject those, the
+  tunnel host token, and the allocation identity the tunnel only assigns at
+  creation (its ID, cluster, and generation-derived ports) with fixed
+  `sbatch --export` arguments. Validation and submission scripts must be
   byte-identical and contain no generated secret literal, so nothing that is
   unknown at review time may be written into the script text.
 - Create one creator-owned Dev Tunnel per allocation generation, declaring both

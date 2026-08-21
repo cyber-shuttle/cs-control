@@ -129,7 +129,7 @@ case "$command" in
     fi
     [ "${FAKE_VALIDATION_FAIL:-0}" = 0 ] || exit "${FAKE_VALIDATION_FAIL}"
     ;;
-  "sbatch --export=ALL,CS_JUPYTER_TOKEN="*"CS_TUNNEL_HOST_TOKEN="*" --parsable")
+  "sbatch --export=ALL,JUPYTER_TOKEN="*"CS_TUNNEL_HOST_TOKEN="*" --parsable")
     cat > "$FAKE_SCRIPT_LOG"
     [ -z "${FAKE_SUBMIT_STARTED:-}" ] || : > "$FAKE_SUBMIT_STARTED"
     while [ -n "${FAKE_SUBMIT_RELEASE:-}" ] && [ ! -e "$FAKE_SUBMIT_RELEASE" ]; do sleep .01; done
@@ -147,6 +147,10 @@ case "$command" in
     while [ -n "${FAKE_SCANCEL_RELEASE:-}" ] && [ ! -e "$FAKE_SCANCEL_RELEASE" ]; do sleep .01; done
     [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ] || { echo 'scheduler temporarily unavailable' >&2; exit 1; }
     printf 'CANCELLED\n' > "$FAKE_STATUS"
+    ;;
+  "sh -s -- csctl-runtime-workflow "*)
+    cat > "${FAKE_WORKFLOW_LOG:-/dev/null}"
+    [ "${FAKE_WORKFLOW_FAIL:-0}" = 0 ] || { echo 'workflow install failed' >&2; exit 1; }
     ;;
   "sh -s -- csctl-provision "*)
     cat > "${FAKE_PROVISION_LOG:-/dev/null}"
@@ -293,12 +297,14 @@ func TestRuntimeLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(script)
-	for _, expected := range []string{`LINKSPAN_BIN='/opt/cybershuttle/linkspan'`, `exec "$LINKSPAN_BIN" --port`} {
+	// The allocation runs Linkspan against a workflow. What that workflow starts
+	// is its own business, so the script names no service.
+	for _, expected := range []string{`LINKSPAN_BIN='/opt/cybershuttle/linkspan'`, `exec "$LINKSPAN_BIN" --port`, "--workflow '/home/tester/.cybershuttle/runtimes/rt-012345abcdef/workflow.yaml'"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("script missing %q:\n%s", expected, text)
 		}
 	}
-	for _, forbidden := range []string{"--workflow", "--managed-jupyter", "--runtime-id", "--remote-root", "--jupyter-python"} {
+	for _, forbidden := range []string{"jupyter", "python", "--managed-jupyter", "--runtime-id", "--remote-root"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("script retained service-specific flag %q:\n%s", forbidden, text)
 		}
