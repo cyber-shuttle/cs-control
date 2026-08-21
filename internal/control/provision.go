@@ -71,15 +71,19 @@ latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
 # every release under sort -V, so it does not count as a version at all. What is
 # published is always a release, so equal numbers mean the release has caught up
 # and takes over, whether what is installed is a build or the same release.
-installed=$(printf '%s' "$installed" | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9a-f]{7,40})?$' | cut -d. -f1-3)
+installed=$(printf '%s' "$installed" | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9a-f]{7,40})?$')
+numbers=$(printf '%s' "$installed" | cut -d. -f1-3)
 latest=$(printf '%s' "$latest" | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+$')
 keep=0
 if [ -n "$installed" ]; then
   if [ -z "$latest" ]; then
     # No published release to compare against; a working binary beats a guess.
     keep=1
-  elif [ "$installed" != "$latest" ] &&
-       [ "$(printf '%s\n%s\n' "$installed" "$latest" | sort -V | tail -1)" = "$installed" ]; then
+  elif [ "$numbers" != "$latest" ]; then
+    [ "$(printf '%s\n%s\n' "$numbers" "$latest" | sort -V | tail -1)" = "$numbers" ] && keep=1
+  elif [ "$installed" = "$numbers" ]; then
+    # The published release is already the one installed: nothing to fetch. A
+    # build ahead of it carries the commit that says so, and yields to it.
     keep=1
   fi
 fi
