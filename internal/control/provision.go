@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
+	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
@@ -105,7 +106,35 @@ var provisionFailures = map[string]string{
 // provisionRuntime makes a host able to run a runtime before one is submitted
 // to it. A host that already has both is left untouched, so this costs one
 // round trip on every allocation after the first.
+// PrepareHost makes a host ready to run runtimes without waiting for one to be
+// asked for. Selecting a host in the browser is the first moment anyone knows
+// it will be used, and it is minutes before the same person submits, so the
+// install happens then rather than inside a request someone is watching.
+func (s Service) PrepareHost(alias string, resource Resource) {
+	if !sshconfig.ValidAlias(alias) || !safeRemotePath(resource.HomeDir) {
+		return
+	}
+	linkspan := resolveRemoteExecutable(s.effectiveConfig().LinkspanPath, resource.HomeDir)
+	go func() {
+		// Nobody is waiting on this, so a failure is the next create's to report.
+		_ = s.prepareHostEnvironment(context.Background(), alias, resource.HomeDir, linkspan, "")
+	}()
+}
+
 func (s Service) provisionRuntime(ctx context.Context, alias string, prepared *preparedRuntime) error {
+	if err := s.prepareHostEnvironment(ctx, alias, prepared.runtime.HomeDir, prepared.linkspan, prepared.runtime.ID); err != nil {
+		return err
+	}
+	// What the allocation is for travels with it: the workflow Linkspan runs is
+	// installed here, alongside the things it needs.
+	if err := s.installRuntimeWorkflow(ctx, alias, prepared.runtime); err != nil {
+		return err
+	}
+	s.runtimeStatus(prepared.runtime.ID, "Runtime environment ready")
+	return nil
+}
+
+func (s Service) prepareHostEnvironment(ctx context.Context, alias, home, linkspan, statusID string) error {
 	// One preparation per host at a time. A second caller is told to come back
 	// rather than made to wait behind an install it cannot see, and never runs
 	// a second uv against the environment the first one is building.
@@ -119,11 +148,11 @@ func (s Service) provisionRuntime(ctx context.Context, alias string, prepared *p
 	// caller that goes away must not leave a half-built one behind.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionTimeout)
 	defer cancel()
-	s.runtimeStatus(prepared.runtime.ID, "Preparing the runtime environment")
+	s.runtimeStatus(statusID, "Preparing the runtime environment")
 	remote := strings.Join([]string{
 		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-s"), sshexec.ShellQuote("--"),
 		sshexec.ShellQuote("csctl-provision"),
-		sshexec.ShellQuote(prepared.runtime.HomeDir), sshexec.ShellQuote(prepared.linkspan),
+		sshexec.ShellQuote(home), sshexec.ShellQuote(linkspan),
 	}, " ")
 	cmd, err := s.Runner.Command(ctx, alias, remote)
 	if err != nil {
@@ -146,15 +175,9 @@ func (s Service) provisionRuntime(ctx context.Context, alias string, prepared *p
 		{"linkspan", "Linkspan"},
 	} {
 		if report[installed.key] == "installed" {
-			s.runtimeStatus(prepared.runtime.ID, "Installed "+installed.what)
+			s.runtimeStatus(statusID, "Installed "+installed.what)
 		}
 	}
-	// What the allocation is for travels with it: the workflow Linkspan runs is
-	// installed here, alongside the things it needs.
-	if err := s.installRuntimeWorkflow(ctx, alias, prepared.runtime); err != nil {
-		return err
-	}
-	s.runtimeStatus(prepared.runtime.ID, "Runtime environment ready")
 	return nil
 }
 

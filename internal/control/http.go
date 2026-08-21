@@ -147,7 +147,14 @@ func (a *HTTPAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
 // Abandoning the request cancels this context, which terminates the remote
 // process group, so there is no cancellation protocol to speak.
 func (a *HTTPAPI) discoverSlurm(request *http.Request) (Resource, error) {
-	return a.Service.Discover(request.Context(), request.PathValue("alias"))
+	alias := request.PathValue("alias")
+	resource, err := a.Service.Discover(request.Context(), alias)
+	if err == nil {
+		// Choosing a host is the first sign it will be used, and it is minutes
+		// before the same person submits: prepare it now, not inside that request.
+		a.Service.PrepareHost(alias, resource)
+	}
+	return resource, err
 }
 
 func (a *HTTPAPI) runtimeScript(request *http.Request) (*RuntimeScript, error) {

@@ -391,8 +391,9 @@ func skipANSIString(value []rune, start int, allowBEL bool) int {
 	return len(value)
 }
 
+// Work done for a host rather than for a runtime has no tail to write to.
 func (s Service) runtimeStatus(runtimeID, text string) {
-	if s.Logs != nil {
+	if s.Logs != nil && runtimeID != "" {
 		_ = s.Logs.Append(runtimeID, "status", text)
 	}
 }

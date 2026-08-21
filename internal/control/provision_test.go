@@ -1,9 +1,13 @@
 package control
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
@@ -83,4 +87,29 @@ func TestSecondCreateIsRefusedWhileTheHostIsBeingPrepared(t *testing.T) {
 	if _, err := service.Create(testTunnelContext(), createRequest()); err != nil {
 		t.Fatalf("create was still refused after preparation ended: %v", err)
 	}
+}
+
+// Choosing a host in the browser is the first moment anyone knows it will be
+// used, so the install starts then rather than inside the request that submits.
+func TestSelectingAHostPreparesItInTheBackground(t *testing.T) {
+	ssh, _, _, _ := fakeSSH(t)
+	provisionLog := filepath.Join(t.TempDir(), "provision")
+	t.Setenv("FAKE_PROVISION_LOG", provisionLog)
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Logs: NewRuntimeLogs()}
+	api := NewHTTPHandler(service, nil)
+	t.Cleanup(api.Close)
+
+	response := httptest.NewRecorder()
+	api.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/ssh/delta/slurm", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("discovery failed: %d %s", response.Code, response.Body.String())
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if script, err := os.ReadFile(provisionLog); err == nil && string(script) == provisionScript {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("selecting a host never prepared it")
 }
