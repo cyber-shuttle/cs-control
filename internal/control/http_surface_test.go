@@ -29,6 +29,7 @@ func TestHTTPRouteSurfaceRetainsOnlyRequiredControlOperations(t *testing.T) {
 		method string
 		path   string
 	}{
+		{http.MethodPost, "/api/v1/runtimes/script"},
 		{http.MethodPost, "/api/v1/runtimes/validate"},
 		{http.MethodPost, "/api/v1/runtimes"},
 		{http.MethodGet, "/api/v1/runtimes"},

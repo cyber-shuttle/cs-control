@@ -32,6 +32,19 @@ func (s Service) Validate(ctx context.Context, request CreateRequest) (*Validati
 	return validationResult(prepared, result), nil
 }
 
+// Script is the reviewed script before Slurm has seen it, so a caller can read
+// what is about to be validated while the validation runs.
+func (s Service) Script(ctx context.Context, request CreateRequest) (*RuntimeScript, error) {
+	if request.IdempotencyKey == "" {
+		return nil, apierr.New("invalid_idempotency_key", "idempotencyKey is required for runtime validation", 400)
+	}
+	prepared, err := s.prepareRuntime(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &RuntimeScript{RuntimeID: prepared.runtime.ID, Script: prepared.script}, nil
+}
+
 func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, error) {
 	var err error
 	request, err = assignRuntimeID(request)

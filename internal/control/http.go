@@ -82,6 +82,7 @@ func (a *HTTPAPI) mux() *http.ServeMux {
 		"/api/v1/ssh/{alias}/slurm":    {http.MethodGet: answer(http.StatusOK, a.discoverSlurm)},
 		"/api/v1/ssh/{alias}/test":     {http.MethodPost: answer(http.StatusOK, a.testHost)},
 		"/api/v1/runtimes":             {http.MethodGet: answer(http.StatusOK, a.listRuntimes), http.MethodPost: answer(http.StatusCreated, a.createRuntime)},
+		"/api/v1/runtimes/script":      {http.MethodPost: answer(http.StatusOK, a.runtimeScript)},
 		"/api/v1/runtimes/validate":    {http.MethodPost: answer(http.StatusOK, a.validateRuntime)},
 		"/api/v1/runtimes/{id}":        {http.MethodGet: answer(http.StatusOK, a.getRuntime), http.MethodDelete: answer(http.StatusOK, a.deleteRuntime)},
 		"/api/v1/runtimes/{id}/stop":   {http.MethodPost: answer(http.StatusOK, a.stopRuntime)},
@@ -147,6 +148,14 @@ func (a *HTTPAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
 // process group, so there is no cancellation protocol to speak.
 func (a *HTTPAPI) discoverSlurm(request *http.Request) (Resource, error) {
 	return a.Service.Discover(request.Context(), request.PathValue("alias"))
+}
+
+func (a *HTTPAPI) runtimeScript(request *http.Request) (*RuntimeScript, error) {
+	var create CreateRequest
+	if err := decodeJSON(request, &create); err != nil {
+		return nil, err
+	}
+	return a.Service.Script(request.Context(), create)
 }
 
 func (a *HTTPAPI) validateRuntime(request *http.Request) (*ValidationResult, error) {

@@ -138,6 +138,13 @@ type RuntimeJupyterAccess struct {
 	Token string `json:"token"`
 }
 
+// RuntimeScript is the candidate script alone. Validation returns the same text
+// with Slurm's answer; this is what the caller can read before that answer.
+type RuntimeScript struct {
+	RuntimeID string `json:"runtimeId"`
+	Script    string `json:"script"`
+}
+
 type ValidationResult struct {
 	RuntimeID string `json:"runtimeId"`
 	Script    string `json:"script"`

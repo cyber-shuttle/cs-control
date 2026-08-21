@@ -38,6 +38,28 @@ func TestBuildScriptStartsJupyterThenHostsTheTunnel(t *testing.T) {
 	}
 }
 
+// The script a caller reads before validation is the one Slurm is then asked
+// about, and asking for it runs no sbatch at all.
+func TestScriptPreviewMatchesValidationAndRunsNoSbatch(t *testing.T) {
+	ssh, _, _, commandLog := fakeSSH(t)
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
+	request := createRequest()
+	preview, err := service.Script(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commands, _ := os.ReadFile(commandLog); strings.Contains(string(commands), "sbatch") {
+		t.Fatalf("script preview reached sbatch:\n%s", commands)
+	}
+	validated, err := service.Validate(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Script != validated.Script || preview.RuntimeID != validated.RuntimeID {
+		t.Fatalf("preview differs from what was validated:\n%s\n%s", preview.Script, validated.Script)
+	}
+}
+
 func TestCreateRevalidatesExactScriptBeforeSubmit(t *testing.T) {
 	ssh, _, scriptLog, commandLog := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
