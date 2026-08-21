@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/cyber-shuttle/cs-control/internal/control"
@@ -64,34 +62,4 @@ func TestServeComponentsAlwaysApplyOAuthBoundary(t *testing.T) {
 	if hostileResponse.Code != http.StatusForbidden {
 		t.Fatalf("production handler hostile origin = %d", hostileResponse.Code)
 	}
-}
-
-func captureOutput(fn func() error) ([]byte, []byte, error) {
-	oldStdout, oldStderr := os.Stdout, os.Stderr
-	stdoutReader, stdoutWriter, err := os.Pipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	stderrReader, stderrWriter, err := os.Pipe()
-	if err != nil {
-		_ = stdoutReader.Close()
-		_ = stdoutWriter.Close()
-		return nil, nil, err
-	}
-	os.Stdout, os.Stderr = stdoutWriter, stderrWriter
-	defer func() { os.Stdout, os.Stderr = oldStdout, oldStderr }()
-	runErr := fn()
-	_ = stdoutWriter.Close()
-	_ = stderrWriter.Close()
-	stdout, stdoutErr := io.ReadAll(stdoutReader)
-	stderr, stderrErr := io.ReadAll(stderrReader)
-	_ = stdoutReader.Close()
-	_ = stderrReader.Close()
-	if stdoutErr != nil {
-		return stdout, stderr, stdoutErr
-	}
-	if stderrErr != nil {
-		return stdout, stderr, stderrErr
-	}
-	return stdout, stderr, runErr
 }

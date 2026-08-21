@@ -187,8 +187,7 @@ type Config struct {
 }
 
 type Store struct {
-	Dir      string
-	saveHook func(*state) error
+	Dir string
 }
 
 type Service struct {
@@ -221,10 +220,6 @@ var (
 	errRouteNotFound    = apierr.New("not_found", "route not found", 404)
 	errMethodNotAllowed = apierr.New("method_not_allowed", "method not allowed", 405)
 )
-
-const restartRecoveryAttempts = 4
-
-var restartRecoveryDelay = 50 * time.Millisecond
 
 // Everything that answers a caller returns one of these, so no response shares
 // memory with the state the lock protects.

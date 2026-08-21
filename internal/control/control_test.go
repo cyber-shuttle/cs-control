@@ -148,7 +148,7 @@ case "$command" in
     [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ] || { echo 'scheduler temporarily unavailable' >&2; exit 1; }
     printf 'CANCELLED\n' > "$FAKE_STATUS"
     ;;
-  "sh -s -- csctl-runtime-workflow "*)
+  "sh -c "*"csctl-runtime-workflow "*)
     cat > "${FAKE_WORKFLOW_LOG:-/dev/null}"
     [ "${FAKE_WORKFLOW_FAIL:-0}" = 0 ] || { echo 'workflow install failed' >&2; exit 1; }
     ;;

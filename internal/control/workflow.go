@@ -60,13 +60,12 @@ func runtimeWorkflowPath(runtime Runtime) string {
 	return strings.TrimSuffix(runtime.PrivateRoot, "/") + "/workflow.yaml"
 }
 
-// workflowInstallScript is intentionally constant. The destination arrives as an
-// argument and the document on standard input, so nothing is interpolated into
-// the remote shell program.
+// workflowInstallScript is intentionally constant. It travels as an argument
+// rather than on standard input, because standard input carries the document it
+// installs. The destination is its own argument, so nothing is interpolated
+// into the remote shell program.
 const workflowInstallScript = `set -eu
-[ "$#" -eq 2 ]
-[ "$1" = csctl-runtime-workflow ]
-shift
+[ "$#" -eq 1 ]
 path=$1
 case "$path" in /*) ;; *) exit 70 ;; esac
 umask 077
@@ -83,8 +82,10 @@ mv -f "$staged" "$path"
 func (s Service) installRuntimeWorkflow(ctx context.Context, alias string, runtime Runtime) error {
 	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
 	defer cancel()
+	// The script travels as an argument because standard input carries the
+	// document it installs.
 	remote := strings.Join([]string{
-		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-s"), sshexec.ShellQuote("--"),
+		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-c"), sshexec.ShellQuote(workflowInstallScript),
 		sshexec.ShellQuote("csctl-runtime-workflow"), sshexec.ShellQuote(runtimeWorkflowPath(runtime)),
 	}, " ")
 	cmd, err := s.Runner.Command(ctx, alias, remote)
@@ -92,7 +93,8 @@ func (s Service) installRuntimeWorkflow(ctx context.Context, alias string, runti
 		return err
 	}
 	cmd.Stdin = strings.NewReader(runtimeWorkflow(runtime))
-	if _, errText, runErr := sshexec.RunBounded(ctx, cmd); runErr != nil {
+	_, errText, runErr := sshexec.RunBounded(ctx, cmd)
+	if runErr != nil {
 		message := strings.TrimSpace(errText)
 		if message == "" {
 			message = runErr.Error()

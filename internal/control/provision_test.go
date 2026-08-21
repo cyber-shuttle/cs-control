@@ -13,8 +13,10 @@ import (
 // starts nor the binary it execs, so creating one installs both first.
 func TestCreateProvisionsABareHost(t *testing.T) {
 	ssh, _, _, _ := fakeSSH(t)
-	provisionLog := t.TempDir() + "/provision"
+	dir := t.TempDir()
+	provisionLog, workflowLog := dir+"/provision", dir+"/workflow"
 	t.Setenv("FAKE_PROVISION_LOG", provisionLog)
+	t.Setenv("FAKE_WORKFLOW_LOG", workflowLog)
 	t.Setenv("FAKE_PROVISION_REPORT", "uv=installed")
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Logs: NewRuntimeLogs()}
 	configureTestTunnel(t, &service)
@@ -27,6 +29,13 @@ func TestCreateProvisionsABareHost(t *testing.T) {
 	script, err := os.ReadFile(provisionLog)
 	if err != nil || string(script) != provisionScript {
 		t.Fatalf("host did not receive the provisioning script: %v", err)
+	}
+	// The workflow install reads its document from standard input while the
+	// script it runs travels as an argument, so what lands on the host is the
+	// document rather than the script that writes it.
+	document, err := os.ReadFile(workflowLog)
+	if err != nil || string(document) != runtimeWorkflow(*created) {
+		t.Fatalf("host did not receive the workflow document: %v\n%s", err, document)
 	}
 	status := []string{}
 	tail, _ := service.Logs.Tail(created.ID)

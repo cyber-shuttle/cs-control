@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 	"sync"
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
 // Two downloads is not a scheduler round trip, so this gets its own budget
@@ -99,19 +100,6 @@ var provisionFailures = map[string]string{
 // workflow that allocation will run. The runtime is the durable one: its
 // workflow names the ports this generation was given.
 func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Runtime, linkspan string) error {
-	if err := s.prepareHostEnvironment(ctx, alias, runtime.HomeDir, linkspan, runtime.ID); err != nil {
-		return err
-	}
-	// What the allocation is for travels with it: the workflow Linkspan runs is
-	// installed here, alongside the binaries it needs.
-	if err := s.installRuntimeWorkflow(ctx, alias, runtime); err != nil {
-		return err
-	}
-	s.runtimeStatus(runtime.ID, "Runtime environment ready")
-	return nil
-}
-
-func (s Service) prepareHostEnvironment(ctx context.Context, alias, home, linkspan, statusID string) error {
 	// One preparation per host at a time. A second caller is told to come back
 	// rather than made to wait behind an install it cannot see, and never runs
 	// a second uv against the environment the first one is building.
@@ -125,11 +113,10 @@ func (s Service) prepareHostEnvironment(ctx context.Context, alias, home, linksp
 	// caller that goes away must not leave a half-built one behind.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionTimeout)
 	defer cancel()
-	s.runtimeStatus(statusID, "Preparing the runtime environment")
+	s.runtimeStatus(runtime.ID, "Preparing the runtime environment")
 	remote := strings.Join([]string{
 		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-s"), sshexec.ShellQuote("--"),
-		sshexec.ShellQuote("csctl-provision"),
-		sshexec.ShellQuote(home), sshexec.ShellQuote(linkspan),
+		sshexec.ShellQuote("csctl-provision"), sshexec.ShellQuote(runtime.HomeDir), sshexec.ShellQuote(linkspan),
 	}, " ")
 	cmd, err := s.Runner.Command(ctx, alias, remote)
 	if err != nil {
@@ -152,9 +139,15 @@ func (s Service) prepareHostEnvironment(ctx context.Context, alias, home, linksp
 		{"linkspan", "Linkspan"},
 	} {
 		if report[installed.key] == "installed" {
-			s.runtimeStatus(statusID, "Installed "+installed.what)
+			s.runtimeStatus(runtime.ID, "Installed "+installed.what)
 		}
 	}
+	// What the allocation is for travels with it: the workflow Linkspan runs is
+	// installed here, alongside the binaries it needs.
+	if err := s.installRuntimeWorkflow(ctx, alias, runtime); err != nil {
+		return err
+	}
+	s.runtimeStatus(runtime.ID, "Runtime environment ready")
 	return nil
 }
 
