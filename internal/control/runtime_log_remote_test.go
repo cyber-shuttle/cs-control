@@ -87,7 +87,7 @@ func TestCollectStartingRuntimeLogsOneReadPerHostFourRuntimeCapAndTerminalStop(t
 			t.Errorf("capped read missing %s: %s", id, lines[0])
 		}
 		tail, ok := service.Logs.Tail(id)
-		if !ok || len(tail.Lines) != 2 || tail.Lines[0] != (RuntimeLogLine{Stream: "stdout", Text: "hello"}) || tail.Lines[1] != (RuntimeLogLine{Stream: "stderr", Text: "warning"}) {
+		if !ok || len(tail.Lines) != 2 || !sameLogLine(tail.Lines[0], "stdout", "hello") || !sameLogLine(tail.Lines[1], "stderr", "warning") {
 			t.Errorf("merged sanitized tail for %s = %#v", id, tail)
 		}
 	}
@@ -125,7 +125,7 @@ func TestRuntimeLogsMergeRemoteReplacesTheStoredTail(t *testing.T) {
 	if !ok || len(tail.Lines) != 5 {
 		t.Fatalf("replaced tail = %#v", tail)
 	}
-	if tail.Lines[2].Text != "three" || tail.Lines[4] != (RuntimeLogLine{Stream: "stderr", Text: "next"}) {
+	if tail.Lines[2].Text != "three" || !sameLogLine(tail.Lines[4], "stderr", "next") {
 		t.Fatalf("unexpected replaced tail: %#v", tail.Lines)
 	}
 }
@@ -146,4 +146,8 @@ func TestRuntimeLogsKeepsNarrationAheadOfTheRemoteTail(t *testing.T) {
 	if len(tail.Lines) != 3 || tail.Lines[0].Stream != "status" || tail.Lines[0].Text != "Runtime is queued" {
 		t.Fatalf("narration lost after remote replacement: %#v", tail.Lines)
 	}
+}
+
+func sameLogLine(line RuntimeLogLine, stream, text string) bool {
+	return line.Stream == stream && line.Text == text && !line.At.IsZero()
 }

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -28,9 +29,12 @@ var (
 )
 
 // RuntimeLogLine is one sanitized, browser-safe line of runtime startup output.
+// The time is when the line was observed here, which is what an owner reading a
+// stalled allocation needs: how long ago it last said anything.
 type RuntimeLogLine struct {
-	Stream string `json:"stream"`
-	Text   string `json:"text"`
+	Stream string    `json:"stream"`
+	Text   string    `json:"text"`
+	At     time.Time `json:"at"`
 }
 
 // RuntimeLogTail is the complete current process-local tail for one runtime.
@@ -60,6 +64,7 @@ type RuntimeLogs struct {
 	tails     map[string]*runtimeLogBuffer
 	sensitive map[string][]string
 	cursors   map[string]int
+	Now       func() time.Time
 }
 
 func NewRuntimeLogs() *RuntimeLogs {
@@ -68,6 +73,13 @@ func NewRuntimeLogs() *RuntimeLogs {
 		sensitive: make(map[string][]string),
 		cursors:   make(map[string]int),
 	}
+}
+
+func (l *RuntimeLogs) now() time.Time {
+	if l.Now != nil {
+		return l.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // Forget drops a deleted runtime's tail so a reused process does not keep
@@ -104,7 +116,7 @@ func (l *RuntimeLogs) Append(runtimeID, stream, text string) error {
 	defer l.mu.Unlock()
 	buffer := l.bufferLocked(runtimeID)
 	for _, line := range lines {
-		entry := RuntimeLogLine{Stream: stream, Text: line}
+		entry := RuntimeLogLine{Stream: stream, Text: line, At: l.now()}
 		if len(buffer.status) > 0 && buffer.status[len(buffer.status)-1] == entry {
 			continue
 		}
@@ -135,7 +147,7 @@ func (l *RuntimeLogs) MergeRemote(runtimeID, stdout, stderr string) error {
 			text = stderr
 		}
 		for _, line := range sanitizedRuntimeLogLines(text, sensitive) {
-			remote = append(remote, RuntimeLogLine{Stream: stream, Text: line})
+			remote = append(remote, RuntimeLogLine{Stream: stream, Text: line, At: l.now()})
 		}
 	}
 	if len(remote) > maxRuntimeLogLines {

@@ -76,9 +76,11 @@ func NewHTTPHandler(service Service, auth SSHAuthRoute) *HTTPAPI {
 func (a *HTTPAPI) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, handlers := range map[string]map[string]http.HandlerFunc{
-		"/api/v1/ssh":                  {http.MethodGet: answer(http.StatusOK, a.listHosts)},
+		"/api/v1/ssh":                  {http.MethodGet: answer(http.StatusOK, a.listHosts), http.MethodPost: answer(http.StatusCreated, a.addHost)},
+		"/api/v1/ssh/{alias}":          {http.MethodDelete: answer(http.StatusOK, a.removeHost)},
 		"/api/v1/ssh/{alias}/auth":     {http.MethodGet: requireUpgrade("SSH authentication requires a WebSocket", a.sshAuth)},
 		"/api/v1/ssh/{alias}/slurm":    {http.MethodGet: answer(http.StatusOK, a.discoverSlurm)},
+		"/api/v1/ssh/{alias}/test":     {http.MethodPost: answer(http.StatusOK, a.testHost)},
 		"/api/v1/runtimes":             {http.MethodGet: answer(http.StatusOK, a.listRuntimes), http.MethodPost: answer(http.StatusCreated, a.createRuntime)},
 		"/api/v1/runtimes/validate":    {http.MethodPost: answer(http.StatusOK, a.validateRuntime)},
 		"/api/v1/runtimes/{id}":        {http.MethodGet: answer(http.StatusOK, a.getRuntime), http.MethodDelete: answer(http.StatusOK, a.deleteRuntime)},
@@ -115,6 +117,22 @@ func answer[T any](status int, produce func(*http.Request) (T, error)) http.Hand
 func (a *HTTPAPI) listHosts(*http.Request) (sshconfig.HostList, error) {
 	hosts, err := a.Service.SSHConfig().List()
 	return sshconfig.HostList{Hosts: hosts}, err
+}
+
+func (a *HTTPAPI) addHost(request *http.Request) (sshconfig.Host, error) {
+	var add AddHostRequest
+	if err := decodeJSON(request, &add); err != nil {
+		return sshconfig.Host{}, err
+	}
+	return a.Service.AddHost(add)
+}
+
+func (a *HTTPAPI) removeHost(request *http.Request) (sshconfig.Host, error) {
+	return a.Service.RemoveHost(request.PathValue("alias"))
+}
+
+func (a *HTTPAPI) testHost(request *http.Request) (HostTest, error) {
+	return a.Service.TestHost(request.Context(), request.PathValue("alias"))
 }
 
 func (a *HTTPAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {

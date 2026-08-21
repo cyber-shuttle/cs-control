@@ -48,7 +48,7 @@ func TestRuntimeLogsSanitizeAndSplit(t *testing.T) {
 				t.Fatalf("tail = %#v, want %q", tail, test.want)
 			}
 			for i, want := range test.want {
-				if tail.Lines[i] != (RuntimeLogLine{Stream: "stdout", Text: want}) {
+				if !sameLogLine(tail.Lines[i], "stdout", want) {
 					t.Fatalf("line %d = %#v, want %q", i, tail.Lines[i], want)
 				}
 			}

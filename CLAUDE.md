@@ -14,7 +14,7 @@ layer that can hold it, and never introduce an upward import.
 ```
 apierr  safeio  proc                  error shape, private files, process groups
 httpx                                 bounded client/body, HTTPS base-URL policy, JSON writers
-sshconfig                             reads ~/.ssh/config; never writes it, never runs ssh
+sshconfig                             reads ~/.ssh/config, writes only its own managed block, never runs ssh
 sshexec                               argument vectors, control socket, bounded output
 devtunnel                             Dev Tunnels management client and its URI/host policy
 authn                                 OAuth boundary, OIDC validation, device-code broker
@@ -107,6 +107,12 @@ broker, or token persistence/logging.
   again, so there is no restart path to keep consistent with create.
 - Tunnel expiry is the final cleanup backstop after ungraceful process or job
   failure.
+- Host entries the API creates live between the `cybershuttle managed`
+  markers in `~/.ssh/config`, written atomically at mode `0600`. Everything
+  outside those markers is read and never rewritten, and only a managed alias
+  may be removed. A pasted ssh command is parsed server-side into host, user,
+  port, identity, and an allowlisted set of `-o` options; anything that can run
+  a local program or include more configuration is refused.
 - The CLI exposes only `serve`, `help`, and `version`. Runtime and SSH
   operations use the OAuth-authenticated API; do not add delegated-token argv
   flags.
