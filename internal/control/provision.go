@@ -66,16 +66,24 @@ installed=""
 [ -x "$linkspan" ] && installed=$("$linkspan" --version 2>/dev/null | head -1 | tr -d 'v \r')
 latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
   https://github.com/cyber-shuttle/linkspan/releases/latest 2>/dev/null | sed 's#.*/##' | tr -d 'v \r')
+# A version is X.Y.Z or X.Y.Z.pre and nothing else. Anything else -- an
+# unversioned build above all else -- sorts above every release under sort -V,
+# which would make it permanent, so it does not count as a version at all.
+shaped() {
+  printf '%s' "${1%.pre}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+}
+prerelease() { [ "${1%.pre}" != "$1" ]; }
 keep=0
-# Only a plain version number can win: an unversioned build ("dev") sorts above
-# every release under sort -V, which would make it permanent.
-case "$installed" in ''|*[!0-9.]*) installed="" ;; esac
+shaped "$installed" || installed=""
+shaped "$latest" || latest=""
 if [ -n "$installed" ]; then
   if [ -z "$latest" ]; then
     # Nothing to compare against; a working binary is worth more than a guess.
     keep=1
-  elif [ "$installed" != "$latest" ] &&
-       [ "$(printf '%s\n%s\n' "$installed" "$latest" | sort -V | tail -1)" = "$installed" ]; then
+  elif [ "${installed%.pre}" != "${latest%.pre}" ]; then
+    [ "$(printf '%s\n%s\n' "${installed%.pre}" "${latest%.pre}" | sort -V | tail -1)" = "${installed%.pre}" ] && keep=1
+  elif ! prerelease "$installed" && prerelease "$latest"; then
+    # Same numbers: the release outranks its own pre-release, either way round.
     keep=1
   fi
 fi
