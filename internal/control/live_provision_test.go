@@ -31,18 +31,19 @@ func TestLiveProvisionPreparesABareHost(t *testing.T) {
 		},
 		Logs: NewRuntimeLogs(),
 	}
-	prepared := &preparedRuntime{
-		runtime:  Runtime{RuntimeResponse: RuntimeResponse{ID: "rt-0123456789ab"}, WorkspaceRoot: root},
-		linkspan: root + "/bin/linkspan",
+	runtime := Runtime{
+		RuntimeResponse: RuntimeResponse{ID: "rt-0123456789ab", Generation: "g-0123456789abcdef"},
+		PrivateRoot:     root + "/private", WorkspaceRoot: root, HomeDir: root,
 	}
-	if err := service.provisionRuntime(context.Background(), alias, prepared); err != nil {
+	linkspan := root + "/bin/linkspan"
+	if err := service.provisionRuntime(context.Background(), alias, runtime, linkspan); err != nil {
 		t.Fatalf("bare host was not prepared: %v", err)
 	}
 	// Again: what is already there is left alone rather than rebuilt.
-	if err := service.provisionRuntime(context.Background(), alias, prepared); err != nil {
+	if err := service.provisionRuntime(context.Background(), alias, runtime, linkspan); err != nil {
 		t.Fatalf("prepared host was not left alone: %v", err)
 	}
-	tail, _ := service.Logs.Tail(prepared.runtime.ID)
+	tail, _ := service.Logs.Tail(runtime.ID)
 	said := []string{}
 	for _, line := range tail.Lines {
 		said = append(said, line.Text)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
@@ -11,29 +12,48 @@ import (
 )
 
 // The allocation runs Linkspan; Linkspan runs this. Everything an allocation is
-// for lives here rather than in the batch script, which names no application.
+// for lives here rather than in the batch script, which names no application:
+// the environment is built, its dependencies are installed, the server is
+// started, and nothing calls the runtime usable until the server answers.
 //
-// Linkspan starts the workflow once its listener is bound, so the server below
-// comes up behind a Linkspan that is already live. shell.exec runs without a
-// shell and splits on whitespace, and it expands nothing: every path here is a
-// validated remote path, and the token and port Jupyter Server needs reach it
+// shell.exec runs each command without a shell, splits it on whitespace, and
+// expands nothing, so every path is a validated remote path, every port is the
+// one this runtime was given, and the token Jupyter Server needs reaches it
 // through the environment Linkspan inherits from the job.
 func runtimeWorkflow(runtime Runtime) string {
-	command := strings.Join([]string{
-		jupyterPython(runtime), "-m", "jupyter_server",
-		"--no-browser", "--ip=127.0.0.1",
-		"--ServerApp.root_dir=" + runtime.WorkspaceRoot,
-		"--ServerApp.allow_origin=*",
-	}, " ")
-	return strings.Join([]string{
-		"name: cs-runtime",
-		"steps:",
-		"  - action: shell.exec",
-		"    name: Start Jupyter Server",
-		"    params:",
-		"      command: " + fmt.Sprintf("%q", command),
-		"",
-	}, "\n")
+	uv := strings.TrimSuffix(runtime.HomeDir, "/") + "/.local/bin/uv"
+	env := jupyterEnvironment(runtime.HomeDir)
+	python := jupyterPython(runtime)
+	port := strconv.Itoa(int(allocationPorts(runtime.ID, runtime.Generation).jupyter))
+	steps := []struct{ name, command string }{
+		{"Create the Python environment", strings.Join([]string{
+			uv, "venv", "--quiet", "--allow-existing", "--python", provisionPythonVersion, env}, " ")},
+		{"Install the server", strings.Join([]string{
+			uv, "pip", "install", "--quiet", "--python", python,
+			"jupyter-server", "ipykernel", "jupyter-server-terminals"}, " ")},
+		// setsid returns as soon as it has forked, so the server outlives this
+		// step and the step after it can wait for the server rather than for it.
+		{"Start Jupyter Server", strings.Join([]string{
+			"setsid", "--fork", python, "-m", "jupyter_server",
+			"--no-browser", "--ip=127.0.0.1",
+			"--ServerApp.root_dir=" + runtime.WorkspaceRoot,
+			"--ServerApp.allow_origin=*"}, " ")},
+		// An answer of any kind means the server is listening; which answer it
+		// is depends on a token this file is not allowed to hold.
+		{"Wait for Jupyter Server", strings.Join([]string{
+			"curl", "--silent", "--show-error", "--output", "/dev/null",
+			"--retry", "90", "--retry-delay", "2", "--retry-connrefused",
+			"--max-time", "10", "http://127.0.0.1:" + port + "/api/status"}, " ")},
+	}
+	document := []string{"name: cs-runtime", "steps:"}
+	for _, step := range steps {
+		document = append(document,
+			"  - action: shell.exec",
+			"    name: "+step.name,
+			"    params:",
+			"      command: "+fmt.Sprintf("%q", step.command))
+	}
+	return strings.Join(append(document, ""), "\n")
 }
 
 func runtimeWorkflowPath(runtime Runtime) string {

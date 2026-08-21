@@ -155,7 +155,7 @@ case "$command" in
   "sh -s -- csctl-provision "*)
     cat > "${FAKE_PROVISION_LOG:-/dev/null}"
     [ "${FAKE_PROVISION_FAIL:-0}" = 0 ] || { printf '%s\n' "${FAKE_PROVISION_REPORT:-error=jupyter}"; exit 75; }
-    printf '%s\n' "${FAKE_PROVISION_REPORT:-jupyter=present}"
+    printf '%s\n' "${FAKE_PROVISION_REPORT:-uv=present}"
     printf 'linkspan=present\nprovision=complete\n'
     ;;
   "printenv WORKSPACE") printf '%s\n' "${FAKE_WORKSPACE_ENV:-/scratch/tester}";;

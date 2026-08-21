@@ -62,9 +62,21 @@ func TestRuntimeWorkflowStartsJupyterWithoutSecretsOrExpansion(t *testing.T) {
 			t.Fatalf("workflow names %q, which it cannot resolve:\n%s", forbidden, document)
 		}
 	}
-	command := strings.SplitN(strings.SplitN(document, "command: ", 2)[1], "\n", 2)[0]
-	if strings.Count(command, `"`) != 2 {
-		t.Fatalf("workflow command is not one quoted scalar: %s", command)
+	for _, command := range strings.Split(document, "command: ")[1:] {
+		if strings.Count(strings.SplitN(command, "\n", 2)[0], `"`) != 2 {
+			t.Fatalf("workflow command is not one quoted scalar: %s", command)
+		}
+	}
+	// The allocation builds what it needs, starts it, and waits for it, in that
+	// order: a runtime is not usable until the server answers.
+	order := []string{"venv", "pip install", "setsid --fork", "/api/status"}
+	at := -1
+	for _, step := range order {
+		next := strings.Index(document, step)
+		if next <= at {
+			t.Fatalf("workflow does not build, start and then wait: %s\n%s", step, document)
+		}
+		at = next
 	}
 }
 

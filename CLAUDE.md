@@ -115,10 +115,13 @@ broker, or token persistence/logging.
 - The Linkspan path may be absolute or anchored at `$HOME/`, which discovery
   resolves per host, so one setting serves hosts whose accounts do not share a
   home directory. It defaults to `$HOME/.cybershuttle/bin/linkspan`.
-- Creating a runtime prepares the host first: one constant script, run on the
-  login node after Slurm validation and before any job exists, installs the
-  managed Jupyter environment and the Linkspan release when either is missing,
-  and leaves a working host untouched. Both belong to the account, not to a
+- An allocation prepares itself. The login node supplies only the two binaries
+  a job cannot start without -- the Linkspan release it execs and uv, both
+  single downloads that take seconds -- installed by one constant script during
+  create, after the runtime is durable so its progress streams into the tail
+  the browser polls. The environment, its dependencies, the server, and the
+  wait for that server to answer all happen inside the allocation, through the
+  workflow Linkspan runs. Both binaries belong to the account, not to a
   workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens.
   Preparation starts when a host is selected -- the discovery route begins it in
   the background, minutes before the same person submits -- and outlives the

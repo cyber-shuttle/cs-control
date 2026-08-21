@@ -9,13 +9,12 @@ import (
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
-// Installing an interpreter and a release archive is not a scheduler round
-// trip, so provisioning gets its own budget rather than the SSH default.
-const provisionTimeout = 15 * time.Minute
+// Two downloads is not a scheduler round trip, so this gets its own budget
+// rather than the SSH default.
+const provisionTimeout = 5 * time.Minute
 
 // The interpreter the managed Jupyter environment is built on. Jupyter Server
 // requires 3.10 or newer, and uv supplies the version rather than the host.
@@ -28,6 +27,15 @@ const provisionPythonVersion = "3.12"
 // It is the same install every time: present and working is left alone, absent
 // or broken is replaced, and each outcome is reported as one line the caller
 // turns into runtime status.
+// provisionScript is intentionally constant. The home and the Linkspan path
+// arrive as arguments, so nothing derived from a request is ever written into
+// the remote shell program.
+//
+// It installs the two binaries an allocation needs before it can run: Linkspan,
+// which the job execs, and uv, which the workflow inside the job builds the
+// environment with. Everything else -- the environment, its dependencies, the
+// server -- belongs to the allocation and happens through Linkspan. Both are
+// single downloads, so this stays a matter of seconds.
 const provisionScript = `set -u
 LC_ALL=C
 LANG=C
@@ -38,30 +46,15 @@ shift
 home=$1
 linkspan=$2
 case "$home$linkspan" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
-env_dir="$home/.cybershuttle/jupyter-env"
-python="$env_dir/bin/python"
-imports='import ipykernel, jupyter_server, jupyter_server_terminals'
 
-if [ -x "$python" ] && "$python" -c "$imports" >/dev/null 2>&1; then
-  printf '%s\n' 'jupyter=present'
+uv="$home/.local/bin/uv"
+if [ -x "$uv" ] || command -v uv >/dev/null 2>&1; then
+  printf '%s\n' 'uv=present'
 else
-  uv=""
-  for candidate in "$HOME/.local/bin/uv" "$(command -v uv 2>/dev/null)"; do
-    if [ -n "$candidate" ] && [ -x "$candidate" ]; then uv=$candidate; break; fi
-  done
-  if [ -z "$uv" ]; then
-    curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh >/dev/null 2>&1 || {
-      printf '%s\n' 'error=uv-install'; exit 71; }
-    uv="$HOME/.local/bin/uv"
-  fi
+  curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh >/dev/null 2>&1 || {
+    printf '%s\n' 'error=uv-install'; exit 71; }
   [ -x "$uv" ] || { printf '%s\n' 'error=uv-missing'; exit 72; }
-  install -d -m 700 "$home/.cybershuttle" || { printf '%s\n' 'error=home'; exit 73; }
-  "$uv" venv --quiet --clear --python ` + provisionPythonVersion + ` "$env_dir" >/dev/null 2>&1 || {
-    printf '%s\n' 'error=python'; exit 74; }
-  "$uv" pip install --quiet --python "$python" jupyter-server ipykernel jupyter-server-terminals >/dev/null 2>&1 || {
-    printf '%s\n' 'error=jupyter'; exit 75; }
-  "$python" -c "$imports" >/dev/null 2>&1 || { printf '%s\n' 'error=jupyter-verify'; exit 76; }
-  printf '%s\n' 'jupyter=installed'
+  printf '%s\n' 'uv=installed'
 fi
 
 if [ -x "$linkspan" ]; then
@@ -90,13 +83,9 @@ printf '%s\n' 'provision=complete'
 
 // What each refusal means to the person who asked for a runtime.
 var provisionFailures = map[string]string{
-	"uv-install":         "could not install uv, which builds the managed Jupyter environment",
+	"uv-install":         "could not install uv, which the allocation builds its environment with",
 	"uv-missing":         "uv is not executable after installation",
 	"arguments":          "the host was given paths it could not use",
-	"home":               "could not create the .cybershuttle directory in the account's home",
-	"python":             "could not create the Python " + provisionPythonVersion + " environment",
-	"jupyter":            "could not install Jupyter Server into the environment",
-	"jupyter-verify":     "the Jupyter environment is missing its own packages after installation",
 	"linkspan-directory": "could not create the directory the Linkspan binary belongs in",
 	"architecture":       "the host reports an architecture Linkspan is not released for",
 	"linkspan-download":  "could not download the Linkspan release",
@@ -106,31 +95,19 @@ var provisionFailures = map[string]string{
 // provisionRuntime makes a host able to run a runtime before one is submitted
 // to it. A host that already has both is left untouched, so this costs one
 // round trip on every allocation after the first.
-// PrepareHost makes a host ready to run runtimes without waiting for one to be
-// asked for. Selecting a host in the browser is the first moment anyone knows
-// it will be used, and it is minutes before the same person submits, so the
-// install happens then rather than inside a request someone is watching.
-func (s Service) PrepareHost(alias string, resource Resource) {
-	if !sshconfig.ValidAlias(alias) || !safeRemotePath(resource.HomeDir) {
-		return
-	}
-	linkspan := resolveRemoteExecutable(s.effectiveConfig().LinkspanPath, resource.HomeDir)
-	go func() {
-		// Nobody is waiting on this, so a failure is the next create's to report.
-		_ = s.prepareHostEnvironment(context.Background(), alias, resource.HomeDir, linkspan, "")
-	}()
-}
-
-func (s Service) provisionRuntime(ctx context.Context, alias string, prepared *preparedRuntime) error {
-	if err := s.prepareHostEnvironment(ctx, alias, prepared.runtime.HomeDir, prepared.linkspan, prepared.runtime.ID); err != nil {
+// provisionRuntime gives a host the two binaries an allocation needs and the
+// workflow that allocation will run. The runtime is the durable one: its
+// workflow names the ports this generation was given.
+func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Runtime, linkspan string) error {
+	if err := s.prepareHostEnvironment(ctx, alias, runtime.HomeDir, linkspan, runtime.ID); err != nil {
 		return err
 	}
 	// What the allocation is for travels with it: the workflow Linkspan runs is
-	// installed here, alongside the things it needs.
-	if err := s.installRuntimeWorkflow(ctx, alias, prepared.runtime); err != nil {
+	// installed here, alongside the binaries it needs.
+	if err := s.installRuntimeWorkflow(ctx, alias, runtime); err != nil {
 		return err
 	}
-	s.runtimeStatus(prepared.runtime.ID, "Runtime environment ready")
+	s.runtimeStatus(runtime.ID, "Runtime environment ready")
 	return nil
 }
 
@@ -171,7 +148,7 @@ func (s Service) prepareHostEnvironment(ctx context.Context, alias, home, linksp
 		return apierr.New("runtime_provisioning_failed", provisionMessage(alias, report["error"], errText), http.StatusBadGateway)
 	}
 	for _, installed := range []struct{ key, what string }{
-		{"jupyter", "Jupyter environment"},
+		{"uv", "uv"},
 		{"linkspan", "Linkspan"},
 	} {
 		if report[installed.key] == "installed" {

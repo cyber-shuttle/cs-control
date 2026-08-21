@@ -90,15 +90,6 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	}
 	s.runtimeStatus(request.ID, "Slurm validation passed")
 
-	// A host that has never run one of these has neither the interpreter the
-	// script starts nor the binary it execs. Both are installed before the job
-	// exists, so a bare host fails here with a reason rather than twenty
-	// seconds into an allocation.
-	if err := s.provisionRuntime(ctx, request.SSHHost, prepared); err != nil {
-		s.runtimeStatus(request.ID, "Runtime environment preparation failed")
-		return nil, err
-	}
-
 	var intent Runtime
 	var record devtunnel.Record
 	var transport string
@@ -141,6 +132,15 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		return &intent, nil
 	}
 
+	// A host that has never run one of these has neither the interpreter the
+	// script starts nor the binary it execs, and installing them takes minutes.
+	// The runtime is already durable here, so the reader watching it sees the
+	// preparation happen rather than a request that says nothing until it ends.
+	if err := s.provisionRuntime(ctx, request.SSHHost, intent, prepared.linkspan); err != nil {
+		s.runtimeStatus(intent.ID, "Runtime environment preparation failed")
+		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent))
+	}
+
 	s.runtimeStatus(intent.ID, "Submitting runtime to Slurm")
 	jobID, err := s.submitRuntimeScript(ctx, request.SSHHost, intent, prepared.script, transport, record.HostToken)
 	if err != nil {
@@ -148,27 +148,8 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 			s.runtimeStatus(intent.ID, "Runtime submission outcome is unresolved")
 			return nil, err
 		}
-		compensateErr := s.compensateAllocationTunnel(auth, intent)
-		stateErr := s.Store.withLock(func(store Store, current *state) error {
-			currentRuntime := current.Runtimes[intent.ID]
-			if currentRuntime == nil || currentRuntime.Generation != intent.Generation || currentRuntime.JobName != intent.JobName || currentRuntime.JobID != "" {
-				return nil
-			}
-			switch currentRuntime.State {
-			case "SUBMITTING":
-				delete(current.Runtimes, intent.ID)
-			case "STOPPING":
-				currentRuntime.State = "STOPPED"
-				currentRuntime.Tunnel = TunnelMetadata{}
-				currentRuntime.Error = boundedOptionalRuntimeError(compensateErr)
-				currentRuntime.UpdatedAt = s.now()
-			default:
-				return nil
-			}
-			return store.save(current)
-		})
 		s.runtimeStatus(intent.ID, "Runtime submission failed")
-		return nil, errors.Join(err, compensateErr, stateErr)
+		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent))
 	}
 	s.runtimeStatus(intent.ID, "Runtime submitted to Slurm")
 	var created *Runtime
@@ -483,4 +464,30 @@ func setRuntimeNode(runtime *Runtime, value string) error {
 	}
 	runtime.Node = value
 	return nil
+}
+
+// abandonSubmitIntent undoes a runtime that will never reach the scheduler:
+// preparing its host failed, or submitting it conclusively did. A stop that
+// arrived meanwhile keeps its own outcome.
+func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Runtime) error {
+	compensateErr := s.compensateAllocationTunnel(auth, intent)
+	stateErr := s.Store.withLock(func(store Store, current *state) error {
+		currentRuntime := current.Runtimes[intent.ID]
+		if currentRuntime == nil || currentRuntime.Generation != intent.Generation || currentRuntime.JobName != intent.JobName || currentRuntime.JobID != "" {
+			return nil
+		}
+		switch currentRuntime.State {
+		case "SUBMITTING":
+			delete(current.Runtimes, intent.ID)
+		case "STOPPING":
+			currentRuntime.State = "STOPPED"
+			currentRuntime.Tunnel = TunnelMetadata{}
+			currentRuntime.Error = boundedOptionalRuntimeError(compensateErr)
+			currentRuntime.UpdatedAt = s.now()
+		default:
+			return nil
+		}
+		return store.save(current)
+	})
+	return errors.Join(compensateErr, stateErr)
 }
