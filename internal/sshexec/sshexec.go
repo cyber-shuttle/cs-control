@@ -79,9 +79,14 @@ func (r Runner) sshArgs(alias string, interactive bool, identity string) ([]stri
 	if !sshconfig.ValidAlias(alias) {
 		return nil, sshconfig.ErrInvalidAlias
 	}
-	batchMode := "yes"
+	batchMode, persist := "yes", "600"
 	if interactive {
-		batchMode = "no"
+		// An interactive master is owned by the process that starts it, and
+		// ControlPersist takes that ownership away: OpenSSH backgrounds the
+		// master the moment it authenticates and the foreground exits 0, which
+		// reads as an exit before readiness and leaves a master nothing can
+		// reap. Without it the foreground process is the master.
+		batchMode, persist = "no", "no"
 	}
 	args := r.sshBaseArgs(batchMode)
 	if r.ControlDir != "" {
@@ -89,7 +94,7 @@ func (r Runner) sshArgs(alias string, interactive bool, identity string) ([]stri
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPersist=600", "-o", "ControlPath="+path)
+		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPersist="+persist, "-o", "ControlPath="+path)
 	}
 	return append(args, alias), nil
 }

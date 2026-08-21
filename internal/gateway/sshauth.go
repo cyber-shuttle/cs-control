@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -452,6 +453,10 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 					_ = writeJSON(conn, authWriteTimeout, exitFrame(0, ""))
 					finished = true
 					session.cancel() // stop browser I/O goroutines, not the owned process
+					// The owned master keeps the PTY it authenticated on, and
+					// nothing reads it once this loop ends. Drain it, so a full
+					// buffer can never block the master it belongs to.
+					go func() { _, _ = io.Copy(io.Discard, master) }()
 					return
 				}
 				cleanupFailedSession(session)

@@ -28,3 +28,24 @@ func TestRunRemoteArgsBoundsCombinedOutput(t *testing.T) {
 		t.Fatalf("oversized combined remote output error = %v", err)
 	}
 }
+
+// An interactive master must be the foreground process the gateway owns and
+// reaps. ControlPersist backgrounds it instead: OpenSSH returns 0 as soon as it
+// authenticates, which the gateway can only read as an exit before readiness.
+func TestInteractiveMasterIsNotBackgrounded(t *testing.T) {
+	runner := Runner{SSHBin: filepath.Join(t.TempDir(), "unused"), ControlDir: t.TempDir(), Timeout: time.Second}
+	for _, test := range []struct {
+		interactive bool
+		persist     string
+		batch       string
+	}{{true, "ControlPersist=no", "BatchMode=no"}, {false, "ControlPersist=600", "BatchMode=yes"}} {
+		args, err := runner.sshArgs("delta", test.interactive, "identity\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, test.persist) || !strings.Contains(joined, test.batch) {
+			t.Fatalf("interactive=%v produced %q", test.interactive, joined)
+		}
+	}
+}
