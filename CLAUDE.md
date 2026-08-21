@@ -107,6 +107,9 @@ broker, or token persistence/logging.
   again, so there is no restart path to keep consistent with create.
 - Tunnel expiry is the final cleanup backstop after ungraceful process or job
   failure.
+- The Linkspan path may be absolute or anchored at `$HOME/`, which discovery
+  resolves per host, so one setting serves hosts whose accounts do not share a
+  home directory.
 - Host entries the API creates live between the `cybershuttle managed`
   markers in `~/.ssh/config`, written atomically at mode `0600`. Everything
   outside those markers is read and never rewritten, and only a managed alias

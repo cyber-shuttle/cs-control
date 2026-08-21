@@ -212,8 +212,22 @@ func safeRemotePath(value string) bool {
 	return remotePathPattern.MatchString(value) && pathpkg.Clean(value) == value && value != "/"
 }
 
+// A remote executable may be anchored at $HOME, so one setting serves hosts
+// whose accounts do not share a home directory. Discovery resolves the anchor
+// before the path reaches a script.
 func safeRemoteExecutable(value string) bool {
+	if rest, anchored := strings.CutPrefix(value, "$HOME/"); anchored {
+		return safeRemotePath("/" + rest)
+	}
 	return safeRemotePath(value) && strings.HasPrefix(value, "/")
+}
+
+func resolveRemoteExecutable(value, home string) string {
+	rest, anchored := strings.CutPrefix(value, "$HOME/")
+	if !anchored {
+		return value
+	}
+	return pathpkg.Join(home, rest)
 }
 
 func validateStoredRuntime(key string, runtime *Runtime) error {

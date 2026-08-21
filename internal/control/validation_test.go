@@ -109,3 +109,24 @@ func TestCreateValidationFailureDoesNotPersistOrSubmit(t *testing.T) {
 		t.Fatalf("failed validation submitted a job:\n%s", commands)
 	}
 }
+
+// One configured Linkspan path has to serve hosts whose accounts do not share a
+// home, so an anchored path is accepted and resolved against the host's own.
+func TestLinkspanPathMayBeAnchoredAtHome(t *testing.T) {
+	for _, value := range []string{"$HOME/.cybershuttle/bin/linkspan", "/usr/local/bin/linkspan"} {
+		if !safeRemoteExecutable(value) {
+			t.Fatalf("rejected %q", value)
+		}
+	}
+	for _, value := range []string{"$HOME", "$HOME/../escape", "relative/linkspan", "$OTHER/linkspan"} {
+		if safeRemoteExecutable(value) {
+			t.Fatalf("accepted %q", value)
+		}
+	}
+	if got := resolveRemoteExecutable("$HOME/.cybershuttle/bin/linkspan", "/u/someone"); got != "/u/someone/.cybershuttle/bin/linkspan" {
+		t.Fatalf("anchor not resolved: %q", got)
+	}
+	if got := resolveRemoteExecutable("/usr/local/bin/linkspan", "/u/someone"); got != "/usr/local/bin/linkspan" {
+		t.Fatalf("absolute path was rewritten: %q", got)
+	}
+}

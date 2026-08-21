@@ -375,7 +375,7 @@ func (s Service) prepareRuntimeAfterContract(ctx context.Context, request Create
 		JobName:         jobName(request.ID), PrivateRoot: privateRoot, WorkspaceRoot: workspaceRoot,
 	}
 	s.runtimeStatus(request.ID, "Runtime preparation complete")
-	return &preparedRuntime{request: request, runtime: runtime, script: buildScript(runtime, cfg.LinkspanPath)}, nil
+	return &preparedRuntime{request: request, runtime: runtime, script: buildScript(runtime, resolveRemoteExecutable(cfg.LinkspanPath, resource.HomeDir))}, nil
 }
 
 func assignRuntimeID(request CreateRequest) (CreateRequest, error) {
