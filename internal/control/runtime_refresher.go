@@ -7,11 +7,17 @@ import (
 	"time"
 )
 
+// backgroundInterval is how often a runtime nobody is watching is reconciled.
+// It is slow on purpose: a viewer polls far more often than this, so the tick
+// only matters for allocations whose owner has closed the tab, and it costs one
+// batched SSH round per host that still has one.
+const backgroundInterval = 30 * time.Second
+
 // RuntimeRefresher runs at most one scheduler reconciliation at a time, and no
-// more often than once a second. Every read triggers it, and that is the whole
-// schedule: nothing observes runtime state except a request, so there is no
-// background cadence to keep in step with one. Tunnel expiry remains the
-// cleanup backstop for a runtime nobody ever asks about again.
+// more often than once a second. Every read triggers one, so a viewer converges
+// at its own polling rate; a slow background tick runs the same reconciliation
+// when nobody is reading, so a runtime whose owner closed the tab still reaches
+// its terminal state rather than keeping whatever it was last seen in.
 type RuntimeRefresher struct {
 	reconcile func(context.Context) error
 	interval  time.Duration
@@ -23,14 +29,37 @@ type RuntimeRefresher struct {
 	completed time.Time
 	closed    bool
 	wg        sync.WaitGroup
+	stop      chan struct{}
 }
 
 func NewRuntimeRefresher(service Service) *RuntimeRefresher {
-	return &RuntimeRefresher{
+	refresher := &RuntimeRefresher{
 		reconcile: service.ReconcileAll,
 		interval:  time.Second,
 		timeout:   60 * time.Second,
 		now:       time.Now,
+		stop:      make(chan struct{}),
+	}
+	refresher.wg.Add(1)
+	go refresher.tick(backgroundInterval)
+	return refresher
+}
+
+// tick reconciles on a slow cadence regardless of whether anyone is reading.
+// Trigger already collapses a tick that lands on a viewer's poll, and
+// reconciliation makes no SSH call at all when no runtime is in a state worth
+// observing, so an idle control plane stays idle.
+func (r *RuntimeRefresher) tick(every time.Duration) {
+	defer r.wg.Done()
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.stop:
+			return
+		case <-ticker.C:
+			r.Trigger()
+		}
 	}
 }
 
@@ -75,7 +104,12 @@ func (r *RuntimeRefresher) Running() bool {
 
 func (r *RuntimeRefresher) Close() {
 	r.mu.Lock()
+	alreadyClosed := r.closed
 	r.closed = true
 	r.mu.Unlock()
+	// A refresher a test built as a struct literal has no tick to stop.
+	if !alreadyClosed && r.stop != nil {
+		close(r.stop)
+	}
 	r.wg.Wait()
 }

@@ -32,7 +32,6 @@ case "$wire" in
     cat >/dev/null
     log_read_count=0; [ ! -f "$RECONCILE_LOG_READ_COUNT" ] || log_read_count=$(cat "$RECONCILE_LOG_READ_COUNT")
     log_read_count=$((log_read_count + 1)); printf '%s\n' "$log_read_count" > "$RECONCILE_LOG_READ_COUNT"
-    [ "$log_read_count" -gt "${RECONCILE_LOG_READ_FAILURES:-0}" ] || { printf 'runtime logs unavailable\n' >&2; exit 1; }
     eval "set -- $wire"
     shift 4
     for runtime_id in "$@"; do
@@ -255,5 +254,132 @@ func TestWalltimeExpiryStopsTheRuntimeRatherThanFailingIt(t *testing.T) {
 	}
 	if classifySchedulerState("TIMEOUT") == classifySchedulerState("COMPLETED") {
 		t.Error("a walltime expiry must stay distinguishable so the owner is told which stop it was")
+	}
+}
+
+// startedRuntime builds an allocation Slurm has already begun running, which is
+// what puts it under its own --time deadline.
+func runningRuntime(id, host, jobID string, startedAt time.Time, wallMinutes int) Runtime {
+	runtime := pendingRuntime(id, host, jobID)
+	runtime.State = "READY"
+	runtime.StartedAt = startedAt
+	runtime.Resources.WallMinutes = wallMinutes
+	return runtime
+}
+
+// A scheduler that answered and does not know the job is reporting that the
+// allocation is over. Retaining the last state here is what left a finished
+// runtime reading READY indefinitely.
+func TestSchedulerThatDoesNotKnowTheJobRetiresTheRuntime(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	runtime.State = "READY"
+	t.Setenv("RECONCILE_LINES", "")
+	putRuntimes(t, service, runtime)
+	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	if got[0].State != "STOPPED" {
+		t.Fatalf("a runtime the scheduler has no record of stayed %s, want STOPPED", got[0].State)
+	}
+}
+
+// Slurm briefly omits a newly submitted job from squeue and sacct both, so
+// absence inside that window says nothing about the allocation.
+func TestFreshlySubmittedRuntimeSurvivesTheSchedulerPropagationWindow(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	runtime.CreatedAt = time.Now().UTC()
+	t.Setenv("RECONCILE_LINES", "")
+	putRuntimes(t, service, runtime)
+	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	if got[0].State != "QUEUED" {
+		t.Fatalf("a just-submitted runtime was retired as %s during the propagation window", got[0].State)
+	}
+}
+
+// A login node we cannot reach must not pin a runtime to a state it left long
+// ago: Slurm kills the job at its --time whether or not anyone can see it.
+func TestUnreachableSchedulerRetiresAnAllocationPastItsWalltime(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	runtime := runningRuntime("rt-111111111111", "alpha", "101", time.Now().Add(-4*time.Hour), 60)
+	putRuntimes(t, service, runtime)
+	t.Setenv("RECONCILE_FAIL", "1")
+	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	if got[0].State != "STOPPED" {
+		t.Fatalf("an allocation four hours past a one-hour walltime stayed %s, want STOPPED", got[0].State)
+	}
+	if got[0].Error != "" {
+		t.Fatalf("a runtime the clock retired still carries a scheduler error: %q", got[0].Error)
+	}
+}
+
+// Inside its walltime the allocation may well still be running, so an
+// unreachable scheduler is a diagnostic rather than a verdict.
+func TestUnreachableSchedulerKeepsAnAllocationInsideItsWalltime(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	runtime := runningRuntime("rt-111111111111", "alpha", "101", time.Now().Add(-5*time.Minute), 60)
+	putRuntimes(t, service, runtime)
+	t.Setenv("RECONCILE_FAIL", "1")
+	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	if got[0].State != "READY" {
+		t.Fatalf("an allocation inside its walltime was retired as %s by an unreachable scheduler", got[0].State)
+	}
+	if got[0].Error == "" {
+		t.Fatal("an unreachable scheduler left no diagnostic on the runtime")
+	}
+}
+
+// A queued allocation may wait for days, so no clock retires it -- only the
+// scheduler can, and only by answering.
+func TestQueuedAllocationHasNoWalltimeDeadline(t *testing.T) {
+	queued := pendingRuntime("rt-111111111111", "alpha", "101")
+	queued.StartedAt = time.Now().Add(-30 * 24 * time.Hour)
+	if outlivedAllocation(queued, time.Now()) {
+		t.Fatal("a queued allocation was retired by a deadline it is not under")
+	}
+}
+
+// sacct reports jobs from midnight today unless asked otherwise, which hid
+// every allocation submitted before it.
+func TestSchedulerQueryAsksSacctForJobsOlderThanToday(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	scripts := os.Getenv("RECONCILE_SCRIPTS")
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	t.Setenv("RECONCILE_LINES", "101|PENDING||"+runtime.JobName)
+	putRuntimes(t, service, runtime)
+	service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	sent := string(mustRead(t, scripts))
+	if !strings.Contains(sent, "sacct --noheader -X --starttime=") {
+		t.Fatalf("sacct was asked without a start time, so anything older than today is invisible:\n%s", sent)
+	}
+	if !strings.Contains(sent, "1969-12-31T23:00:01") {
+		t.Fatalf("the accounting window did not reach back to the oldest runtime:\n%s", sent)
+	}
+}
+
+// The allocation may have been running long before anyone looked, so the
+// wall-time countdown is anchored to Slurm's own elapsed figure rather than to
+// the poll. cs-bridge anchors the same deadline the same way.
+func TestStartedAtComesFromSlurmElapsedNotThePollTime(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	// squeue rows carry four fields; the sacct row carries the elapsed seconds.
+	t.Setenv("RECONCILE_LINES", "101|RUNNING|node1|"+runtime.JobName+"|7200")
+	putRuntimes(t, service, runtime)
+	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	elapsed := time.Since(got[0].StartedAt)
+	if elapsed < 2*time.Hour-time.Minute || elapsed > 2*time.Hour+time.Minute {
+		t.Fatalf("a job Slurm says ran for two hours was anchored %s ago, not ~2h", elapsed)
+	}
+}
+
+// A job whose elapsed time already exceeds its wall-time is over the moment it
+// is seen, even on the very first observation.
+func TestElapsedAnchorRetiresAnAllocationAlreadyPastItsWalltime(t *testing.T) {
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	runtime.State = "READY"
+	runtime.Resources.WallMinutes = 60
+	runtime.StartedAt = time.Now().Add(-4 * time.Hour)
+	if !outlivedAllocation(runtime, time.Now()) {
+		t.Fatal("an allocation anchored four hours back on a one-hour walltime was not retired")
 	}
 }

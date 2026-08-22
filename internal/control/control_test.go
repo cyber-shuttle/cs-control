@@ -60,19 +60,13 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
   payload=$(cat)
   query_count=0; [ ! -f "$FAKE_SCHEDULER_QUERY_COUNT" ] || query_count=$(cat "$FAKE_SCHEDULER_QUERY_COUNT")
   query_count=$((query_count + 1)); printf '%s\n' "$query_count" > "$FAKE_SCHEDULER_QUERY_COUNT"
-  [ -z "${FAKE_SCHEDULER_STARTED:-}" ] || : > "$FAKE_SCHEDULER_STARTED"
-  if [ "${FAKE_SCHEDULER_BLOCK_QUERY:-0}" = "$query_count" ]; then
-    while [ -n "${FAKE_SCHEDULER_RELEASE:-}" ] && [ ! -e "$FAKE_SCHEDULER_RELEASE" ]; do sleep .01; done
-  fi
-  [ "${FAKE_SCHEDULER_QUERY_FAIL:-0}" = 0 ] || { echo 'scheduler query failed' >&2; exit 1; }
-  job_id=${FAKE_JOB_ID:-12345}
+  job_id=12345
   if printf '%s' "$payload" | grep -q 'scancel '; then
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s' "$payload" | grep -o 'scancel [^)]*' | sed 's/ 2>&1$//' | tr -d "'" | sed 's/^/batch /' >> "$FAKE_SCANCEL_LOG"
     if [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ]; then printf 'CANCELLED\n' > "$FAKE_STATUS"; fi
   fi
   state=$(cat "$FAKE_STATUS")
   accepted_name=; [ ! -f "$FAKE_ACCEPTED_JOB_NAME" ] || accepted_name=$(cat "$FAKE_ACCEPTED_JOB_NAME")
-  if [ "$query_count" -le "${FAKE_SCHEDULER_HIDE_QUERIES:-0}" ]; then accepted_name=; fi
   printf '__CSCTL_SQUEUE__\n'
   if [ -n "$accepted_name" ] && { [ -z "${FAKE_SUBMIT_RELEASE:-}" ] || [ -e "$FAKE_SUBMIT_RELEASE" ]; }; then
     case "$state" in RUNNING|PENDING|CONFIGURING) printf '%s|%s|cn001|%s\n' "$job_id" "$state" "$accepted_name";; esac
@@ -84,35 +78,25 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
   exit 0
 fi
 if [ "$wire_command" = "sh -s" ]; then
-  [ -z "${FAKE_DISCOVERY_STARTED:-}" ] || : > "$FAKE_DISCOVERY_STARTED"
-  while [ -n "${FAKE_DISCOVERY_RELEASE:-}" ] && [ ! -e "$FAKE_DISCOVERY_RELEASE" ]; do sleep .01; done
   cat > "$FAKE_DISCOVERY_SCRIPT_LOG"
   count=0; [ ! -f "$FAKE_DISCOVERY_EXEC_COUNT" ] || count=$(cat "$FAKE_DISCOVERY_EXEC_COUNT")
   printf '%s\n' $((count + 1)) > "$FAKE_DISCOVERY_EXEC_COUNT"
   printf 'REMOTE LOGIN BANNER\n' >&2
   user=${FAKE_REMOTE_USER:-tester}
   printf '%s\n' "$DISC_USER_BEGIN"
-  [ "${FAKE_DISCOVERY_FAIL:-}" != user ] || { printf 'user failure\n' >&2; printf '%s\n' "$DISC_ERROR_USER"; exit 71; }
   case "$user" in ''|*[!A-Za-z0-9_.-]*|?????????????????????????????????????????????????????????????????*) printf '%s\n' "$DISC_ERROR_USER"; exit 72;; esac
   printf '%s\n%s\n' "$user" "$DISC_USER_END"
   printf '%s\n' "$DISC_ACCOUNTS_BEGIN"
-  [ "${FAKE_DISCOVERY_FAIL:-}" != accounts ] || { printf 'account failure\n' >&2; printf '%s\n' "$DISC_ERROR_ACCOUNTS"; exit 73; }
   printf 'Account|\nproject-a|\nproject-a|\n%s\n' "$DISC_ACCOUNTS_END"
   printf '%s\n' "$DISC_PARTITIONS_BEGIN"
-  [ "${FAKE_DISCOVERY_FAIL:-}" != partitions ] || { printf 'partition failure\n' >&2; printf '%s\n' "$DISC_ERROR_PARTITIONS"; exit 74; }
   printf 'cpu*|24+|191000+|(null)\ngpu|64|515000|gpu:a100:2(S:2,5)\n%s\n' "$DISC_PARTITIONS_END"
   printf '%s\n' "$DISC_HOME_BEGIN"
-  [ "${FAKE_DISCOVERY_FAIL:-}" != home ] || { printf 'home failure\n' >&2; printf '%s\n' "$DISC_ERROR_HOME"; exit 75; }
   printf '/home/tester\n%s\n%s\n' "$DISC_HOME_END" "$DISC_DONE"
   exit 0
 fi
 case "$wire_command" in
   *"'contract'"*)
-    [ -z "${FAKE_LINKSPAN_CONTRACT_STARTED:-}" ] || printf 'start\n' >> "$FAKE_LINKSPAN_CONTRACT_STARTED"
-    while [ -n "${FAKE_LINKSPAN_CONTRACT_RELEASE:-}" ] && [ ! -e "$FAKE_LINKSPAN_CONTRACT_RELEASE" ]; do sleep .01; done
-    [ -z "${FAKE_LINKSPAN_CONTRACT_SLEEP:-}" ] || sleep "$FAKE_LINKSPAN_CONTRACT_SLEEP"
     printf '%s' "${FAKE_LINKSPAN_CONTRACT_STDOUT:-}"
-    printf '%s' "${FAKE_LINKSPAN_CONTRACT_STDERR:-}" >&2
     exit "${FAKE_LINKSPAN_CONTRACT_EXIT:-0}";;
 esac
 eval "set -- $wire_command"
@@ -120,37 +104,24 @@ command="$*"
 case "$command" in
   "sbatch --test-only")
     cat > "$FAKE_VALIDATION_SCRIPT_LOG"
-    [ -z "${FAKE_VALIDATION_STARTED:-}" ] || : > "$FAKE_VALIDATION_STARTED"
-    while [ -n "${FAKE_VALIDATION_RELEASE:-}" ] && [ ! -e "$FAKE_VALIDATION_RELEASE" ]; do sleep .01; done
     [ -z "${FAKE_VALIDATION_STDOUT:-}" ] || printf '%s\n' "$FAKE_VALIDATION_STDOUT"
     [ -z "${FAKE_VALIDATION_STDERR:-}" ] || printf '%s\n' "$FAKE_VALIDATION_STDERR" >&2
-    if [ -n "${FAKE_VALIDATION_ERROR_BYTES:-}" ]; then
-      head -c "$FAKE_VALIDATION_ERROR_BYTES" /dev/zero | tr '\000' x >&2
-    fi
     [ "${FAKE_VALIDATION_FAIL:-0}" = 0 ] || exit "${FAKE_VALIDATION_FAIL}"
     ;;
   "sbatch --export=ALL,JUPYTER_TOKEN="*"CS_TUNNEL_HOST_TOKEN="*" --parsable")
     cat > "$FAKE_SCRIPT_LOG"
     [ -z "${FAKE_SUBMIT_STARTED:-}" ] || : > "$FAKE_SUBMIT_STARTED"
     while [ -n "${FAKE_SUBMIT_RELEASE:-}" ] && [ ! -e "$FAKE_SUBMIT_RELEASE" ]; do sleep .01; done
-    [ "${FAKE_SUBMIT_FAIL:-0}" = 0 ] || {
-      if [ "${FAKE_SUBMIT_ECHO_COMMAND:-0}" = 1 ]; then printf '%s %s\n' "$command" "${FAKE_SUBMIT_STDERR:-}" >&2; else printf '%s\n' "${FAKE_SUBMIT_STDERR:-submission failed}" >&2; fi
-      exit 1
-    }
     sed -n 's/^#SBATCH --job-name=//p' "$FAKE_SCRIPT_LOG" | head -n 1 > "$FAKE_ACCEPTED_JOB_NAME"
-    [ "${FAKE_SUBMIT_ACCEPTED_ERROR:-0}" = 0 ] || { printf 'connection lost after acceptance\n' >&2; exit 255; }
-    printf '%s;cluster\n' "${FAKE_JOB_ID:-12345}"
+    printf '12345;cluster\n'
     ;;
   "scancel "*)
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s\n' "$command" >> "$FAKE_SCANCEL_LOG"
-    [ -z "${FAKE_SCANCEL_STARTED:-}" ] || : > "$FAKE_SCANCEL_STARTED"
-    while [ -n "${FAKE_SCANCEL_RELEASE:-}" ] && [ ! -e "$FAKE_SCANCEL_RELEASE" ]; do sleep .01; done
     [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ] || { echo 'scheduler temporarily unavailable' >&2; exit 1; }
     printf 'CANCELLED\n' > "$FAKE_STATUS"
     ;;
   "sh -c "*"csctl-runtime-workflow "*)
     cat > "${FAKE_WORKFLOW_LOG:-/dev/null}"
-    [ "${FAKE_WORKFLOW_FAIL:-0}" = 0 ] || { echo 'workflow install failed' >&2; exit 1; }
     ;;
   "sh -s -- csctl-provision "*)
     cat > "${FAKE_PROVISION_LOG:-/dev/null}"

@@ -21,22 +21,15 @@ const provisionTimeout = 5 * time.Minute
 // requires 3.10 or newer, and uv supplies the version rather than the host.
 const provisionPythonVersion = "3.12"
 
-// provisionScript is intentionally constant. The workspace root and the
-// Linkspan path arrive as arguments, so nothing derived from a request is ever
-// written into the remote shell program.
+// provisionScript is intentionally constant: the home and the Linkspan path
+// arrive as arguments, so nothing derived from a request is written into the
+// remote shell program.
 //
-// It is the same install every time: present and working is left alone, absent
-// or broken is replaced, and each outcome is reported as one line the caller
-// turns into runtime status.
-// provisionScript is intentionally constant. The home and the Linkspan path
-// arrive as arguments, so nothing derived from a request is ever written into
-// the remote shell program.
-//
-// It installs the two binaries an allocation needs before it can run: Linkspan,
-// which the job execs, and uv, which the workflow inside the job builds the
-// environment with. Everything else -- the environment, its dependencies, the
-// server -- belongs to the allocation and happens through Linkspan. Both are
-// single downloads, so this stays a matter of seconds.
+// It installs the two binaries an allocation needs before it can run --
+// Linkspan, which the job execs, and uv, which the workflow builds the
+// environment with -- and reports each outcome as one line the caller turns
+// into runtime status. Present and working is left alone; absent or broken is
+// replaced.
 const provisionScript = `set -u
 LC_ALL=C
 LANG=C

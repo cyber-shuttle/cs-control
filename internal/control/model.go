@@ -101,13 +101,17 @@ type RuntimeResponse struct {
 
 type Runtime struct {
 	RuntimeResponse
-	Owner         authn.Principal `json:"owner"`
-	Tunnel        TunnelMetadata  `json:"tunnel"`
-	JobID         string          `json:"jobId,omitempty"`
-	JobName       string          `json:"jobName"`
-	Node          string          `json:"node,omitempty"`
-	PrivateRoot   string          `json:"privateRoot"`
-	WorkspaceRoot string          `json:"workspaceRoot"`
+	Owner   authn.Principal `json:"owner"`
+	Tunnel  TunnelMetadata  `json:"tunnel"`
+	JobID   string          `json:"jobId,omitempty"`
+	JobName string          `json:"jobName"`
+	// When Slurm was first seen running this allocation. Its --time is measured
+	// from there, so this is what lets the clock retire a runtime the scheduler
+	// has stopped answering for. Zero until the allocation starts.
+	StartedAt     time.Time `json:"startedAt,omitempty"`
+	Node          string    `json:"node,omitempty"`
+	PrivateRoot   string    `json:"privateRoot"`
+	WorkspaceRoot string    `json:"workspaceRoot"`
 	// The account's own home on this host. The interpreter a runtime starts is
 	// a tool of the account, not of the workspace it opens.
 	HomeDir string `json:"homeDir"`
