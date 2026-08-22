@@ -28,6 +28,46 @@ const schedulerMarkerCancel = "__CSCTL_SCANCEL__"
 const schedulerMarkerQueue = "__CSCTL_SQUEUE__"
 const schedulerMarkerAccounting = "__CSCTL_SACCT__"
 
+// Slurm does not report a job forever, and a login node is not always
+// reachable, so an observation cannot be the only thing that ever retires a
+// runtime. These two windows are what let the clock finish the job.
+const (
+	// schedulerPropagationWindow is how long after submission a job may be
+	// missing from squeue and sacct both. Slurm briefly omits a newly submitted
+	// job from either; past this, a scheduler that answered and does not know
+	// the job is reporting that it is gone, not that it has not appeared yet.
+	schedulerPropagationWindow = 2 * time.Minute
+	// allocationWallGrace covers the gap between a job reaching its --time and
+	// Slurm actually reaping it (KillWait, epilog), so a runtime is only called
+	// gone once it cannot plausibly still be running.
+	allocationWallGrace = 10 * time.Minute
+)
+
+// startedRuntime reports whether Slurm had begun running the allocation, which
+// is what makes its --time a deadline rather than an open-ended queue wait.
+func startedRuntime(runtime Runtime) bool {
+	return runtime.State == "STARTING" || runtime.State == "READY"
+}
+
+// outlivedAllocation reports that the allocation cannot still be running,
+// whatever the scheduler last said. Slurm kills a job at its --time, so once
+// that long has passed since it started, the clock settles a runtime no
+// scheduler is answering for. A queued allocation has no such deadline: it may
+// wait for days, so only the scheduler can retire it.
+func outlivedAllocation(runtime Runtime, now time.Time) bool {
+	if !startedRuntime(runtime) || runtime.StartedAt.IsZero() || runtime.Resources.WallMinutes <= 0 {
+		return false
+	}
+	limit := time.Duration(runtime.Resources.WallMinutes)*time.Minute + allocationWallGrace
+	return now.Sub(runtime.StartedAt) > limit
+}
+
+// unknownToScheduler reports that a scheduler which answered has no record of
+// this job and has had long enough to have one.
+func unknownToScheduler(runtime Runtime, now time.Time) bool {
+	return now.Sub(runtime.CreatedAt) > schedulerPropagationWindow
+}
+
 // reconcileSnapshots performs all scheduler and endpoint I/O without holding
 // the state lock. Scheduler calls are batched into one SSH execution per host.
 func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []Runtime {
@@ -59,6 +99,16 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					if !s.reconciliationSnapshotCurrent(snapshots[index]) {
 						continue
 					}
+					// No answer is not the same as no allocation, so the last good
+					// state stands -- until the allocation's own --time has passed,
+					// after which Slurm has certainly reaped it and a host we cannot
+					// reach must not pin the runtime to a state it left long ago.
+					if outlivedAllocation(results[index], s.now()) {
+						results[index].State = "STOPPED"
+						results[index].Error = ""
+						s.runtimeStatus(results[index].ID, "Allocation reached its wall-time limit")
+						continue
+					}
 					results[index].Error = err.Error()
 					s.runtimeStatus(results[index].ID, "Runtime status check failed")
 				}
@@ -77,6 +127,15 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					// expected propagation window as a runtime failure. STOPPING still
 					// exposes missing cancellation state because cleanup depends on it.
 					if runtime.State != "STOPPING" {
+						// Past that window the scheduler answered and does not know this
+						// job, which is an observation in its own right: the allocation
+						// is over, however it ended. Retaining the last state here is
+						// what used to leave a finished runtime reading READY forever.
+						if unknownToScheduler(*runtime, s.now()) {
+							runtime.State = "STOPPED"
+							runtime.Error = ""
+							s.runtimeStatus(runtime.ID, "Allocation is no longer known to the scheduler")
+						}
 						continue
 					}
 					if message := cancelErrors[runtime.ID]; message != "" {
@@ -101,6 +160,9 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 				// class, with no fall-through and no second opinion about readiness.
 				if class == schedulerUnknown {
 					continue
+				}
+				if class == schedulerActive && runtime.StartedAt.IsZero() {
+					runtime.StartedAt = s.now()
 				}
 				wasStopping := runtime.State == "STOPPING"
 				next := nextState(runtime.State, class)
@@ -279,7 +341,14 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 	script.WriteString("\nsqueue --me --noheader --format='%i|%T|%N|%j'\n")
 	script.WriteString("printf '%s\\n' ")
 	script.WriteString(sshexec.ShellQuote(schedulerMarkerAccounting))
-	script.WriteString("\nsacct --noheader -X --name=")
+	// sacct defaults to jobs from midnight today, which silently hides every
+	// allocation submitted before it -- the runtime then reads as missing rather
+	// than finished, and keeps its last state. Ask from the oldest runtime in
+	// this batch instead. The timestamp is formatted from our own store, never
+	// from a request.
+	script.WriteString("\nsacct --noheader -X --starttime=")
+	script.WriteString(sshexec.ShellQuote(earliestCreation(runtimes).Format("2006-01-02T15:04:05")))
+	script.WriteString(" --name=")
 	script.WriteString(sshexec.ShellQuote(strings.Join(names, ",")))
 	script.WriteString(" --format=JobIDRaw,State,NodeList,JobName --parsable2\n")
 	output, err := s.Runner.Run(ctx, host, strings.NewReader(script.String()), "sh", "-s", "--", "csctl-runtime-status")
@@ -352,7 +421,7 @@ func (s Service) reconciliationSnapshotCurrent(snapshot Runtime) bool {
 }
 
 func changedReconciliation(before, after Runtime) bool {
-	return before.State != after.State || before.Error != after.Error || before.JobID != after.JobID || before.Node != after.Node
+	return before.State != after.State || before.Error != after.Error || before.JobID != after.JobID || before.Node != after.Node || !before.StartedAt.Equal(after.StartedAt)
 }
 
 func mergeReconciled(current, snapshot, candidate *Runtime, now time.Time) bool {
@@ -363,6 +432,7 @@ func mergeReconciled(current, snapshot, candidate *Runtime, now time.Time) bool 
 		return false
 	}
 	current.State, current.Error, current.JobID, current.Node, current.UpdatedAt = candidate.State, candidate.Error, candidate.JobID, candidate.Node, now
+	current.StartedAt = candidate.StartedAt
 	return true
 }
 
@@ -372,4 +442,17 @@ func sortedRuntimeCopies(current *state) []Runtime {
 		result = append(result, *current.Runtimes[id])
 	}
 	return result
+}
+
+// earliestCreation is the accounting window this batch needs: the oldest
+// runtime in it, backed off far enough that a clock skew between here and the
+// login node cannot clip the newest one out of the answer.
+func earliestCreation(runtimes []Runtime) time.Time {
+	oldest := time.Time{}
+	for _, runtime := range runtimes {
+		if oldest.IsZero() || runtime.CreatedAt.Before(oldest) {
+			oldest = runtime.CreatedAt
+		}
+	}
+	return oldest.Add(-time.Hour).UTC()
 }

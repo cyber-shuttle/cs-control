@@ -141,3 +141,41 @@ func TestHTTPRuntimeListReturnsCachedWhileSSHBlocksAndSingleFlights(t *testing.T
 		t.Fatalf("merged update was not visible on next GET: %s", response.Body.String())
 	}
 }
+
+// Nothing reads runtime state except a request, so without a tick a runtime
+// whose owner closed the tab would keep whatever state it was last seen in.
+func TestBackgroundTickReconcilesWithNobodyReading(t *testing.T) {
+	reconciled := make(chan struct{}, 8)
+	refresher := &RuntimeRefresher{
+		interval: 0, timeout: time.Minute, now: time.Now, stop: make(chan struct{}),
+		reconcile: func(context.Context) error { reconciled <- struct{}{}; return nil },
+	}
+	refresher.wg.Add(1)
+	go refresher.tick(time.Millisecond)
+	defer refresher.Close()
+
+	select {
+	case <-reconciled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no reconciliation ran without a read")
+	}
+}
+
+func TestCloseStopsTheBackgroundTick(t *testing.T) {
+	var count atomic.Int64
+	refresher := &RuntimeRefresher{
+		interval: 0, timeout: time.Minute, now: time.Now, stop: make(chan struct{}),
+		reconcile: func(context.Context) error { count.Add(1); return nil },
+	}
+	refresher.wg.Add(1)
+	go refresher.tick(time.Millisecond)
+	for start := time.Now(); count.Load() == 0 && time.Since(start) < 5*time.Second; {
+		time.Sleep(time.Millisecond)
+	}
+	refresher.Close()
+	settled := count.Load()
+	time.Sleep(50 * time.Millisecond)
+	if count.Load() != settled {
+		t.Fatalf("the tick kept reconciling after Close: %d -> %d", settled, count.Load())
+	}
+}
