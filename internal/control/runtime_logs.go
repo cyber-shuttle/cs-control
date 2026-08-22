@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -268,20 +267,9 @@ func sanitizedRuntimeLogLines(value string, sensitive []string) []string {
 	result := make([]string, 0, len(parts))
 	for _, part := range parts {
 		part = redactRuntimeLogLine(part, sensitive)
-		result = append(result, truncateRuntimeLogLine(part))
+		result = append(result, truncateUTF8(part, maxRuntimeLogLineBytes))
 	}
 	return result
-}
-
-func truncateRuntimeLogLine(value string) string {
-	if len(value) <= maxRuntimeLogLineBytes {
-		return value
-	}
-	value = value[:maxRuntimeLogLineBytes]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
 }
 
 func redactRuntimeLogLine(value string, sensitive []string) string {
