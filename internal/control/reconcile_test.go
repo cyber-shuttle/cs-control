@@ -356,3 +356,31 @@ func TestSchedulerQueryAsksSacctForJobsOlderThanToday(t *testing.T) {
 		t.Fatalf("the accounting window did not reach back to the oldest runtime:\n%s", sent)
 	}
 }
+
+// The allocation may have been running long before anyone looked, so the
+// wall-time countdown is anchored to Slurm's own elapsed figure rather than to
+// the poll. cs-bridge anchors the same deadline the same way.
+func TestStartedAtComesFromSlurmElapsedNotThePollTime(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	// squeue rows carry four fields; the sacct row carries the elapsed seconds.
+	t.Setenv("RECONCILE_LINES", "101|RUNNING|node1|"+runtime.JobName+"|7200")
+	putRuntimes(t, service, runtime)
+	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	elapsed := time.Since(got[0].StartedAt)
+	if elapsed < 2*time.Hour-time.Minute || elapsed > 2*time.Hour+time.Minute {
+		t.Fatalf("a job Slurm says ran for two hours was anchored %s ago, not ~2h", elapsed)
+	}
+}
+
+// A job whose elapsed time already exceeds its wall-time is over the moment it
+// is seen, even on the very first observation.
+func TestElapsedAnchorRetiresAnAllocationAlreadyPastItsWalltime(t *testing.T) {
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	runtime.State = "READY"
+	runtime.Resources.WallMinutes = 60
+	runtime.StartedAt = time.Now().Add(-4 * time.Hour)
+	if !outlivedAllocation(runtime, time.Now()) {
+		t.Fatal("an allocation anchored four hours back on a one-hour walltime was not retired")
+	}
+}

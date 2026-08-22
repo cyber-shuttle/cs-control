@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,9 @@ type schedulerObservation struct {
 	jobID string
 	state string
 	node  string
+	// How long Slurm says the job has been running, in whole seconds. Absent
+	// from squeue, so zero means "not reported" rather than "just started".
+	elapsedSeconds int64
 }
 
 type cancellationTarget struct {
@@ -162,7 +166,12 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					continue
 				}
 				if class == schedulerActive && runtime.StartedAt.IsZero() {
-					runtime.StartedAt = s.now()
+					// Anchor the wall-time countdown to Slurm's reported elapsed
+					// run-time rather than to this poll: the allocation may have been
+					// running long before anyone looked, and cs-bridge anchors the same
+					// deadline the same way. Without an elapsed figure the poll is the
+					// best estimate available, and it only ever errs late.
+					runtime.StartedAt = s.now().Add(-time.Duration(observation.elapsedSeconds) * time.Second)
 				}
 				wasStopping := runtime.State == "STOPPING"
 				next := nextState(runtime.State, class)
@@ -350,7 +359,7 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 	script.WriteString(sshexec.ShellQuote(earliestCreation(runtimes).Format("2006-01-02T15:04:05")))
 	script.WriteString(" --name=")
 	script.WriteString(sshexec.ShellQuote(strings.Join(names, ",")))
-	script.WriteString(" --format=JobIDRaw,State,NodeList,JobName --parsable2\n")
+	script.WriteString(" --format=JobIDRaw,State,NodeList,JobName,ElapsedRaw --parsable2\n")
 	output, err := s.Runner.Run(ctx, host, strings.NewReader(script.String()), "sh", "-s", "--", "csctl-runtime-status")
 	if err != nil {
 		return nil, nil, err
@@ -382,6 +391,11 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 			continue
 		}
 		observation := schedulerObservation{jobID: strings.TrimSpace(parts[0]), state: strings.TrimSpace(parts[1]), node: strings.TrimSpace(parts[2])}
+		if len(parts) > 4 {
+			if seconds, err := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64); err == nil && seconds >= 0 {
+				observation.elapsedSeconds = seconds
+			}
+		}
 		name := strings.TrimSpace(parts[3])
 		if section == "queue" || byID[observation.jobID].jobID == "" {
 			byID[observation.jobID], byName[name] = observation, observation
