@@ -50,14 +50,19 @@ The loopback API exposes:
 POST     /api/v1/oauth/device/start
 POST     /api/v1/oauth/device/poll/{opaqueHandle}
 GET      /api/v1/ssh
-GET      /api/v1/ssh/{alias}/slurm
+POST     /api/v1/ssh
+DELETE   /api/v1/ssh/{alias}
 WS       /api/v1/ssh/{alias}/auth
+GET      /api/v1/ssh/{alias}/slurm
+POST     /api/v1/ssh/{alias}/test
 GET      /api/v1/runtimes
 POST     /api/v1/runtimes
+POST     /api/v1/runtimes/script
 POST     /api/v1/runtimes/validate
 GET      /api/v1/runtimes/{id}
-GET      /api/v1/runtimes/{id}/access
+DELETE   /api/v1/runtimes/{id}
 POST     /api/v1/runtimes/{id}/stop
+GET      /api/v1/runtimes/{id}/access
 ```
 
 `GET /api/v1/runtimes` is the read a browser polls: it answers from persisted

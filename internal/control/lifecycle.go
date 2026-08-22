@@ -92,7 +92,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 
 	var intent Runtime
 	var record devtunnel.Record
-	var transport string
+	var jupyterToken string
 	reused, tunnelCreated := false, false
 	err = s.Store.withLock(func(store Store, current *state) error {
 		if existing := current.Runtimes[request.ID]; existing != nil {
@@ -110,7 +110,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		intent = prepared.runtime
 		intent.State, intent.CreatedAt, intent.UpdatedAt = "SUBMITTING", now, now
 		var createErr error
-		record, transport, createErr = s.createAllocationTunnel(ctx, &intent, auth)
+		record, jupyterToken, createErr = s.createAllocationTunnel(ctx, &intent, auth)
 		if createErr != nil {
 			return createErr
 		}
@@ -142,7 +142,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	}
 
 	s.runtimeStatus(intent.ID, "Submitting runtime to Slurm")
-	jobID, err := s.submitRuntimeScript(ctx, request.SSHHost, intent, prepared.script, transport, record.HostToken)
+	jobID, err := s.submitRuntimeScript(ctx, request.SSHHost, intent, prepared.script, jupyterToken, record.HostToken)
 	if err != nil {
 		if ambiguousSubmission(err) {
 			s.runtimeStatus(intent.ID, "Runtime submission outcome is unresolved")
