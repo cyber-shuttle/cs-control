@@ -99,6 +99,11 @@ type discoveryFramedOutput struct {
 	err        error
 }
 
+var (
+	leadingDigits = regexp.MustCompile(`[0-9]+`)
+	gresEntry     = regexp.MustCompile(`^(.+):([0-9]+)(?:\([^)]*\))?$`)
+)
+
 func newDiscoveryFramedOutput() *discoveryFramedOutput {
 	return &discoveryFramedOutput{remaining: sshexec.MaxOutput, state: discoveryExpectUser}
 }
@@ -286,8 +291,8 @@ func parsePartitions(output string) ([]Partition, error) {
 		if len(parts) != 4 {
 			return nil, fmt.Errorf("invalid sinfo line: %q", line)
 		}
-		cpuText := regexp.MustCompile(`[0-9]+`).FindString(parts[1])
-		memoryText := regexp.MustCompile(`[0-9]+`).FindString(parts[2])
+		cpuText := leadingDigits.FindString(parts[1])
+		memoryText := leadingDigits.FindString(parts[2])
 		cpus, cpuErr := strconv.Atoi(cpuText)
 		memory, memoryErr := strconv.Atoi(memoryText)
 		if cpuErr != nil || memoryErr != nil {
@@ -322,10 +327,9 @@ func parseGRES(value string) ([]GRES, error) {
 		}
 	}
 	entries = append(entries, strings.TrimSpace(value[start:]))
-	pattern := regexp.MustCompile(`^(.+):([0-9]+)(?:\([^)]*\))?$`)
 	result := make([]GRES, 0, len(entries))
 	for _, entry := range entries {
-		match := pattern.FindStringSubmatch(entry)
+		match := gresEntry.FindStringSubmatch(entry)
 		if match == nil {
 			return nil, fmt.Errorf("invalid GRES entry: %q", entry)
 		}

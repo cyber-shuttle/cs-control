@@ -32,18 +32,12 @@ const schedulerMarkerCancel = "__CSCTL_SCANCEL__"
 const schedulerMarkerQueue = "__CSCTL_SQUEUE__"
 const schedulerMarkerAccounting = "__CSCTL_SACCT__"
 
-// Slurm does not report a job forever, and a login node is not always
-// reachable, so an observation cannot be the only thing that ever retires a
-// runtime. These two windows are what let the clock finish the job.
+// Slurm stops reporting a job eventually and a login node is not always
+// reachable, so an observation cannot be the only thing that retires a runtime.
 const (
-	// schedulerPropagationWindow is how long after submission a job may be
-	// missing from squeue and sacct both. Slurm briefly omits a newly submitted
-	// job from either; past this, a scheduler that answered and does not know
-	// the job is reporting that it is gone, not that it has not appeared yet.
+	// How long after submission a job may be missing from squeue and sacct both.
 	schedulerPropagationWindow = 2 * time.Minute
-	// allocationWallGrace covers the gap between a job reaching its --time and
-	// Slurm actually reaping it (KillWait, epilog), so a runtime is only called
-	// gone once it cannot plausibly still be running.
+	// The gap between a job reaching its --time and Slurm reaping it.
 	allocationWallGrace = 10 * time.Minute
 )
 
@@ -54,10 +48,9 @@ func startedRuntime(runtime Runtime) bool {
 }
 
 // outlivedAllocation reports that the allocation cannot still be running,
-// whatever the scheduler last said. Slurm kills a job at its --time, so once
-// that long has passed since it started, the clock settles a runtime no
-// scheduler is answering for. A queued allocation has no such deadline: it may
-// wait for days, so only the scheduler can retire it.
+// whatever the scheduler last said: Slurm kills a job at its --time. A queued
+// one has no such deadline -- it may wait for days -- so only the scheduler can
+// retire that.
 func outlivedAllocation(runtime Runtime, now time.Time) bool {
 	if !startedRuntime(runtime) || runtime.StartedAt.IsZero() || runtime.Resources.WallMinutes <= 0 {
 		return false
@@ -66,8 +59,8 @@ func outlivedAllocation(runtime Runtime, now time.Time) bool {
 	return now.Sub(runtime.StartedAt) > limit
 }
 
-// unknownToScheduler reports that a scheduler which answered has no record of
-// this job and has had long enough to have one.
+// unknownToScheduler reports that a scheduler which answered has had long
+// enough to know this job and does not.
 func unknownToScheduler(runtime Runtime, now time.Time) bool {
 	return now.Sub(runtime.CreatedAt) > schedulerPropagationWindow
 }

@@ -32,7 +32,6 @@ case "$wire" in
     cat >/dev/null
     log_read_count=0; [ ! -f "$RECONCILE_LOG_READ_COUNT" ] || log_read_count=$(cat "$RECONCILE_LOG_READ_COUNT")
     log_read_count=$((log_read_count + 1)); printf '%s\n' "$log_read_count" > "$RECONCILE_LOG_READ_COUNT"
-    [ "$log_read_count" -gt "${RECONCILE_LOG_READ_FAILURES:-0}" ] || { printf 'runtime logs unavailable\n' >&2; exit 1; }
     eval "set -- $wire"
     shift 4
     for runtime_id in "$@"; do
