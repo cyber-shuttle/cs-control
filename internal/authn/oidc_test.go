@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -326,18 +327,15 @@ func signIDToken(t *testing.T, key *rsa.PrivateKey, claims, header map[string]an
 }
 
 func changedClaim(source map[string]any, key string, value any) map[string]any {
-	copy := make(map[string]any, len(source))
-	for name, item := range source {
-		copy[name] = item
-	}
-	copy[key] = value
-	return copy
+	claims := maps.Clone(source)
+	claims[key] = value
+	return claims
 }
 
 func withoutClaim(source map[string]any, key string) map[string]any {
-	copy := changedClaim(source, key, nil)
-	delete(copy, key)
-	return copy
+	claims := maps.Clone(source)
+	delete(claims, key)
+	return claims
 }
 
 func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {

@@ -21,12 +21,8 @@ func ambiguousSubmission(err error) bool {
 	return errors.As(err, &submit) && submit.ambiguous
 }
 
-func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime Runtime, script, jupyterToken string, secrets ...string) (string, error) {
+func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime Runtime, script, jupyterToken, hostToken string) (string, error) {
 	jobName := runtime.JobName
-	hostToken := ""
-	if len(secrets) > 0 {
-		hostToken = secrets[0]
-	}
 	// The allocation identity is only known once the tunnel exists, so it rides
 	// the job environment alongside the tokens and leaves the reviewed script
 	// byte-identical to the one Slurm validated.
@@ -49,7 +45,7 @@ func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime R
 		if message == "" {
 			message = runErr.Error()
 		}
-		for _, secret := range append([]string{jupyterToken}, secrets...) {
+		for _, secret := range []string{jupyterToken, hostToken} {
 			if secret != "" {
 				message = strings.ReplaceAll(message, secret, "[redacted]")
 			}

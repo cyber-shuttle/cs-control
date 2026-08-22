@@ -160,7 +160,9 @@ broker, or token persistence/logging.
   discovery supplies allocation endpoint metadata; do not introduce a second
   readiness owner.
 - Reconciliation is driven by reads, capped at one per second, and never runs
-  more than once at a time. There is no background cadence and no push channel:
+  more than once at a time. A slow background tick runs the same reconciliation
+  when nobody is reading, so a runtime whose owner closed the tab still reaches
+  its terminal state. There is no push channel:
   `GET /api/v1/runtimes` is the one read the browser polls, and it carries the
   caller's runtimes, whether a refresh is in flight, and their log tails --
   filtered to the same owned set, because a tail is as private as the runtime

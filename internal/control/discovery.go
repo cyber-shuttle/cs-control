@@ -223,7 +223,7 @@ func (o *discoveryFramedOutput) result(alias string) (Resource, error) {
 	}, nil
 }
 
-func (s Service) runDiscovery(ctx context.Context, alias string) (Resource, error) {
+func (s Service) Discover(ctx context.Context, alias string) (Resource, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
 	defer cancel()
 	// One fixed exec channel runs all discovery commands sequentially. The
@@ -261,10 +261,6 @@ func (s Service) runDiscovery(ctx context.Context, alias string) (Resource, erro
 }
 
 var _ io.Writer = (*discoveryFramedOutput)(nil)
-
-func (s Service) Discover(ctx context.Context, alias string) (Resource, error) {
-	return s.runDiscovery(ctx, alias)
-}
 
 func parseAccounts(output string) []string {
 	seen := map[string]bool{}
