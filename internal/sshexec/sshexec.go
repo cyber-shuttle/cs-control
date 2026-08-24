@@ -140,6 +140,7 @@ func (r Runner) run(ctx context.Context, alias, identity string, stdin io.Reader
 	}
 	args = append(args, strings.Join(quoted, " "))
 	cmd := exec.Command(r.Bin(), args...)
+	cmd.Env = ChildEnv()
 	cmd.Stdin = stdin
 	captured := &Output{remaining: MaxOutput}
 	cmd.Stdout = &commandStream{output: captured, name: "stdout"}
@@ -281,6 +282,7 @@ func (runner Runner) MasterHealthy(alias, path string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, runner.Bin(), "-S", path, "-O", "check", alias)
+	cmd.Env = ChildEnv()
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	return cmd.Run() == nil
 }
@@ -408,6 +410,7 @@ func (r Runner) Identity(ctx context.Context, alias string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.EffectiveTimeout())
 	defer cancel()
 	cmd := exec.Command(r.Bin(), "-G", alias)
+	cmd.Env = ChildEnv()
 	output := &Output{remaining: MaxOutput}
 	// Effective configuration contains identity and socket paths. Buffer stdout
 	// for the connection fingerprint but expose only diagnostics from stderr.
@@ -467,7 +470,9 @@ func (r Runner) Command(ctx context.Context, alias string, remote ...string) (*e
 	if err != nil {
 		return nil, err
 	}
-	return exec.Command(r.Bin(), append(args, remote...)...), nil
+	command := exec.Command(r.Bin(), append(args, remote...)...)
+	command.Env = ChildEnv()
+	return command, nil
 }
 
 // Bounded so no remote host can exhaust memory through its output.
@@ -476,4 +481,33 @@ func RunBounded(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := RunCommand(ctx, cmd)
 	return stdout.String(), stderr.String(), err
+}
+
+// utf8Locale is a request for UTF-8 character classification and no language,
+// which is what a service wants: it fixes what is legible without importing a
+// language's collation or message catalogue.
+const utf8Locale = "C.UTF-8"
+
+// ChildEnv is the environment every ssh cs-control starts runs in.
+//
+// OpenSSH passes text a remote host sends -- keyboard-interactive prompts,
+// banners, its own diagnostics about them -- through vis(3), which renders
+// anything the current locale calls unprintable as an octal escape. A service
+// inherits no locale at all: launchd and systemd both start one with an empty
+// environment. Under the C locale that results, every non-ASCII byte becomes
+// "\342\226\210", so a prompt drawn in UTF-8 block characters -- a QR code, a
+// box-drawn banner -- reaches the browser as unreadable octal text.
+//
+// Control characters stay escaped whatever the locale, so this changes what is
+// legible, not what is safe. A locale that already asks for UTF-8 is left alone.
+func ChildEnv() []string {
+	environment := os.Environ()
+	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		if value := os.Getenv(name); value != "" {
+			if strings.Contains(strings.ToUpper(value), "UTF-8") || strings.Contains(strings.ToUpper(value), "UTF8") {
+				return environment
+			}
+		}
+	}
+	return append(environment, "LC_ALL="+utf8Locale)
 }

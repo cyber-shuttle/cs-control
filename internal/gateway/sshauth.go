@@ -201,7 +201,7 @@ func (m *SSHAuthManager) command(session *authSession) (*exec.Cmd, bool, error) 
 	options := []string{"-q", "-T", "-N", "-o", "LogLevel=ERROR"}
 	args = append(args[:len(args)-1], append(options, host)...)
 	cmd := exec.Command(m.runner.Bin(), args...)
-	cmd.Env = os.Environ()
+	cmd.Env = sshexec.ChildEnv()
 	return cmd, false, nil
 }
 
