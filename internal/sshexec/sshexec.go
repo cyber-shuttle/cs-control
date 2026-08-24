@@ -503,11 +503,26 @@ const utf8Locale = "C.UTF-8"
 func ChildEnv() []string {
 	environment := os.Environ()
 	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
-		if value := os.Getenv(name); value != "" {
-			if strings.Contains(strings.ToUpper(value), "UTF-8") || strings.Contains(strings.ToUpper(value), "UTF8") {
-				return environment
-			}
+		if utf8Request(os.Getenv(name)) {
+			return environment
 		}
 	}
-	return append(environment, "LC_ALL="+utf8Locale)
+	// LC_ALL has to replace what is there, not sit after it: a duplicate name
+	// reaches execve twice, and glibc answers getenv with the first copy while
+	// macOS answers with the last. Appending alone therefore fixes this on a Mac
+	// and leaves it broken on the Linux hosts this actually runs on.
+	kept := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, "LC_ALL=") {
+			kept = append(kept, entry)
+		}
+	}
+	return append(kept, "LC_ALL="+utf8Locale)
+}
+
+// utf8Request reports whether a locale name asks for UTF-8 character
+// classification, which is all this needs from it.
+func utf8Request(value string) bool {
+	upper := strings.ToUpper(value)
+	return strings.Contains(upper, "UTF-8") || strings.Contains(upper, "UTF8")
 }
