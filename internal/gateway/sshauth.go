@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -41,6 +42,11 @@ const (
 
 var (
 	authWriteTimeout = 5 * time.Second
+	// Answering a second factor leaves this connection with nothing to carry for
+	// as long as the person takes, and an idle WebSocket is the first thing a
+	// proxy between the browser and here closes. The keep-alive is what makes a
+	// slow approval survive the wait.
+	authKeepAlive = 20 * time.Second
 )
 
 type authInputOp struct {
@@ -195,7 +201,7 @@ func (m *SSHAuthManager) command(session *authSession) (*exec.Cmd, bool, error) 
 	options := []string{"-q", "-T", "-N", "-o", "LogLevel=ERROR"}
 	args = append(args[:len(args)-1], append(options, host)...)
 	cmd := exec.Command(m.runner.Bin(), args...)
-	cmd.Env = os.Environ()
+	cmd.Env = sshexec.ChildEnv()
 	return cmd, false, nil
 }
 
@@ -428,8 +434,14 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 
 	readiness := time.NewTicker(50 * time.Millisecond)
 	defer readiness.Stop()
+	keepAlive := time.NewTicker(authKeepAlive)
+	defer keepAlive.Stop()
 	for {
 		select {
+		case <-keepAlive.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(authWriteTimeout)); err != nil {
+				return
+			}
 		case data := <-output:
 			if err := writeBinary(conn, authWriteTimeout, data); err != nil {
 				return
@@ -441,6 +453,10 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 					_ = writeJSON(conn, authWriteTimeout, exitFrame(0, ""))
 					finished = true
 					session.cancel() // stop browser I/O goroutines, not the owned process
+					// The owned master keeps the PTY it authenticated on, and
+					// nothing reads it once this loop ends. Drain it, so a full
+					// buffer can never block the master it belongs to.
+					go func() { _, _ = io.Copy(io.Discard, master) }()
 					return
 				}
 				cleanupFailedSession(session)

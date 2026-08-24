@@ -221,19 +221,6 @@ func TestSSHAuthHelper(t *testing.T) {
 	}
 	args := os.Args[separator:]
 	if len(args) == 2 && args[0] == "-G" {
-		switch os.Getenv("AUTH_HELPER_G_MODE") {
-		case "fail":
-			fmt.Fprintln(os.Stderr, "effective config failed")
-			os.Exit(1)
-		case "slow":
-			time.Sleep(5 * time.Second)
-		case "oversize":
-			fmt.Print(strings.Repeat("x", sshexec.MaxOutput+1))
-			os.Exit(0)
-		case "unsafe":
-			_, _ = os.Stdout.Write([]byte("host delta\x00bad\n"))
-			os.Exit(0)
-		}
 		fmt.Println("host", args[1])
 		for _, path := range strings.Split(os.Getenv("AUTH_HELPER_EFFECTIVE_FILES"), string(os.PathListSeparator)) {
 			if path == "" {
@@ -292,19 +279,8 @@ func TestSSHAuthHelper(t *testing.T) {
 		if pidFile := os.Getenv("AUTH_HELPER_PID_FILE"); pidFile != "" {
 			_ = os.WriteFile(pidFile, []byte(fmt.Sprint(os.Getpid())), 0o600)
 		}
-		if os.Getenv("AUTH_HELPER_FLOOD_OUTPUT") == "1" {
-			chunk := strings.Repeat("x", 16<<10)
-			for {
-				fmt.Print(chunk)
-			}
-		}
 		if os.Getenv("AUTH_HELPER_NO_READ") == "1" {
 			fmt.Println("NOT_READING")
-			select {}
-		}
-		if os.Getenv("AUTH_HELPER_IGNORE_TERM") == "1" {
-			signal.Ignore(syscall.SIGTERM)
-			fmt.Println("STUBBORN_PID", os.Getpid())
 			select {}
 		}
 		if os.Getenv("AUTH_HELPER_START_DELAY") != "" {
@@ -593,6 +569,43 @@ func TestControlPathChangesForEveryEffectiveConfigurationSource(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// A second factor is answered on another device, so the connection carries
+// nothing while the person answers it. What keeps it open is the keep-alive.
+func TestPromptWaitKeepsTheConnectionAlive(t *testing.T) {
+	oldKeepAlive := authKeepAlive
+	authKeepAlive = 20 * time.Millisecond
+	defer func() { authKeepAlive = oldKeepAlive }()
+	service := newAuthTestService(t)
+	manager := NewSSHAuthManager(service)
+	defer manager.Close()
+	server := httptest.NewServer(serveSSHRoute(manager))
+	defer server.Close()
+
+	connection := dialAuthWithoutReading(t, server.URL)
+	defer connection.Close()
+	pings := make(chan struct{}, 4)
+	connection.SetPingHandler(func(string) error {
+		select {
+		case pings <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	// The helper is sitting at its password prompt: nothing else will arrive.
+	go func() {
+		for {
+			if _, _, err := connection.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-pings:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an idle prompt received no keep-alive")
 	}
 }
 

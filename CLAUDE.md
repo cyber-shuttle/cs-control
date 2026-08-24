@@ -14,7 +14,7 @@ layer that can hold it, and never introduce an upward import.
 ```
 apierr  safeio  proc                  error shape, private files, process groups
 httpx                                 bounded client/body, HTTPS base-URL policy, JSON writers
-sshconfig                             reads ~/.ssh/config; never writes it, never runs ssh
+sshconfig                             reads ~/.ssh/config, writes only its own managed block, never runs ssh
 sshexec                               argument vectors, control socket, bounded output
 devtunnel                             Dev Tunnels management client and its URI/host policy
 authn                                 OAuth boundary, OIDC validation, device-code broker
@@ -69,11 +69,18 @@ broker, or token persistence/logging.
   `POST /api/v1/runtimes/validate` returns the candidate script and Slurm
   validation result, and `POST /api/v1/runtimes` creates the reviewed
   allocation. Keep validation and create as OAuth-authenticated API actions.
-- The batch script starts Jupyter Server in the background and then execs
-  Linkspan with plain flags to host the allocation tunnel. Inject the Jupyter
-  identity token and the tunnel host token with fixed `sbatch --export`
-  arguments. Validation and submission scripts must be byte-identical and
-  contain no generated secret literal.
+- The batch script execs Linkspan and names no application. What runs inside
+  an allocation is the workflow's business: provisioning installs a per-runtime
+  workflow beside the allocation, and the script points Linkspan at it, so the
+  service starts through Linkspan once Linkspan is live. `shell.exec` runs
+  without a shell and expands nothing, so the workflow carries only validated
+  remote paths; the Jupyter identity token and port reach the server through
+  `JUPYTER_TOKEN` and `JUPYTER_PORT`, which it reads itself. Inject those, the
+  tunnel host token, and the allocation identity the tunnel only assigns at
+  creation (its ID, cluster, and generation-derived ports) with fixed
+  `sbatch --export` arguments. Validation and submission scripts must be
+  byte-identical and contain no generated secret literal, so nothing that is
+  unknown at review time may be written into the script text.
 - Create one creator-owned Dev Tunnel per allocation generation, declaring both
   allocation ports at creation. Never request tunnel-wide anonymous access;
   grant anonymous connect only on the Jupyter port, whose authorization is
@@ -105,6 +112,32 @@ broker, or token persistence/logging.
   again, so there is no restart path to keep consistent with create.
 - Tunnel expiry is the final cleanup backstop after ungraceful process or job
   failure.
+- The Linkspan path may be absolute or anchored at `$HOME/`, which discovery
+  resolves per host, so one setting serves hosts whose accounts do not share a
+  home directory. It defaults to `$HOME/.cybershuttle/bin/linkspan`.
+- An allocation prepares itself. The login node supplies only the two binaries
+  a job cannot start without -- the Linkspan release it execs and uv, both
+  single downloads that take seconds -- installed by one constant script during
+  create, after the runtime is durable so its progress streams into the tail
+  the browser polls. The environment, its dependencies, the server, and the
+  wait for that server to answer all happen inside the allocation, through the
+  workflow Linkspan runs. Both binaries belong to the account, not to a
+  workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens.
+  An allocation hosts a tunnel this control plane created, so its Linkspan must
+  accept `--tunnel-host-token`; preparation refuses a host whose Linkspan does
+  not, rather than letting the allocation die on its first flag.
+  Preparation starts when a host is selected -- the discovery route begins it in
+  the background, minutes before the same person submits -- and outlives the
+  request that triggered it, so a caller that goes away leaves no half-built
+  environment, and one preparation runs per host at a time -- a second caller is refused with `runtime_provisioning_in_progress`
+  rather than made to wait behind work it cannot see. A host that cannot be
+  prepared is refused with the reason and never receives a job.
+- Host entries the API creates live between the `cybershuttle managed`
+  markers in `~/.ssh/config`, written atomically at mode `0600`. Everything
+  outside those markers is read and never rewritten, and only a managed alias
+  may be removed. A pasted ssh command is parsed server-side into host, user,
+  port, identity, and an allowlisted set of `-o` options; anything that can run
+  a local program or include more configuration is refused.
 - The CLI exposes only `serve`, `help`, and `version`. Runtime and SSH
   operations use the OAuth-authenticated API; do not add delegated-token argv
   flags.
@@ -127,7 +160,9 @@ broker, or token persistence/logging.
   discovery supplies allocation endpoint metadata; do not introduce a second
   readiness owner.
 - Reconciliation is driven by reads, capped at one per second, and never runs
-  more than once at a time. There is no background cadence and no push channel:
+  more than once at a time. A slow background tick runs the same reconciliation
+  when nobody is reading, so a runtime whose owner closed the tab still reaches
+  its terminal state. There is no push channel:
   `GET /api/v1/runtimes` is the one read the browser polls, and it carries the
   caller's runtimes, whether a refresh is in flight, and their log tails --
   filtered to the same owned set, because a tail is as private as the runtime

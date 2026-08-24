@@ -99,6 +99,11 @@ type discoveryFramedOutput struct {
 	err        error
 }
 
+var (
+	leadingDigits = regexp.MustCompile(`[0-9]+`)
+	gresEntry     = regexp.MustCompile(`^(.+):([0-9]+)(?:\([^)]*\))?$`)
+)
+
 func newDiscoveryFramedOutput() *discoveryFramedOutput {
 	return &discoveryFramedOutput{remaining: sshexec.MaxOutput, state: discoveryExpectUser}
 }
@@ -218,7 +223,7 @@ func (o *discoveryFramedOutput) result(alias string) (Resource, error) {
 	}, nil
 }
 
-func (s Service) runDiscovery(ctx context.Context, alias string) (Resource, error) {
+func (s Service) Discover(ctx context.Context, alias string) (Resource, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
 	defer cancel()
 	// One fixed exec channel runs all discovery commands sequentially. The
@@ -247,19 +252,12 @@ func (s Service) runDiscovery(ctx context.Context, alias string) (Resource, erro
 			}
 			return Resource{}, framedErr
 		}
-		if message == "" {
-			message = runErr.Error()
-		}
-		return Resource{}, fmt.Errorf("ssh command failed: %s", message)
+		return Resource{}, fmt.Errorf("ssh command failed: %s", sshexec.FailureMessage(message, runErr))
 	}
 	return stdout.result(alias)
 }
 
 var _ io.Writer = (*discoveryFramedOutput)(nil)
-
-func (s Service) Discover(ctx context.Context, alias string) (Resource, error) {
-	return s.runDiscovery(ctx, alias)
-}
 
 func parseAccounts(output string) []string {
 	seen := map[string]bool{}
@@ -286,8 +284,8 @@ func parsePartitions(output string) ([]Partition, error) {
 		if len(parts) != 4 {
 			return nil, fmt.Errorf("invalid sinfo line: %q", line)
 		}
-		cpuText := regexp.MustCompile(`[0-9]+`).FindString(parts[1])
-		memoryText := regexp.MustCompile(`[0-9]+`).FindString(parts[2])
+		cpuText := leadingDigits.FindString(parts[1])
+		memoryText := leadingDigits.FindString(parts[2])
 		cpus, cpuErr := strconv.Atoi(cpuText)
 		memory, memoryErr := strconv.Atoi(memoryText)
 		if cpuErr != nil || memoryErr != nil {
@@ -322,10 +320,9 @@ func parseGRES(value string) ([]GRES, error) {
 		}
 	}
 	entries = append(entries, strings.TrimSpace(value[start:]))
-	pattern := regexp.MustCompile(`^(.+):([0-9]+)(?:\([^)]*\))?$`)
 	result := make([]GRES, 0, len(entries))
 	for _, entry := range entries {
-		match := pattern.FindStringSubmatch(entry)
+		match := gresEntry.FindStringSubmatch(entry)
 		if match == nil {
 			return nil, fmt.Errorf("invalid GRES entry: %q", entry)
 		}

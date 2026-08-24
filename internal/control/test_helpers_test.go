@@ -2,7 +2,6 @@ package control
 
 import (
 	"context"
-	"encoding/base64"
 	"os"
 	"strings"
 	"sync"
@@ -20,13 +19,6 @@ const testJupyterToken = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 var testPrincipal = authn.Principal{Subject: "test-owner", Tenant: "test-tenant"}
 
 const testIdentityToken = "signed-test-identity-token"
-
-// browserWebSocketProtocols is the subprotocol list a browser sends on a
-// control WebSocket: the protocol name plus both credential channels.
-func browserWebSocketProtocols(token string) string {
-	return authn.ControlWebSocketProtocol + ", " + authn.WebSocketBearerPrefix + base64.RawURLEncoding.EncodeToString([]byte(token)) +
-		", " + authn.WebSocketIdentityPrefix + base64.RawURLEncoding.EncodeToString([]byte(testIdentityToken))
-}
 
 type oauthValidatorFunc func(context.Context, string) (authn.Principal, error)
 

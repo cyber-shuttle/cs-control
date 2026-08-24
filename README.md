@@ -50,14 +50,19 @@ The loopback API exposes:
 POST     /api/v1/oauth/device/start
 POST     /api/v1/oauth/device/poll/{opaqueHandle}
 GET      /api/v1/ssh
-GET      /api/v1/ssh/{alias}/slurm
+POST     /api/v1/ssh
+DELETE   /api/v1/ssh/{alias}
 WS       /api/v1/ssh/{alias}/auth
+GET      /api/v1/ssh/{alias}/slurm
+POST     /api/v1/ssh/{alias}/test
 GET      /api/v1/runtimes
 POST     /api/v1/runtimes
+POST     /api/v1/runtimes/script
 POST     /api/v1/runtimes/validate
 GET      /api/v1/runtimes/{id}
-GET      /api/v1/runtimes/{id}/access
+DELETE   /api/v1/runtimes/{id}
 POST     /api/v1/runtimes/{id}/stop
+GET      /api/v1/runtimes/{id}/access
 ```
 
 `GET /api/v1/runtimes` is the read a browser polls: it answers from persisted
@@ -76,17 +81,21 @@ export CSCTL_LINKSPAN=/home/me/.cybershuttle/bin/linkspan
 Before submission cs-control requires the exact Linkspan allocation contract, performs SSH discovery and `sbatch --test-only`, creates a principal-owned Dev Tunnel, durably records the allocation generation and connect credential, and submits:
 
 ```bash
-exec "$LINKSPAN_BIN" allocation "$CS_LINKSPAN_TRANSPORT"
+exec "$LINKSPAN_BIN" --port "$CS_CONTROL_PORT" --tunnel-enable \
+  --tunnel-id "$CS_TUNNEL_ID" --tunnel-cluster "$CS_TUNNEL_CLUSTER" \
+  --tunnel-host-token "$CS_TUNNEL_HOST_TOKEN" --workflow "$PRIVATE_ROOT/workflow.yaml"
 ```
 
-The generated transport is passed through fixed `sbatch --export` arguments and is redacted from errors. Conclusive submission failure compensates the tunnel and credential; ambiguous submission retains durable intent for scheduler recovery. Stop invalidates the tunnel and credential while preserving the scheduler stop state. A terminal allocation is not resumable: creating another one is the only way to run it again.
+The batch script names no application: what the allocation is for travels with it in the workflow document,
+whose only action is `shell.exec`. Tokens and ports are passed through fixed `sbatch --export` arguments and
+are redacted from errors. Conclusive submission failure compensates the tunnel and credential; ambiguous submission retains durable intent for scheduler recovery. Stop invalidates the tunnel and credential while preserving the scheduler stop state. A terminal allocation is not resumable: creating another one is the only way to run it again.
 
-Scheduler state remains SSH/SLURM authoritative. The owner-authenticated `/access` endpoint returns the allocation's Linkspan control URI and generation capability. cs-control does not proxy Jupyter, VS Code, or other runtime data and does not read or clean up shared Linkspan token or readiness-manifest files.
+Scheduler state remains SSH/SLURM authoritative. The owner-authenticated `/access` endpoint returns the allocation's Jupyter URI and its token. cs-control does not proxy Jupyter, VS Code, or other runtime data and does not read or clean up shared Linkspan token or readiness-manifest files.
 
 The runtime states are `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, and `FAILED`. There is one state field: a Slurm word this vocabulary does not cover is treated as no observation rather than a state of its own. Runtime list responses, and the log tails that travel with them, are filtered to the validated owner principal; item and access reads reject a different principal.
 
 Tunnel creation omits `accessControl` and relies on the documented private,
-creator-owner default; cs-control never requests anonymous tunnel-wide access. Linkspan later adds anonymous `connect` access only to the capability-protected Jupyter port. It sends
+creator-owner default; cs-control never requests anonymous tunnel-wide access. Linkspan only hosts the tunnel cs-control created; it never adds ports or access of its own. cs-control sends
 `customExpiration` as walltime plus cleanup grace, floored at one hour and
 capped at 30 days. The response must return that exact duration, and its
 `created` plus duration must match `expiration` within the documented one-second

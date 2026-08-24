@@ -44,26 +44,37 @@ func newJupyterToken() (string, error) {
 }
 
 func (s Service) RuntimeAccess(ctx context.Context, runtime Runtime) (*RuntimeAccessResponse, error) {
-	unavailable := func() (*RuntimeAccessResponse, error) {
-		return nil, apierr.New("runtime_access_unavailable", "Linkspan access is unavailable", 409)
+	// Naming the reason is what makes a refusal actionable: the causes below are
+	// distinct failures that otherwise arrive as one indistinguishable 409.
+	unavailable := func(reason string) (*RuntimeAccessResponse, error) {
+		return nil, apierr.New("runtime_access_unavailable", "Linkspan access is unavailable: "+reason, 409)
 	}
-	if s.Tunnels == nil || !idPattern.MatchString(runtime.ID) || !generationPattern.MatchString(runtime.Generation) || runtime.State != "READY" || !runtime.Tunnel.ExpiresAt.After(s.now()) {
-		return unavailable()
+	if s.Tunnels == nil || !idPattern.MatchString(runtime.ID) || !generationPattern.MatchString(runtime.Generation) {
+		return unavailable("the runtime is not addressable")
+	}
+	if runtime.State != "READY" {
+		return unavailable("the runtime is " + strings.ToLower(runtime.State))
 	}
 	credential, err := s.Credentials.Get(runtime.ID, runtime.Generation)
 	if err != nil {
-		return unavailable()
+		return unavailable("this allocation generation has no stored credential")
 	}
 	record, err := s.Tunnels.Get(ctx, devtunnel.GetRequest{AccessToken: credential.ConnectToken, TunnelID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID})
 	if err != nil {
-		return unavailable()
+		return unavailable("the allocation tunnel could not be reached")
+	}
+	// The service extends a hosted tunnel's expiration, so the live record is the
+	// only authoritative one; the persisted value is a creation-time record and
+	// drifts as soon as Linkspan starts serving traffic.
+	if !record.ExpiresAt.After(s.now()) {
+		return unavailable("the allocation tunnel has expired")
 	}
 	uri, err := allocationPortURI(record, runtime.Tunnel, jupyterPortDescription)
 	if err != nil {
-		return unavailable()
+		return unavailable(err.Error())
 	}
 	return &RuntimeAccessResponse{
-		RuntimeID: runtime.ID, Generation: runtime.Generation, ExpiresAt: runtime.Tunnel.ExpiresAt.UTC(),
+		RuntimeID: runtime.ID, Generation: runtime.Generation, ExpiresAt: record.ExpiresAt.UTC(),
 		Jupyter: RuntimeJupyterAccess{URI: uri, Token: credential.JupyterToken},
 	}, nil
 }
@@ -163,8 +174,11 @@ func (s Service) compensateAllocationTunnel(auth authn.TunnelAuthorization, runt
 }
 
 func allocationPortURI(record devtunnel.Record, tunnel TunnelMetadata, description string) (string, error) {
-	if record.ID != tunnel.ID || record.ClusterID != tunnel.ClusterID || record.ExpiresAt.Sub(tunnel.ExpiresAt) > time.Second || tunnel.ExpiresAt.Sub(record.ExpiresAt) > time.Second {
-		return "", errors.New("Dev Tunnel metadata does not match the runtime")
+	// Only the identity is stable across a tunnel's life: the management service
+	// slides the expiration forward while the tunnel is hosted, so comparing it
+	// to the value stored at creation refuses every healthy allocation.
+	if record.ID != tunnel.ID || record.ClusterID != tunnel.ClusterID {
+		return "", errors.New("the allocation tunnel identity does not match the runtime")
 	}
 	result := ""
 	for _, port := range record.Ports {

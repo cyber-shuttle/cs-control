@@ -79,9 +79,14 @@ func (r Runner) sshArgs(alias string, interactive bool, identity string) ([]stri
 	if !sshconfig.ValidAlias(alias) {
 		return nil, sshconfig.ErrInvalidAlias
 	}
-	batchMode := "yes"
+	batchMode, persist := "yes", "600"
 	if interactive {
-		batchMode = "no"
+		// An interactive master is owned by the process that starts it, and
+		// ControlPersist takes that ownership away: OpenSSH backgrounds the
+		// master the moment it authenticates and the foreground exits 0, which
+		// reads as an exit before readiness and leaves a master nothing can
+		// reap. Without it the foreground process is the master.
+		batchMode, persist = "no", "no"
 	}
 	args := r.sshBaseArgs(batchMode)
 	if r.ControlDir != "" {
@@ -89,7 +94,7 @@ func (r Runner) sshArgs(alias string, interactive bool, identity string) ([]stri
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPersist=600", "-o", "ControlPath="+path)
+		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPersist="+persist, "-o", "ControlPath="+path)
 	}
 	return append(args, alias), nil
 }
@@ -135,6 +140,7 @@ func (r Runner) run(ctx context.Context, alias, identity string, stdin io.Reader
 	}
 	args = append(args, strings.Join(quoted, " "))
 	cmd := exec.Command(r.Bin(), args...)
+	cmd.Env = ChildEnv()
 	cmd.Stdin = stdin
 	captured := &Output{remaining: MaxOutput}
 	cmd.Stdout = &commandStream{output: captured, name: "stdout"}
@@ -147,10 +153,7 @@ func (r Runner) run(ctx context.Context, alias, identity string, stdin io.Reader
 	if ctx.Err() != nil {
 		return stdout, fmt.Errorf("ssh command timed out: %w", ctx.Err())
 	}
-	message := strings.TrimSpace(captured.stderr.String())
-	if message == "" {
-		message = runErr.Error()
-	}
+	message := FailureMessage(captured.stderr.String(), runErr)
 	if AuthenticationFailure(message) {
 		return stdout, AuthenticationRequired(alias)
 	}
@@ -276,6 +279,7 @@ func (runner Runner) MasterHealthy(alias, path string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, runner.Bin(), "-S", path, "-O", "check", alias)
+	cmd.Env = ChildEnv()
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	return cmd.Run() == nil
 }
@@ -403,6 +407,7 @@ func (r Runner) Identity(ctx context.Context, alias string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.EffectiveTimeout())
 	defer cancel()
 	cmd := exec.Command(r.Bin(), "-G", alias)
+	cmd.Env = ChildEnv()
 	output := &Output{remaining: MaxOutput}
 	// Effective configuration contains identity and socket paths. Buffer stdout
 	// for the connection fingerprint but expose only diagnostics from stderr.
@@ -412,10 +417,7 @@ func (r Runner) Identity(ctx context.Context, alias string) (string, error) {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("resolve effective SSH configuration: %w", ctx.Err())
 		}
-		message := strings.TrimSpace(output.stderr.String())
-		if message == "" {
-			message = err.Error()
-		}
+		message := FailureMessage(output.stderr.String(), err)
 		return "", fmt.Errorf("resolve effective SSH configuration: %s", message)
 	}
 	identity := strings.ReplaceAll(output.stdout.String(), "\r\n", "\n")
@@ -462,7 +464,9 @@ func (r Runner) Command(ctx context.Context, alias string, remote ...string) (*e
 	if err != nil {
 		return nil, err
 	}
-	return exec.Command(r.Bin(), append(args, remote...)...), nil
+	command := exec.Command(r.Bin(), append(args, remote...)...)
+	command.Env = ChildEnv()
+	return command, nil
 }
 
 // Bounded so no remote host can exhaust memory through its output.
@@ -471,4 +475,60 @@ func RunBounded(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := RunCommand(ctx, cmd)
 	return stdout.String(), stderr.String(), err
+}
+
+// utf8Locale is a request for UTF-8 character classification and no language,
+// which is what a service wants: it fixes what is legible without importing a
+// language's collation or message catalogue.
+const utf8Locale = "C.UTF-8"
+
+// ChildEnv is the environment every ssh cs-control starts runs in.
+//
+// OpenSSH passes text a remote host sends -- keyboard-interactive prompts,
+// banners, its own diagnostics about them -- through vis(3), which renders
+// anything the current locale calls unprintable as an octal escape. A service
+// inherits no locale at all: launchd and systemd both start one with an empty
+// environment. Under the C locale that results, every non-ASCII byte becomes
+// "\342\226\210", so a prompt drawn in UTF-8 block characters -- a QR code, a
+// box-drawn banner -- reaches the browser as unreadable octal text.
+//
+// Control characters stay escaped whatever the locale, so this changes what is
+// legible, not what is safe. A locale that already asks for UTF-8 is left alone.
+func ChildEnv() []string {
+	environment := os.Environ()
+	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		if utf8Request(os.Getenv(name)) {
+			return environment
+		}
+	}
+	// LC_ALL has to replace what is there, not sit after it: a duplicate name
+	// reaches execve twice, and glibc answers getenv with the first copy while
+	// macOS answers with the last. Appending alone therefore fixes this on a Mac
+	// and leaves it broken on the Linux hosts this actually runs on.
+	kept := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, "LC_ALL=") {
+			kept = append(kept, entry)
+		}
+	}
+	return append(kept, "LC_ALL="+utf8Locale)
+}
+
+// utf8Request reports whether a locale name asks for UTF-8 character
+// classification, which is all this needs from it.
+func utf8Request(value string) bool {
+	upper := strings.ToUpper(value)
+	return strings.Contains(upper, "UTF-8") || strings.Contains(upper, "UTF8")
+}
+
+// FailureMessage is what a failed remote command has to say for itself: its
+// stderr, or the process error when stderr said nothing.
+func FailureMessage(stderr string, err error) string {
+	if message := strings.TrimSpace(stderr); message != "" {
+		return message
+	}
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

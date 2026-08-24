@@ -6,7 +6,7 @@
 // Everything it needs from outside is a composed subsystem it never reaches
 // past: sshexec runs remote commands, sshconfig reads ~/.ssh/config, devtunnel
 // owns the Dev Tunnels API, authn owns identity, gateway serves the SSH
-// authentication socket, and safeio, httpx, wsjson, proc and apierr hold the
+// authentication socket, and safeio and httpx, proc and apierr hold the
 // primitives they share.
 package control
 
@@ -101,13 +101,20 @@ type RuntimeResponse struct {
 
 type Runtime struct {
 	RuntimeResponse
-	Owner         authn.Principal `json:"owner"`
-	Tunnel        TunnelMetadata  `json:"tunnel"`
-	JobID         string          `json:"jobId,omitempty"`
-	JobName       string          `json:"jobName"`
-	Node          string          `json:"node,omitempty"`
-	PrivateRoot   string          `json:"privateRoot"`
-	WorkspaceRoot string          `json:"workspaceRoot"`
+	Owner   authn.Principal `json:"owner"`
+	Tunnel  TunnelMetadata  `json:"tunnel"`
+	JobID   string          `json:"jobId,omitempty"`
+	JobName string          `json:"jobName"`
+	// When Slurm was first seen running this allocation. Its --time is measured
+	// from there, so this is what lets the clock retire a runtime the scheduler
+	// has stopped answering for. Zero until the allocation starts.
+	StartedAt     time.Time `json:"startedAt,omitempty"`
+	Node          string    `json:"node,omitempty"`
+	PrivateRoot   string    `json:"privateRoot"`
+	WorkspaceRoot string    `json:"workspaceRoot"`
+	// The account's own home on this host. The interpreter a runtime starts is
+	// a tool of the account, not of the workspace it opens.
+	HomeDir string `json:"homeDir"`
 }
 
 type RuntimeList struct {
@@ -138,6 +145,13 @@ type RuntimeJupyterAccess struct {
 	Token string `json:"token"`
 }
 
+// RuntimeScript is the candidate script alone. Validation returns the same text
+// with Slurm's answer; this is what the caller can read before that answer.
+type RuntimeScript struct {
+	RuntimeID string `json:"runtimeId"`
+	Script    string `json:"script"`
+}
+
 type ValidationResult struct {
 	RuntimeID string `json:"runtimeId"`
 	Script    string `json:"script"`
@@ -151,6 +165,9 @@ type preparedRuntime struct {
 	request CreateRequest
 	runtime Runtime
 	script  string
+	// Where Linkspan belongs on this host, with any $HOME anchor already
+	// resolved, so provisioning and the script name the same file.
+	linkspan string
 }
 
 type commandResult struct {
@@ -164,14 +181,28 @@ type state struct {
 	Runtimes map[string]*Runtime `json:"runtimes"`
 }
 
+// DefaultLinkspanPath is where a runtime installs Linkspan when a host has
+// none: under the account's own home, which every account can write to.
+const DefaultLinkspanPath = "$HOME/.cybershuttle/bin/linkspan"
+
+// defaultRuntimeBase is where a runtime's private state lives, relative to the
+// account's home. It is the only value the layout rules accept.
+const defaultRuntimeBase = ".cybershuttle/runtimes"
+
+// The smallest allocation worth scheduling. cs-jupyter offers the same floor
+// in its create form; keep the two in step.
+const (
+	MinCores    = 2
+	MinMemoryMB = 4096
+)
+
 type Config struct {
 	LinkspanPath string
 	RuntimeBase  string
 }
 
 type Store struct {
-	Dir      string
-	saveHook func(*state) error
+	Dir string
 }
 
 type Service struct {
@@ -189,10 +220,10 @@ func (s Service) SSHConfig() sshconfig.Config { return s.Runner.Hosts }
 func (s Service) effectiveConfig() Config {
 	cfg := s.Config
 	if !safeRemoteExecutable(cfg.LinkspanPath) {
-		cfg.LinkspanPath = "/usr/local/bin/linkspan"
+		cfg.LinkspanPath = DefaultLinkspanPath
 	}
 	if cfg.RuntimeBase == "" {
-		cfg.RuntimeBase = ".cybershuttle/runtimes"
+		cfg.RuntimeBase = defaultRuntimeBase
 	}
 	return cfg
 }
@@ -204,10 +235,6 @@ var (
 	errRouteNotFound    = apierr.New("not_found", "route not found", 404)
 	errMethodNotAllowed = apierr.New("method_not_allowed", "method not allowed", 405)
 )
-
-const restartRecoveryAttempts = 4
-
-var restartRecoveryDelay = 50 * time.Millisecond
 
 // Everything that answers a caller returns one of these, so no response shares
 // memory with the state the lock protects.

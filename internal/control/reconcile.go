@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,9 @@ type schedulerObservation struct {
 	jobID string
 	state string
 	node  string
+	// How long Slurm says the job has been running, in whole seconds. Absent
+	// from squeue, so zero means "not reported" rather than "just started".
+	elapsedSeconds int64
 }
 
 type cancellationTarget struct {
@@ -27,6 +31,47 @@ type cancellationTarget struct {
 const schedulerMarkerCancel = "__CSCTL_SCANCEL__"
 const schedulerMarkerQueue = "__CSCTL_SQUEUE__"
 const schedulerMarkerAccounting = "__CSCTL_SACCT__"
+
+// Slurm stops reporting a job eventually and a login node is not always
+// reachable, so an observation cannot be the only thing that retires a runtime.
+const (
+	// How long after submission a job may be missing from squeue and sacct both.
+	schedulerPropagationWindow = 2 * time.Minute
+	// The gap between a job reaching its --time and Slurm reaping it.
+	allocationWallGrace = 10 * time.Minute
+	// How much further back than the oldest runtime sacct is asked to look, so a
+	// clock that disagrees with ours cannot clip the newest one out of the answer.
+	schedulerLookbackSlack = time.Hour
+	// The furthest back it is ever asked to look. A window is a query against the
+	// cluster's accounting database, so an unbounded one is slow for everybody;
+	// and a runtime still unaccounted for after this long is one the scheduler has
+	// already stopped knowing about, which absence retires on its own.
+	schedulerLookbackMax = 30 * 24 * time.Hour
+)
+
+// startedRuntime reports whether Slurm had begun running the allocation, which
+// is what makes its --time a deadline rather than an open-ended queue wait.
+func startedRuntime(runtime Runtime) bool {
+	return runtime.State == "STARTING" || runtime.State == "READY"
+}
+
+// outlivedAllocation reports that the allocation cannot still be running,
+// whatever the scheduler last said: Slurm kills a job at its --time. A queued
+// one has no such deadline -- it may wait for days -- so only the scheduler can
+// retire that.
+func outlivedAllocation(runtime Runtime, now time.Time) bool {
+	if !startedRuntime(runtime) || runtime.StartedAt.IsZero() || runtime.Resources.WallMinutes <= 0 {
+		return false
+	}
+	limit := time.Duration(runtime.Resources.WallMinutes)*time.Minute + allocationWallGrace
+	return now.Sub(runtime.StartedAt) > limit
+}
+
+// unknownToScheduler reports that a scheduler which answered has had long
+// enough to know this job and does not.
+func unknownToScheduler(runtime Runtime, now time.Time) bool {
+	return now.Sub(runtime.CreatedAt) > schedulerPropagationWindow
+}
 
 // reconcileSnapshots performs all scheduler and endpoint I/O without holding
 // the state lock. Scheduler calls are batched into one SSH execution per host.
@@ -59,6 +104,16 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					if !s.reconciliationSnapshotCurrent(snapshots[index]) {
 						continue
 					}
+					// No answer is not the same as no allocation, so the last good
+					// state stands -- until the allocation's own --time has passed,
+					// after which Slurm has certainly reaped it and a host we cannot
+					// reach must not pin the runtime to a state it left long ago.
+					if outlivedAllocation(results[index], s.now()) {
+						results[index].State = "STOPPED"
+						results[index].Error = ""
+						s.runtimeStatus(results[index].ID, "Allocation reached its wall-time limit")
+						continue
+					}
 					results[index].Error = err.Error()
 					s.runtimeStatus(results[index].ID, "Runtime status check failed")
 				}
@@ -77,6 +132,15 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					// expected propagation window as a runtime failure. STOPPING still
 					// exposes missing cancellation state because cleanup depends on it.
 					if runtime.State != "STOPPING" {
+						// Past that window the scheduler answered and does not know this
+						// job, which is an observation in its own right: the allocation
+						// is over, however it ended. Retaining the last state here is
+						// what used to leave a finished runtime reading READY forever.
+						if unknownToScheduler(*runtime, s.now()) {
+							runtime.State = "STOPPED"
+							runtime.Error = ""
+							s.runtimeStatus(runtime.ID, "Allocation is no longer known to the scheduler")
+						}
 						continue
 					}
 					if message := cancelErrors[runtime.ID]; message != "" {
@@ -102,6 +166,14 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 				if class == schedulerUnknown {
 					continue
 				}
+				if class == schedulerActive && runtime.StartedAt.IsZero() {
+					// Anchor the wall-time countdown to Slurm's reported elapsed
+					// run-time rather than to this poll: the allocation may have been
+					// running long before anyone looked, and cs-bridge anchors the same
+					// deadline the same way. Without an elapsed figure the poll is the
+					// best estimate available, and it only ever errs late.
+					runtime.StartedAt = s.now().Add(-time.Duration(observation.elapsedSeconds) * time.Second)
+				}
 				wasStopping := runtime.State == "STOPPING"
 				next := nextState(runtime.State, class)
 				if next == "STOPPED" || next == "FAILED" {
@@ -125,7 +197,11 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					case "READY":
 						s.runtimeStatus(runtime.ID, "Allocation is running")
 					case "STOPPED":
-						s.runtimeStatus(runtime.ID, "Runtime stopped")
+						if class == schedulerExpired {
+							s.runtimeStatus(runtime.ID, "Runtime reached its walltime")
+						} else {
+							s.runtimeStatus(runtime.ID, "Runtime stopped")
+						}
 					case "FAILED":
 						s.runtimeStatus(runtime.ID, "Runtime failed")
 					}
@@ -169,6 +245,7 @@ const (
 	schedulerPending
 	schedulerActive
 	schedulerStopped
+	schedulerExpired
 	schedulerFailed
 )
 
@@ -184,7 +261,12 @@ func classifySchedulerState(raw string) schedulerClass {
 		return schedulerActive
 	case "COMPLETED", "CANCELLED", "STOPPED":
 		return schedulerStopped
-	case "BOOT_FAIL", "DEADLINE", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "REVOKED", "SPECIAL_EXIT", "TIMEOUT":
+	// An allocation that runs out its walltime has done exactly what it was
+	// asked to do, so it ends stopped rather than failed; the class is kept
+	// apart only so the owner is told which of the two happened.
+	case "TIMEOUT":
+		return schedulerExpired
+	case "BOOT_FAIL", "DEADLINE", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "REVOKED", "SPECIAL_EXIT":
 		return schedulerFailed
 	}
 	return schedulerUnknown
@@ -204,7 +286,7 @@ func nextState(current string, class schedulerClass) string {
 		return "READY"
 	case class == schedulerActive:
 		return "STARTING"
-	case class == schedulerStopped:
+	case class == schedulerStopped || class == schedulerExpired:
 		return "STOPPED"
 	}
 	return "FAILED"
@@ -269,9 +351,15 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 	script.WriteString("\nsqueue --me --noheader --format='%i|%T|%N|%j'\n")
 	script.WriteString("printf '%s\\n' ")
 	script.WriteString(sshexec.ShellQuote(schedulerMarkerAccounting))
-	script.WriteString("\nsacct --noheader -X --name=")
+	// sacct defaults to jobs from midnight today, which silently hides every
+	// allocation submitted before it -- the runtime then reads as missing rather
+	// than finished, and keeps its last state. Ask far enough back to cover the
+	// oldest runtime in this batch instead.
+	script.WriteString("\nsacct --noheader -X --starttime=")
+	script.WriteString(sshexec.ShellQuote(schedulerLookback(runtimes, s.now())))
+	script.WriteString(" --name=")
 	script.WriteString(sshexec.ShellQuote(strings.Join(names, ",")))
-	script.WriteString(" --format=JobIDRaw,State,NodeList,JobName --parsable2\n")
+	script.WriteString(" --format=JobIDRaw,State,NodeList,JobName,ElapsedRaw --parsable2\n")
 	output, err := s.Runner.Run(ctx, host, strings.NewReader(script.String()), "sh", "-s", "--", "csctl-runtime-status")
 	if err != nil {
 		return nil, nil, err
@@ -303,6 +391,11 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 			continue
 		}
 		observation := schedulerObservation{jobID: strings.TrimSpace(parts[0]), state: strings.TrimSpace(parts[1]), node: strings.TrimSpace(parts[2])}
+		if len(parts) > 4 {
+			if seconds, err := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64); err == nil && seconds >= 0 {
+				observation.elapsedSeconds = seconds
+			}
+		}
 		name := strings.TrimSpace(parts[3])
 		if section == "queue" || byID[observation.jobID].jobID == "" {
 			byID[observation.jobID], byName[name] = observation, observation
@@ -342,7 +435,7 @@ func (s Service) reconciliationSnapshotCurrent(snapshot Runtime) bool {
 }
 
 func changedReconciliation(before, after Runtime) bool {
-	return before.State != after.State || before.Error != after.Error || before.JobID != after.JobID || before.Node != after.Node
+	return before.State != after.State || before.Error != after.Error || before.JobID != after.JobID || before.Node != after.Node || !before.StartedAt.Equal(after.StartedAt)
 }
 
 func mergeReconciled(current, snapshot, candidate *Runtime, now time.Time) bool {
@@ -353,6 +446,7 @@ func mergeReconciled(current, snapshot, candidate *Runtime, now time.Time) bool 
 		return false
 	}
 	current.State, current.Error, current.JobID, current.Node, current.UpdatedAt = candidate.State, candidate.Error, candidate.JobID, candidate.Node, now
+	current.StartedAt = candidate.StartedAt
 	return true
 }
 
@@ -362,4 +456,31 @@ func sortedRuntimeCopies(current *state) []Runtime {
 		result = append(result, *current.Runtimes[id])
 	}
 	return result
+}
+
+// schedulerLookback is how far back sacct is asked to look: far enough to cover
+// the oldest runtime in the batch, plus an hour so a clock that disagrees with
+// ours cannot clip the newest one out of the answer.
+//
+// It is deliberately relative. Slurm reads an absolute --starttime in the
+// cluster's own timezone, which is not necessarily ours, so an absolute stamp
+// can land in the cluster's future -- and sacct then refuses the whole range
+// with "Start time ... is after end time", failing every status check. A
+// relative one the cluster evaluates against its own clock needs no agreement
+// about zones at all.
+func schedulerLookback(runtimes []Runtime, now time.Time) string {
+	oldest := now
+	for _, runtime := range runtimes {
+		if !runtime.CreatedAt.IsZero() && runtime.CreatedAt.Before(oldest) {
+			oldest = runtime.CreatedAt
+		}
+	}
+	window := now.Sub(oldest) + schedulerLookbackSlack
+	if window < schedulerLookbackSlack {
+		window = schedulerLookbackSlack
+	}
+	if window > schedulerLookbackMax {
+		window = schedulerLookbackMax
+	}
+	return "now-" + strconv.FormatInt(int64(window.Seconds()), 10) + "seconds"
 }

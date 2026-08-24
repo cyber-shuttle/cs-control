@@ -16,7 +16,7 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
-func fakeSSH(t *testing.T) (string, string, string, string) {
+func fakeSSH(t *testing.T) (string, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	status := filepath.Join(dir, "status")
@@ -60,19 +60,13 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
   payload=$(cat)
   query_count=0; [ ! -f "$FAKE_SCHEDULER_QUERY_COUNT" ] || query_count=$(cat "$FAKE_SCHEDULER_QUERY_COUNT")
   query_count=$((query_count + 1)); printf '%s\n' "$query_count" > "$FAKE_SCHEDULER_QUERY_COUNT"
-  [ -z "${FAKE_SCHEDULER_STARTED:-}" ] || : > "$FAKE_SCHEDULER_STARTED"
-  if [ "${FAKE_SCHEDULER_BLOCK_QUERY:-0}" = "$query_count" ]; then
-    while [ -n "${FAKE_SCHEDULER_RELEASE:-}" ] && [ ! -e "$FAKE_SCHEDULER_RELEASE" ]; do sleep .01; done
-  fi
-  [ "${FAKE_SCHEDULER_QUERY_FAIL:-0}" = 0 ] || { echo 'scheduler query failed' >&2; exit 1; }
-  job_id=${FAKE_JOB_ID:-12345}
+  job_id=12345
   if printf '%s' "$payload" | grep -q 'scancel '; then
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s' "$payload" | grep -o 'scancel [^)]*' | sed 's/ 2>&1$//' | tr -d "'" | sed 's/^/batch /' >> "$FAKE_SCANCEL_LOG"
     if [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ]; then printf 'CANCELLED\n' > "$FAKE_STATUS"; fi
   fi
   state=$(cat "$FAKE_STATUS")
   accepted_name=; [ ! -f "$FAKE_ACCEPTED_JOB_NAME" ] || accepted_name=$(cat "$FAKE_ACCEPTED_JOB_NAME")
-  if [ "$query_count" -le "${FAKE_SCHEDULER_HIDE_QUERIES:-0}" ]; then accepted_name=; fi
   printf '__CSCTL_SQUEUE__\n'
   if [ -n "$accepted_name" ] && { [ -z "${FAKE_SUBMIT_RELEASE:-}" ] || [ -e "$FAKE_SUBMIT_RELEASE" ]; }; then
     case "$state" in RUNNING|PENDING|CONFIGURING) printf '%s|%s|cn001|%s\n' "$job_id" "$state" "$accepted_name";; esac
@@ -84,35 +78,25 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
   exit 0
 fi
 if [ "$wire_command" = "sh -s" ]; then
-  [ -z "${FAKE_DISCOVERY_STARTED:-}" ] || : > "$FAKE_DISCOVERY_STARTED"
-  while [ -n "${FAKE_DISCOVERY_RELEASE:-}" ] && [ ! -e "$FAKE_DISCOVERY_RELEASE" ]; do sleep .01; done
   cat > "$FAKE_DISCOVERY_SCRIPT_LOG"
   count=0; [ ! -f "$FAKE_DISCOVERY_EXEC_COUNT" ] || count=$(cat "$FAKE_DISCOVERY_EXEC_COUNT")
   printf '%s\n' $((count + 1)) > "$FAKE_DISCOVERY_EXEC_COUNT"
   printf 'REMOTE LOGIN BANNER\n' >&2
   user=${FAKE_REMOTE_USER:-tester}
   printf '%s\n' "$DISC_USER_BEGIN"
-  [ "${FAKE_DISCOVERY_FAIL:-}" != user ] || { printf 'user failure\n' >&2; printf '%s\n' "$DISC_ERROR_USER"; exit 71; }
   case "$user" in ''|*[!A-Za-z0-9_.-]*|?????????????????????????????????????????????????????????????????*) printf '%s\n' "$DISC_ERROR_USER"; exit 72;; esac
   printf '%s\n%s\n' "$user" "$DISC_USER_END"
   printf '%s\n' "$DISC_ACCOUNTS_BEGIN"
-  [ "${FAKE_DISCOVERY_FAIL:-}" != accounts ] || { printf 'account failure\n' >&2; printf '%s\n' "$DISC_ERROR_ACCOUNTS"; exit 73; }
   printf 'Account|\nproject-a|\nproject-a|\n%s\n' "$DISC_ACCOUNTS_END"
   printf '%s\n' "$DISC_PARTITIONS_BEGIN"
-  [ "${FAKE_DISCOVERY_FAIL:-}" != partitions ] || { printf 'partition failure\n' >&2; printf '%s\n' "$DISC_ERROR_PARTITIONS"; exit 74; }
   printf 'cpu*|24+|191000+|(null)\ngpu|64|515000|gpu:a100:2(S:2,5)\n%s\n' "$DISC_PARTITIONS_END"
   printf '%s\n' "$DISC_HOME_BEGIN"
-  [ "${FAKE_DISCOVERY_FAIL:-}" != home ] || { printf 'home failure\n' >&2; printf '%s\n' "$DISC_ERROR_HOME"; exit 75; }
   printf '/home/tester\n%s\n%s\n' "$DISC_HOME_END" "$DISC_DONE"
   exit 0
 fi
 case "$wire_command" in
   *"'contract'"*)
-    [ -z "${FAKE_LINKSPAN_CONTRACT_STARTED:-}" ] || printf 'start\n' >> "$FAKE_LINKSPAN_CONTRACT_STARTED"
-    while [ -n "${FAKE_LINKSPAN_CONTRACT_RELEASE:-}" ] && [ ! -e "$FAKE_LINKSPAN_CONTRACT_RELEASE" ]; do sleep .01; done
-    [ -z "${FAKE_LINKSPAN_CONTRACT_SLEEP:-}" ] || sleep "$FAKE_LINKSPAN_CONTRACT_SLEEP"
     printf '%s' "${FAKE_LINKSPAN_CONTRACT_STDOUT:-}"
-    printf '%s' "${FAKE_LINKSPAN_CONTRACT_STDERR:-}" >&2
     exit "${FAKE_LINKSPAN_CONTRACT_EXIT:-0}";;
 esac
 eval "set -- $wire_command"
@@ -120,33 +104,30 @@ command="$*"
 case "$command" in
   "sbatch --test-only")
     cat > "$FAKE_VALIDATION_SCRIPT_LOG"
-    [ -z "${FAKE_VALIDATION_STARTED:-}" ] || : > "$FAKE_VALIDATION_STARTED"
-    while [ -n "${FAKE_VALIDATION_RELEASE:-}" ] && [ ! -e "$FAKE_VALIDATION_RELEASE" ]; do sleep .01; done
     [ -z "${FAKE_VALIDATION_STDOUT:-}" ] || printf '%s\n' "$FAKE_VALIDATION_STDOUT"
     [ -z "${FAKE_VALIDATION_STDERR:-}" ] || printf '%s\n' "$FAKE_VALIDATION_STDERR" >&2
-    if [ -n "${FAKE_VALIDATION_ERROR_BYTES:-}" ]; then
-      head -c "$FAKE_VALIDATION_ERROR_BYTES" /dev/zero | tr '\000' x >&2
-    fi
     [ "${FAKE_VALIDATION_FAIL:-0}" = 0 ] || exit "${FAKE_VALIDATION_FAIL}"
     ;;
-  "sbatch --export=ALL,CS_JUPYTER_TOKEN="*"CS_TUNNEL_HOST_TOKEN="*" --parsable")
+  "sbatch --export=ALL,JUPYTER_TOKEN="*"CS_TUNNEL_HOST_TOKEN="*" --parsable")
     cat > "$FAKE_SCRIPT_LOG"
     [ -z "${FAKE_SUBMIT_STARTED:-}" ] || : > "$FAKE_SUBMIT_STARTED"
     while [ -n "${FAKE_SUBMIT_RELEASE:-}" ] && [ ! -e "$FAKE_SUBMIT_RELEASE" ]; do sleep .01; done
-    [ "${FAKE_SUBMIT_FAIL:-0}" = 0 ] || {
-      if [ "${FAKE_SUBMIT_ECHO_COMMAND:-0}" = 1 ]; then printf '%s %s\n' "$command" "${FAKE_SUBMIT_STDERR:-}" >&2; else printf '%s\n' "${FAKE_SUBMIT_STDERR:-submission failed}" >&2; fi
-      exit 1
-    }
     sed -n 's/^#SBATCH --job-name=//p' "$FAKE_SCRIPT_LOG" | head -n 1 > "$FAKE_ACCEPTED_JOB_NAME"
-    [ "${FAKE_SUBMIT_ACCEPTED_ERROR:-0}" = 0 ] || { printf 'connection lost after acceptance\n' >&2; exit 255; }
-    printf '%s;cluster\n' "${FAKE_JOB_ID:-12345}"
+    printf '12345;cluster\n'
     ;;
   "scancel "*)
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s\n' "$command" >> "$FAKE_SCANCEL_LOG"
-    [ -z "${FAKE_SCANCEL_STARTED:-}" ] || : > "$FAKE_SCANCEL_STARTED"
-    while [ -n "${FAKE_SCANCEL_RELEASE:-}" ] && [ ! -e "$FAKE_SCANCEL_RELEASE" ]; do sleep .01; done
     [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ] || { echo 'scheduler temporarily unavailable' >&2; exit 1; }
     printf 'CANCELLED\n' > "$FAKE_STATUS"
+    ;;
+  "sh -c "*"csctl-runtime-workflow "*)
+    cat > "${FAKE_WORKFLOW_LOG:-/dev/null}"
+    ;;
+  "sh -s -- csctl-provision "*)
+    cat > "${FAKE_PROVISION_LOG:-/dev/null}"
+    [ "${FAKE_PROVISION_FAIL:-0}" = 0 ] || { printf '%s\n' "${FAKE_PROVISION_REPORT:-error=jupyter}"; exit 75; }
+    printf '%s\n' "${FAKE_PROVISION_REPORT:-uv=present}"
+    printf 'linkspan=present\nprovision=complete\n'
     ;;
   "printenv WORKSPACE") printf '%s\n' "${FAKE_WORKSPACE_ENV:-/scratch/tester}";;
   "printenv EMPTY") exit 1;;
@@ -183,12 +164,12 @@ esac
 	t.Setenv("DISC_ERROR_ACCOUNTS", markerErrorAccounts)
 	t.Setenv("DISC_ERROR_PARTITIONS", markerErrorPartitions)
 	t.Setenv("DISC_ERROR_HOME", markerErrorHome)
-	return path, status, scriptLog, commandLog
+	return path, scriptLog, commandLog
 }
 
 func testService(t *testing.T) Service {
 	t.Helper()
-	ssh, _, _, _ := fakeSSH(t)
+	ssh, _, _ := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan", RuntimeBase: ".cybershuttle/runtimes"}, Now: func() time.Time { return time.Unix(1, 0).UTC() }}
 	configureTestTunnel(t, &service)
 	return service
@@ -199,7 +180,7 @@ func createRequest() CreateRequest {
 }
 
 func TestDiscoverNormalizesSchedulerData(t *testing.T) {
-	ssh, _, _, commandLog := fakeSSH(t)
+	ssh, _, commandLog := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}}
 	resource, err := service.Discover(context.Background(), "delta")
 	if err != nil {
@@ -234,7 +215,7 @@ func TestDiscoverNormalizesSchedulerData(t *testing.T) {
 func TestDiscoverRejectsUnsafeRemoteUsernameBeforeSacctmgr(t *testing.T) {
 	for _, username := range []string{"bad;touch", "$USER", "two\nusers", strings.Repeat("a", 65)} {
 		t.Run(fmt.Sprintf("%q", username), func(t *testing.T) {
-			ssh, _, _, commandLog := fakeSSH(t)
+			ssh, _, commandLog := fakeSSH(t)
 			t.Setenv("FAKE_REMOTE_USER", username)
 			service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}}
 			if _, err := service.Discover(context.Background(), "delta"); err == nil || !strings.Contains(err.Error(), "identify remote user") {
@@ -271,8 +252,26 @@ func TestCreateRejectsWorkspaceInsidePrivateRuntime(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsAllocationsBelowTheFloor(t *testing.T) {
+	for _, below := range []Resources{
+		{Cores: MinCores - 1, MemoryMB: MinMemoryMB, WallMinutes: 60},
+		{Cores: MinCores, MemoryMB: MinMemoryMB - 1, WallMinutes: 60},
+	} {
+		request := createRequest()
+		request.Resources = below
+		if _, err := testService(t).Create(testTunnelContext(), request); err == nil || apierr.For(err).Code != "invalid_resources" {
+			t.Fatalf("%d cores / %d MB was not rejected: %v", below.Cores, below.MemoryMB, err)
+		}
+	}
+	request := createRequest()
+	request.Resources = Resources{Cores: MinCores, MemoryMB: MinMemoryMB, WallMinutes: 60}
+	if _, err := testService(t).Create(testTunnelContext(), request); err != nil {
+		t.Fatalf("the floor itself was rejected: %v", err)
+	}
+}
+
 func TestRuntimeLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
-	ssh, _, scriptLog, _ := fakeSSH(t)
+	ssh, scriptLog, _ := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
 	configureTestTunnel(t, &service)
 	runtime, err := service.Create(testTunnelContext(), createRequest())
@@ -287,12 +286,14 @@ func TestRuntimeLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(script)
-	for _, expected := range []string{`LINKSPAN_BIN='/opt/cybershuttle/linkspan'`, `exec "$LINKSPAN_BIN" --port`} {
+	// The allocation runs Linkspan against a workflow. What that workflow starts
+	// is its own business, so the script names no service.
+	for _, expected := range []string{`LINKSPAN_BIN='/opt/cybershuttle/linkspan'`, `exec "$LINKSPAN_BIN" --port`, "--workflow '/home/tester/.cybershuttle/runtimes/rt-012345abcdef/workflow.yaml'"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("script missing %q:\n%s", expected, text)
 		}
 	}
-	for _, forbidden := range []string{"--workflow", "--managed-jupyter", "--runtime-id", "--remote-root", "--jupyter-python"} {
+	for _, forbidden := range []string{"jupyter", "python", "--managed-jupyter", "--runtime-id", "--remote-root"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("script retained service-specific flag %q:\n%s", forbidden, text)
 		}
@@ -312,11 +313,11 @@ func TestRuntimeLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 
 func TestCreateIsIdempotent(t *testing.T) {
 	service := testService(t)
-	first, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 1, MemoryMB: 1024, WallMinutes: 10}})
+	first, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 2, MemoryMB: 4096, WallMinutes: 10}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 1, MemoryMB: 1024, WallMinutes: 10}})
+	second, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 2, MemoryMB: 4096, WallMinutes: 10}})
 	if err != nil || first.ID != second.ID || first.JobID != second.JobID {
 		t.Fatalf("idempotency failed: %#v %#v %v", first, second, err)
 	}
@@ -395,5 +396,40 @@ func TestLoopbackListenValidation(t *testing.T) {
 		if err := ValidateLoopbackListen(address); err == nil {
 			t.Fatalf("non-loopback %s accepted", address)
 		}
+	}
+}
+
+func TestDeleteRemovesATerminalRuntimeAndItsCredential(t *testing.T) {
+	service := testService(t)
+	runtime := pendingRuntime(runtimeLogIDOne, "delta", "12345")
+	setTestRuntimeMetadata(&runtime)
+	runtime.State = "FAILED"
+	putRuntimes(t, service, runtime)
+	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {
+		t.Fatal(err)
+	}
+	service.Logs.Append(runtime.ID, "status", "starting")
+
+	deleted, err := service.Delete(testTunnelContext(), runtime.ID)
+	if err != nil || deleted.ID != runtime.ID {
+		t.Fatalf("delete failed: %#v %v", deleted, err)
+	}
+	runtimes, err := service.ListCached()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, remaining := range runtimes {
+		if remaining.ID == runtime.ID {
+			t.Fatalf("deleted runtime is still listed: %#v", remaining)
+		}
+	}
+	if _, err := service.Credentials.Get(runtime.ID, runtime.Generation); err == nil {
+		t.Fatal("delete left the generation credential on disk")
+	}
+	if _, ok := service.Logs.Tail(runtime.ID); ok {
+		t.Fatal("delete left the runtime log tail in memory")
+	}
+	if _, err := service.Delete(testTunnelContext(), runtime.ID); err == nil {
+		t.Fatal("deleting an absent runtime should not succeed")
 	}
 }

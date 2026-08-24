@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,12 +77,15 @@ func NewHTTPHandler(service Service, auth SSHAuthRoute) *HTTPAPI {
 func (a *HTTPAPI) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, handlers := range map[string]map[string]http.HandlerFunc{
-		"/api/v1/ssh":                  {http.MethodGet: answer(http.StatusOK, a.listHosts)},
+		"/api/v1/ssh":                  {http.MethodGet: answer(http.StatusOK, a.listHosts), http.MethodPost: answer(http.StatusCreated, a.addHost)},
+		"/api/v1/ssh/{alias}":          {http.MethodDelete: answer(http.StatusOK, a.removeHost)},
 		"/api/v1/ssh/{alias}/auth":     {http.MethodGet: requireUpgrade("SSH authentication requires a WebSocket", a.sshAuth)},
 		"/api/v1/ssh/{alias}/slurm":    {http.MethodGet: answer(http.StatusOK, a.discoverSlurm)},
+		"/api/v1/ssh/{alias}/test":     {http.MethodPost: answer(http.StatusOK, a.testHost)},
 		"/api/v1/runtimes":             {http.MethodGet: answer(http.StatusOK, a.listRuntimes), http.MethodPost: answer(http.StatusCreated, a.createRuntime)},
+		"/api/v1/runtimes/script":      {http.MethodPost: answer(http.StatusOK, a.runtimeScript)},
 		"/api/v1/runtimes/validate":    {http.MethodPost: answer(http.StatusOK, a.validateRuntime)},
-		"/api/v1/runtimes/{id}":        {http.MethodGet: answer(http.StatusOK, a.getRuntime)},
+		"/api/v1/runtimes/{id}":        {http.MethodGet: answer(http.StatusOK, a.getRuntime), http.MethodDelete: answer(http.StatusOK, a.deleteRuntime)},
 		"/api/v1/runtimes/{id}/stop":   {http.MethodPost: answer(http.StatusOK, a.stopRuntime)},
 		"/api/v1/runtimes/{id}/access": {http.MethodGet: answer(http.StatusOK, a.runtimeAccess)},
 	} {
@@ -117,6 +121,22 @@ func (a *HTTPAPI) listHosts(*http.Request) (sshconfig.HostList, error) {
 	return sshconfig.HostList{Hosts: hosts}, err
 }
 
+func (a *HTTPAPI) addHost(request *http.Request) (sshconfig.Host, error) {
+	var add AddHostRequest
+	if err := decodeJSON(request, &add); err != nil {
+		return sshconfig.Host{}, err
+	}
+	return a.Service.AddHost(add)
+}
+
+func (a *HTTPAPI) removeHost(request *http.Request) (sshconfig.Host, error) {
+	return a.Service.RemoveHost(request.PathValue("alias"))
+}
+
+func (a *HTTPAPI) testHost(request *http.Request) (HostTest, error) {
+	return a.Service.TestHost(request.Context(), request.PathValue("alias"))
+}
+
 func (a *HTTPAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
 	if a.Auth == nil {
 		httpx.WriteError(writer, apierr.New("ssh_authentication_unavailable", "SSH authentication is unavailable", http.StatusServiceUnavailable))
@@ -129,6 +149,14 @@ func (a *HTTPAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
 // process group, so there is no cancellation protocol to speak.
 func (a *HTTPAPI) discoverSlurm(request *http.Request) (Resource, error) {
 	return a.Service.Discover(request.Context(), request.PathValue("alias"))
+}
+
+func (a *HTTPAPI) runtimeScript(request *http.Request) (*RuntimeScript, error) {
+	var create CreateRequest
+	if err := decodeJSON(request, &create); err != nil {
+		return nil, err
+	}
+	return a.Service.Script(request.Context(), create)
 }
 
 func (a *HTTPAPI) validateRuntime(request *http.Request) (*ValidationResult, error) {
@@ -197,11 +225,21 @@ func (a *HTTPAPI) getRuntime(request *http.Request) (RuntimeResponse, error) {
 }
 
 func (a *HTTPAPI) stopRuntime(request *http.Request) (RuntimeResponse, error) {
+	return a.retireRuntime(request, a.Service.Stop)
+}
+
+func (a *HTTPAPI) deleteRuntime(request *http.Request) (RuntimeResponse, error) {
+	return a.retireRuntime(request, a.Service.Delete)
+}
+
+// Stop and delete are the same route shape: name a runtime, act on it, answer
+// with what it became.
+func (a *HTTPAPI) retireRuntime(request *http.Request, retire func(context.Context, string) (*Runtime, error)) (RuntimeResponse, error) {
 	id, err := routedRuntimeID(request)
 	if err != nil {
 		return RuntimeResponse{}, err
 	}
-	runtime, err := a.Service.Stop(request.Context(), id)
+	runtime, err := retire(request.Context(), id)
 	if err != nil {
 		return RuntimeResponse{}, err
 	}

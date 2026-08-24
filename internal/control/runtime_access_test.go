@@ -114,3 +114,44 @@ func TestRuntimeAccessIsOwnerOnly(t *testing.T) {
 		t.Fatalf("owner mismatch reached discovery: %#v", manager.gets)
 	}
 }
+
+// The management service slides a hosted tunnel's expiration forward, so the
+// value stored at creation goes stale the moment Linkspan serves traffic.
+// Comparing the two refused every healthy allocation.
+func TestRuntimeAccessAcceptsATunnelWhoseExpirationTheServiceExtended(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	runtime := readyAccessRuntime(now)
+	extended := runtime.Tunnel.ExpiresAt.Add(17 * time.Minute)
+	manager := &testTunnelManager{getResponse: &devtunnel.Record{
+		ID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID, ExpiresAt: extended,
+		Ports: []devtunnel.PortRecord{{PortNumber: 31001, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
+	}}
+	service := Service{Store: Store{Dir: t.TempDir()}, Tunnels: manager, Credentials: CredentialStore{Dir: t.TempDir() + "/credentials"}, Now: func() time.Time { return now }}
+	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {
+		t.Fatal(err)
+	}
+	access, err := service.RuntimeAccess(context.Background(), runtime)
+	if err != nil {
+		t.Fatalf("extended tunnel expiration refused runtime access: %v", err)
+	}
+	if !access.ExpiresAt.Equal(extended) {
+		t.Fatalf("runtime access reported %s, want the live expiration %s", access.ExpiresAt, extended)
+	}
+}
+
+func TestRuntimeAccessRefusesAnExpiredTunnelAndNamesTheReason(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	runtime := readyAccessRuntime(now)
+	manager := &testTunnelManager{getResponse: &devtunnel.Record{
+		ID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID, ExpiresAt: now.Add(-time.Second),
+		Ports: []devtunnel.PortRecord{{PortNumber: 31001, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
+	}}
+	service := Service{Store: Store{Dir: t.TempDir()}, Tunnels: manager, Credentials: CredentialStore{Dir: t.TempDir() + "/credentials"}, Now: func() time.Time { return now }}
+	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := service.RuntimeAccess(context.Background(), runtime)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expected an expiry-specific refusal, got %v", err)
+	}
+}

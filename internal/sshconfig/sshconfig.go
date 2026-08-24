@@ -31,6 +31,9 @@ type Host struct {
 	Port            int      `json:"port,omitempty"`
 	IdentityFile    string   `json:"identityFile,omitempty"`
 	ExtraDirectives []string `json:"extraDirectives"`
+	// Managed marks the entries this package wrote, which are the only ones it
+	// may remove; everything else is the user's own configuration.
+	Managed bool `json:"managed"`
 }
 
 type HostList struct {
@@ -100,6 +103,9 @@ func parseFile(path string, visited map[string]bool) ([]Host, error) {
 	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	var result []Host
 	inMatch := false
+	// Stanza bodies are scanned ahead, so the managed region is located once
+	// rather than tracked as the cursor moves.
+	blockStart, blockStop := blockBounds(lines)
 	for i := 0; i < len(lines); {
 		fields := strings.Fields(strings.TrimSpace(lines[i]))
 		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
@@ -153,7 +159,7 @@ func parseFile(path string, visited map[string]bool) ([]Host, error) {
 		if len(aliases) == 0 {
 			continue
 		}
-		host := Host{Port: 22, ExtraDirectives: []string{}}
+		host := Host{Port: 22, ExtraDirectives: []string{}, Managed: blockStart >= 0 && start > blockStart && start < blockStop}
 		for _, line := range lines[start+1 : i] {
 			parts := strings.Fields(strings.TrimSpace(line))
 			if len(parts) < 2 || strings.HasPrefix(parts[0], "#") {

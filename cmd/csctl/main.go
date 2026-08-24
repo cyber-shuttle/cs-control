@@ -43,7 +43,7 @@ func run(ctx context.Context, args []string) error {
 	stateDir := global.String("state-dir", defaultStateDir(), "local non-secret state directory")
 	sshBin := global.String("ssh-bin", envOr("CSCTL_SSH_BIN", "ssh"), "ssh executable")
 	timeout := global.Duration("timeout", 20*time.Second, "timeout for each SSH command")
-	linkspan := global.String("linkspan", envOr("CSCTL_LINKSPAN", "/usr/local/bin/linkspan"), "absolute remote Linkspan path (install under ~/.cybershuttle/bin and pass its resolved absolute path)")
+	linkspan := global.String("linkspan", envOr("CSCTL_LINKSPAN", control.DefaultLinkspanPath), "remote Linkspan path, absolute or anchored at $HOME/; a missing one is installed there")
 	runtimeBase := global.String("runtime-base", envOr("CSCTL_RUNTIME_BASE", ".cybershuttle/runtimes"), "remote private runtime directory relative to HOME")
 	userSSH := global.String("user-ssh-config", envOr("CSCTL_USER_SSH_CONFIG", defaultUserSSHConfig()), "user SSH config")
 	systemSSH := global.String("system-ssh-config", envOr("CSCTL_SYSTEM_SSH_CONFIG", "/etc/ssh/ssh_config"), "system SSH config")
@@ -234,7 +234,8 @@ func printUsage() {
 Trusted runtime configuration:
   --linkspan PATH or CSCTL_LINKSPAN=PATH
   --devtunnel-management-url URL or CSCTL_DEVTUNNEL_MANAGEMENT_URL=URL
-  Recommended remote install: ~/.cybershuttle/bin/linkspan (pass the resolved absolute path).`)
+  Linkspan defaults to `+control.DefaultLinkspanPath+`, which each host resolves
+  against its own home and which creating a runtime installs when missing.`)
 }
 
 type stringList []string

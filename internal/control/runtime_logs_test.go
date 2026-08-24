@@ -48,7 +48,7 @@ func TestRuntimeLogsSanitizeAndSplit(t *testing.T) {
 				t.Fatalf("tail = %#v, want %q", tail, test.want)
 			}
 			for i, want := range test.want {
-				if tail.Lines[i] != (RuntimeLogLine{Stream: "stdout", Text: want}) {
+				if !sameLogLine(tail.Lines[i], "stdout", want) {
 					t.Fatalf("line %d = %#v, want %q", i, tail.Lines[i], want)
 				}
 			}
@@ -177,7 +177,7 @@ func TestRuntimeLogsRedactsRuntimeAndCredentialSecrets(t *testing.T) {
 	if err := logs.Append(runtimeLogIDOne, "stderr", input); err != nil {
 		t.Fatalf("Append = %v", err)
 	}
-	joined := runtimeStatusTextForAnyStream(t, logs, runtimeLogIDOne)
+	joined := runtimeLogText(t, logs, runtimeLogIDOne, false)
 	for _, secret := range []string{".cybershuttle/runtimes", "cs-" + runtimeLogIDOne + ".sock", "linkspan-sentinel", "jupyter-sentinel", "abcdefghijklmnopqrstuvwxyz012345", "token-shaped-secret-value-123456", "eyJhbGciOiJIUzI1NiJ9", "0123456789abcdef0123456789abcdef"} {
 		if strings.Contains(joined, secret) {
 			t.Errorf("secret %q leaked in:\n%s", secret, joined)
@@ -213,7 +213,7 @@ func TestRuntimePhaseStatusNeverStoresSensitiveValues(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		joined := runtimeStatusText(t, service.Logs, runtime.ID)
+		joined := runtimeLogText(t, service.Logs, runtime.ID, true)
 		for _, want := range []string{"Preparing runtime", "Validating runtime with Slurm", "Submitting runtime to Slurm", "Runtime is queued", "Compute node assigned: cn001", "Allocation is running", "Stopping runtime"} {
 			if !strings.Contains(joined, want) {
 				t.Errorf("missing public phase %q in:\n%s", want, joined)
@@ -238,7 +238,7 @@ func TestRuntimePhaseStatusNeverStoresSensitiveValues(t *testing.T) {
 		if err := service.ReconcileAll(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		joined := runtimeStatusText(t, service.Logs, runtime.ID)
+		joined := runtimeLogText(t, service.Logs, runtime.ID, true)
 		for _, want := range []string{"Cleaning up runtime credentials", "Runtime credential cleanup complete", "Runtime stopped"} {
 			if !strings.Contains(joined, want) {
 				t.Errorf("missing terminal phase %q in:\n%s", want, joined)
@@ -255,7 +255,7 @@ func TestRuntimePhaseStatusNeverStoresSensitiveValues(t *testing.T) {
 		if _, err := service.Create(testTunnelContext(), createRequest()); err == nil {
 			t.Fatal("sensitive validation failure unexpectedly succeeded")
 		}
-		joined := runtimeStatusText(t, service.Logs, createRequest().ID)
+		joined := runtimeLogText(t, service.Logs, createRequest().ID, true)
 		if !strings.Contains(joined, "Slurm validation failed") {
 			t.Fatalf("missing public validation failure in:\n%s", joined)
 		}
@@ -263,7 +263,7 @@ func TestRuntimePhaseStatusNeverStoresSensitiveValues(t *testing.T) {
 	})
 }
 
-func runtimeStatusTextForAnyStream(t *testing.T, logs *RuntimeLogs, runtimeID string) string {
+func runtimeLogText(t *testing.T, logs *RuntimeLogs, runtimeID string, statusOnly bool) string {
 	t.Helper()
 	tail, ok := logs.Tail(runtimeID)
 	if !ok {
@@ -271,20 +271,7 @@ func runtimeStatusTextForAnyStream(t *testing.T, logs *RuntimeLogs, runtimeID st
 	}
 	texts := make([]string, 0, len(tail.Lines))
 	for _, line := range tail.Lines {
-		texts = append(texts, line.Text)
-	}
-	return strings.Join(texts, "\n")
-}
-
-func runtimeStatusText(t *testing.T, logs *RuntimeLogs, runtimeID string) string {
-	t.Helper()
-	tail, ok := logs.Tail(runtimeID)
-	if !ok {
-		t.Fatal("lifecycle produced no status tail")
-	}
-	texts := make([]string, 0, len(tail.Lines))
-	for _, line := range tail.Lines {
-		if line.Stream != "status" {
+		if statusOnly && line.Stream != "status" {
 			t.Fatalf("phase instrumentation stored %q stream", line.Stream)
 		}
 		texts = append(texts, line.Text)

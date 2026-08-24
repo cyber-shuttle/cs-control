@@ -90,10 +90,10 @@ func validateCreate(request *CreateRequest) error {
 	if !validWorkspaceExpression(request.RootFolder) {
 		return apierr.New("invalid_root_folder", "rootFolder must be a safe absolute, home-relative, or environment-relative POSIX path", 400)
 	}
-	if request.Resources.Cores < 1 || request.Resources.Cores > 4096 {
-		return apierr.New("invalid_resources", "cores must be between 1 and 4096", 400)
+	if request.Resources.Cores < MinCores || request.Resources.Cores > 4096 {
+		return apierr.New("invalid_resources", "cores must be between 2 and 4096", 400)
 	}
-	if request.Resources.MemoryMB < 1 || request.Resources.MemoryMB > 100_000_000 {
+	if request.Resources.MemoryMB < MinMemoryMB || request.Resources.MemoryMB > 100_000_000 {
 		return apierr.New("invalid_resources", "memoryMb is out of range", 400)
 	}
 	if request.Resources.WallMinutes < 1 || request.Resources.WallMinutes > 525600 {
@@ -194,7 +194,7 @@ func validateWorkspacePrivateLayout(home, workspace, privateRoot, runtimeID, run
 	// HOME is an explicitly supported workspace. Its private state is safe only
 	// at the exact hidden runtime path.
 	expected := pathpkg.Join(home, ".cybershuttle", "runtimes", runtimeID)
-	if workspace == home && homeRootExpression(expression) && runtimeBase == ".cybershuttle/runtimes" && privateRoot == expected {
+	if workspace == home && homeRootExpression(expression) && runtimeBase == defaultRuntimeBase && privateRoot == expected {
 		return nil
 	}
 	return apierr.New("invalid_root_folder", "workspace may contain private runtime state only at $HOME/.cybershuttle/runtimes/{runtimeId}", 400)
@@ -212,15 +212,35 @@ func safeRemotePath(value string) bool {
 	return remotePathPattern.MatchString(value) && pathpkg.Clean(value) == value && value != "/"
 }
 
+// A remote executable may be anchored at $HOME, so one setting serves hosts
+// whose accounts do not share a home directory. Discovery resolves the anchor
+// before the path reaches a script.
+// A runtime stored before the home was recorded is still a valid record: the
+// home is read when a runtime is created, and a stored one is never resumed.
+func validStoredHome(runtime *Runtime) bool {
+	return runtime.HomeDir == "" || safeRemotePath(runtime.HomeDir)
+}
+
 func safeRemoteExecutable(value string) bool {
+	if rest, anchored := strings.CutPrefix(value, "$HOME/"); anchored {
+		return safeRemotePath("/" + rest)
+	}
 	return safeRemotePath(value) && strings.HasPrefix(value, "/")
+}
+
+func resolveRemoteExecutable(value, home string) string {
+	rest, anchored := strings.CutPrefix(value, "$HOME/")
+	if !anchored {
+		return value
+	}
+	return pathpkg.Join(home, rest)
 }
 
 func validateStoredRuntime(key string, runtime *Runtime) error {
 	if runtime == nil || !idPattern.MatchString(key) || runtime.ID != key || !knownState(runtime.State) {
 		return errors.New("runtime identity or state is invalid")
 	}
-	if !sshconfig.ValidAlias(runtime.SSHHost) || !namePattern.MatchString(runtime.Partition) || !validWorkspaceExpression(runtime.RootFolder) || !safeRemotePath(runtime.PrivateRoot) || !safeRemotePath(runtime.WorkspaceRoot) || !validStoredWorkspacePrivateLayout(runtime) {
+	if !sshconfig.ValidAlias(runtime.SSHHost) || !namePattern.MatchString(runtime.Partition) || !validWorkspaceExpression(runtime.RootFolder) || !safeRemotePath(runtime.PrivateRoot) || !safeRemotePath(runtime.WorkspaceRoot) || !validStoredHome(runtime) || !validStoredWorkspacePrivateLayout(runtime) {
 		return errors.New("runtime contains invalid fields")
 	}
 	if !validRuntimeJobName(runtime) || (runtime.JobID != "" && !jobPattern.MatchString(runtime.JobID)) || (runtime.Node != "" && !nodePattern.MatchString(runtime.Node)) {
@@ -247,21 +267,13 @@ func validateStoredRuntime(key string, runtime *Runtime) error {
 }
 
 func validStoredWorkspacePrivateLayout(runtime *Runtime) bool {
-	workspace, privateRoot := runtime.WorkspaceRoot, runtime.PrivateRoot
-	if workspace == privateRoot || strings.HasPrefix(workspace, privateRoot+"/") {
-		return false
-	}
-	if !strings.HasPrefix(privateRoot, workspace+"/") {
-		return true
-	}
-	// Persisted overlap is valid only for an explicitly requested HOME root.
-	// Path shape alone cannot prove that an arbitrary absolute/relative
-	// workspace was the discovered remote home during creation.
-	if !homeRootExpression(runtime.RootFolder) {
-		return false
-	}
-	suffix := "/.cybershuttle/runtimes/" + runtime.ID
-	return strings.HasSuffix(privateRoot, suffix) && strings.TrimSuffix(privateRoot, suffix) == workspace
+	// The same rule as at creation. A stored runtime carries no record of the
+	// home it was discovered against, so the workspace stands in for it: that
+	// makes the home clause trivially true and leaves the overlap decided by
+	// the expression and the exact private path, which is all the stored form
+	// ever checked.
+	return validateWorkspacePrivateLayout(runtime.WorkspaceRoot, runtime.WorkspaceRoot,
+		runtime.PrivateRoot, runtime.ID, defaultRuntimeBase, runtime.RootFolder) == nil
 }
 
 func homeRootExpression(value string) bool {

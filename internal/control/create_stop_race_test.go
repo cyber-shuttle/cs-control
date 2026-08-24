@@ -13,7 +13,7 @@ import (
 
 func createStopRaceService(t *testing.T) (Service, string, string, string) {
 	t.Helper()
-	ssh, _, _, _ := fakeSSH(t)
+	ssh, _, _ := fakeSSH(t)
 	dir := t.TempDir()
 	started := filepath.Join(dir, "submit-started")
 	release := filepath.Join(dir, "submit-release")
