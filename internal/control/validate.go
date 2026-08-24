@@ -90,10 +90,10 @@ func validateCreate(request *CreateRequest) error {
 	if !validWorkspaceExpression(request.RootFolder) {
 		return apierr.New("invalid_root_folder", "rootFolder must be a safe absolute, home-relative, or environment-relative POSIX path", 400)
 	}
-	if request.Resources.Cores < 1 || request.Resources.Cores > 4096 {
-		return apierr.New("invalid_resources", "cores must be between 1 and 4096", 400)
+	if request.Resources.Cores < MinCores || request.Resources.Cores > 4096 {
+		return apierr.New("invalid_resources", "cores must be between 2 and 4096", 400)
 	}
-	if request.Resources.MemoryMB < 1 || request.Resources.MemoryMB > 100_000_000 {
+	if request.Resources.MemoryMB < MinMemoryMB || request.Resources.MemoryMB > 100_000_000 {
 		return apierr.New("invalid_resources", "memoryMb is out of range", 400)
 	}
 	if request.Resources.WallMinutes < 1 || request.Resources.WallMinutes > 525600 {
