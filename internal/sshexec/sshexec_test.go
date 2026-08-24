@@ -108,3 +108,23 @@ func TestOpenSSHDoesNotEscapeNonASCIIUnderChildEnv(t *testing.T) {
 		t.Fatalf("ssh still octal-escaped non-ASCII under ChildEnv: %s", got)
 	}
 }
+
+// A duplicate name reaches execve twice and the two libcs disagree about which
+// copy wins, so exactly one must survive.
+func TestChildEnvLeavesExactlyOneLocaleEntry(t *testing.T) {
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("LC_CTYPE", "")
+	t.Setenv("LANG", "")
+	count := 0
+	for _, entry := range ChildEnv() {
+		if strings.HasPrefix(entry, "LC_ALL=") {
+			count++
+			if entry != "LC_ALL="+utf8Locale {
+				t.Errorf("LC_ALL survived as %q", entry)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("ChildEnv returned %d LC_ALL entries, want exactly 1", count)
+	}
+}
