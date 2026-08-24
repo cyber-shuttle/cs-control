@@ -83,7 +83,7 @@ func TestRuntimeWorkflowStartsJupyterWithoutSecretsOrExpansion(t *testing.T) {
 // The script a caller reads before validation is the one Slurm is then asked
 // about, and asking for it runs no sbatch at all.
 func TestScriptPreviewMatchesValidationAndRunsNoSbatch(t *testing.T) {
-	ssh, _, _, commandLog := fakeSSH(t)
+	ssh, _, commandLog := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
 	request := createRequest()
 	preview, err := service.Script(context.Background(), request)
@@ -103,7 +103,7 @@ func TestScriptPreviewMatchesValidationAndRunsNoSbatch(t *testing.T) {
 }
 
 func TestCreateRevalidatesExactScriptBeforeSubmit(t *testing.T) {
-	ssh, _, scriptLog, commandLog := fakeSSH(t)
+	ssh, scriptLog, commandLog := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
 	configureTestTunnel(t, &service)
 	request := createRequest()
@@ -134,7 +134,7 @@ func TestCreateRevalidatesExactScriptBeforeSubmit(t *testing.T) {
 }
 
 func TestCreateValidationFailureDoesNotPersistOrSubmit(t *testing.T) {
-	ssh, _, _, commandLog := fakeSSH(t)
+	ssh, _, commandLog := fakeSSH(t)
 	store := Store{Dir: t.TempDir()}
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: store, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
 	t.Setenv("FAKE_VALIDATION_FAIL", "1")

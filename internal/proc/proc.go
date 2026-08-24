@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// Signal delivers signal to cmd's whole process group, falling back to the
+// signalGroup delivers signal to cmd's whole process group, falling back to the
 // direct process when the group send is refused.
-func Signal(cmd *exec.Cmd, signal os.Signal) {
+func signalGroup(cmd *exec.Cmd, signal os.Signal) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
@@ -25,8 +25,8 @@ func Signal(cmd *exec.Cmd, signal os.Signal) {
 	_ = cmd.Process.Signal(signal)
 }
 
-// GroupAlive reports whether any member of cmd's process group still exists.
-func GroupAlive(cmd *exec.Cmd) bool {
+// groupAlive reports whether any member of cmd's process group still exists.
+func groupAlive(cmd *exec.Cmd) bool {
 	if cmd == nil || cmd.Process == nil {
 		return false
 	}
@@ -51,14 +51,14 @@ func TerminateGroup(cmd *exec.Cmd, exited <-chan struct{}, grace time.Duration) 
 		return
 	default:
 	}
-	Signal(cmd, syscall.SIGTERM)
+	signalGroup(cmd, syscall.SIGTERM)
 	reaped := false
 	select {
 	case <-exited:
 		reaped = true
 	case <-time.After(grace):
 	}
-	if GroupAlive(cmd) {
+	if groupAlive(cmd) {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	if !reaped {

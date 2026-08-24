@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -224,23 +225,21 @@ func (a *HTTPAPI) getRuntime(request *http.Request) (RuntimeResponse, error) {
 }
 
 func (a *HTTPAPI) stopRuntime(request *http.Request) (RuntimeResponse, error) {
-	id, err := routedRuntimeID(request)
-	if err != nil {
-		return RuntimeResponse{}, err
-	}
-	runtime, err := a.Service.Stop(request.Context(), id)
-	if err != nil {
-		return RuntimeResponse{}, err
-	}
-	return RuntimeResponseFrom(*runtime), nil
+	return a.retireRuntime(request, a.Service.Stop)
 }
 
 func (a *HTTPAPI) deleteRuntime(request *http.Request) (RuntimeResponse, error) {
+	return a.retireRuntime(request, a.Service.Delete)
+}
+
+// Stop and delete are the same route shape: name a runtime, act on it, answer
+// with what it became.
+func (a *HTTPAPI) retireRuntime(request *http.Request, retire func(context.Context, string) (*Runtime, error)) (RuntimeResponse, error) {
 	id, err := routedRuntimeID(request)
 	if err != nil {
 		return RuntimeResponse{}, err
 	}
-	runtime, err := a.Service.Delete(request.Context(), id)
+	runtime, err := retire(request.Context(), id)
 	if err != nil {
 		return RuntimeResponse{}, err
 	}

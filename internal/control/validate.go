@@ -194,7 +194,7 @@ func validateWorkspacePrivateLayout(home, workspace, privateRoot, runtimeID, run
 	// HOME is an explicitly supported workspace. Its private state is safe only
 	// at the exact hidden runtime path.
 	expected := pathpkg.Join(home, ".cybershuttle", "runtimes", runtimeID)
-	if workspace == home && homeRootExpression(expression) && runtimeBase == ".cybershuttle/runtimes" && privateRoot == expected {
+	if workspace == home && homeRootExpression(expression) && runtimeBase == defaultRuntimeBase && privateRoot == expected {
 		return nil
 	}
 	return apierr.New("invalid_root_folder", "workspace may contain private runtime state only at $HOME/.cybershuttle/runtimes/{runtimeId}", 400)
@@ -267,21 +267,13 @@ func validateStoredRuntime(key string, runtime *Runtime) error {
 }
 
 func validStoredWorkspacePrivateLayout(runtime *Runtime) bool {
-	workspace, privateRoot := runtime.WorkspaceRoot, runtime.PrivateRoot
-	if workspace == privateRoot || strings.HasPrefix(workspace, privateRoot+"/") {
-		return false
-	}
-	if !strings.HasPrefix(privateRoot, workspace+"/") {
-		return true
-	}
-	// Persisted overlap is valid only for an explicitly requested HOME root.
-	// Path shape alone cannot prove that an arbitrary absolute/relative
-	// workspace was the discovered remote home during creation.
-	if !homeRootExpression(runtime.RootFolder) {
-		return false
-	}
-	suffix := "/.cybershuttle/runtimes/" + runtime.ID
-	return strings.HasSuffix(privateRoot, suffix) && strings.TrimSuffix(privateRoot, suffix) == workspace
+	// The same rule as at creation. A stored runtime carries no record of the
+	// home it was discovered against, so the workspace stands in for it: that
+	// makes the home clause trivially true and leaves the overlap decided by
+	// the expression and the exact private path, which is all the stored form
+	// ever checked.
+	return validateWorkspacePrivateLayout(runtime.WorkspaceRoot, runtime.WorkspaceRoot,
+		runtime.PrivateRoot, runtime.ID, defaultRuntimeBase, runtime.RootFolder) == nil
 }
 
 func homeRootExpression(value string) bool {

@@ -221,19 +221,6 @@ func TestSSHAuthHelper(t *testing.T) {
 	}
 	args := os.Args[separator:]
 	if len(args) == 2 && args[0] == "-G" {
-		switch os.Getenv("AUTH_HELPER_G_MODE") {
-		case "fail":
-			fmt.Fprintln(os.Stderr, "effective config failed")
-			os.Exit(1)
-		case "slow":
-			time.Sleep(5 * time.Second)
-		case "oversize":
-			fmt.Print(strings.Repeat("x", sshexec.MaxOutput+1))
-			os.Exit(0)
-		case "unsafe":
-			_, _ = os.Stdout.Write([]byte("host delta\x00bad\n"))
-			os.Exit(0)
-		}
 		fmt.Println("host", args[1])
 		for _, path := range strings.Split(os.Getenv("AUTH_HELPER_EFFECTIVE_FILES"), string(os.PathListSeparator)) {
 			if path == "" {
@@ -292,19 +279,8 @@ func TestSSHAuthHelper(t *testing.T) {
 		if pidFile := os.Getenv("AUTH_HELPER_PID_FILE"); pidFile != "" {
 			_ = os.WriteFile(pidFile, []byte(fmt.Sprint(os.Getpid())), 0o600)
 		}
-		if os.Getenv("AUTH_HELPER_FLOOD_OUTPUT") == "1" {
-			chunk := strings.Repeat("x", 16<<10)
-			for {
-				fmt.Print(chunk)
-			}
-		}
 		if os.Getenv("AUTH_HELPER_NO_READ") == "1" {
 			fmt.Println("NOT_READING")
-			select {}
-		}
-		if os.Getenv("AUTH_HELPER_IGNORE_TERM") == "1" {
-			signal.Ignore(syscall.SIGTERM)
-			fmt.Println("STUBBORN_PID", os.Getpid())
 			select {}
 		}
 		if os.Getenv("AUTH_HELPER_START_DELAY") != "" {

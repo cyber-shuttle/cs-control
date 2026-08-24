@@ -41,10 +41,7 @@ func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime R
 	cmd.Stdin = strings.NewReader(script)
 	outText, errText, runErr := sshexec.RunBounded(commandCtx, cmd)
 	if runErr != nil {
-		message := strings.TrimSpace(errText)
-		if message == "" {
-			message = runErr.Error()
-		}
+		message := sshexec.FailureMessage(errText, runErr)
 		for _, secret := range []string{jupyterToken, hostToken} {
 			if secret != "" {
 				message = strings.ReplaceAll(message, secret, "[redacted]")
@@ -90,10 +87,7 @@ func (s Service) validateScript(ctx context.Context, alias, script string) (comm
 	if sshexec.AuthenticationFailure(message) {
 		return commandResult{}, sshexec.AuthenticationRequired(alias)
 	}
-	if message == "" {
-		message = err.Error()
-	}
-	return commandResult{}, fmt.Errorf("validate Slurm script over SSH: %s", message)
+	return commandResult{}, fmt.Errorf("validate Slurm script over SSH: %s", sshexec.FailureMessage(message, err))
 }
 
 func validationResult(prepared *preparedRuntime, result commandResult) *ValidationResult {

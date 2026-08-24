@@ -153,10 +153,7 @@ func (r Runner) run(ctx context.Context, alias, identity string, stdin io.Reader
 	if ctx.Err() != nil {
 		return stdout, fmt.Errorf("ssh command timed out: %w", ctx.Err())
 	}
-	message := strings.TrimSpace(captured.stderr.String())
-	if message == "" {
-		message = runErr.Error()
-	}
+	message := FailureMessage(captured.stderr.String(), runErr)
 	if AuthenticationFailure(message) {
 		return stdout, AuthenticationRequired(alias)
 	}
@@ -420,10 +417,7 @@ func (r Runner) Identity(ctx context.Context, alias string) (string, error) {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("resolve effective SSH configuration: %w", ctx.Err())
 		}
-		message := strings.TrimSpace(output.stderr.String())
-		if message == "" {
-			message = err.Error()
-		}
+		message := FailureMessage(output.stderr.String(), err)
 		return "", fmt.Errorf("resolve effective SSH configuration: %s", message)
 	}
 	identity := strings.ReplaceAll(output.stdout.String(), "\r\n", "\n")
@@ -525,4 +519,16 @@ func ChildEnv() []string {
 func utf8Request(value string) bool {
 	upper := strings.ToUpper(value)
 	return strings.Contains(upper, "UTF-8") || strings.Contains(upper, "UTF8")
+}
+
+// FailureMessage is what a failed remote command has to say for itself: its
+// stderr, or the process error when stderr said nothing.
+func FailureMessage(stderr string, err error) string {
+	if message := strings.TrimSpace(stderr); message != "" {
+		return message
+	}
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
