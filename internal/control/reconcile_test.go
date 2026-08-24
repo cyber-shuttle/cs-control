@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -351,8 +352,10 @@ func TestSchedulerQueryAsksSacctForJobsOlderThanToday(t *testing.T) {
 	if !strings.Contains(sent, "sacct --noheader -X --starttime=") {
 		t.Fatalf("sacct was asked without a start time, so anything older than today is invisible:\n%s", sent)
 	}
-	if !strings.Contains(sent, "1969-12-31T23:00:01") {
-		t.Fatalf("the accounting window did not reach back to the oldest runtime:\n%s", sent)
+	// Relative, not absolute: Slurm reads an absolute --starttime in the
+	// cluster's timezone, so a stamp of ours can land in its future.
+	if !strings.Contains(sent, "--starttime='now-") {
+		t.Fatalf("the accounting window must be relative to the cluster's own clock:\n%s", sent)
 	}
 }
 
@@ -381,5 +384,64 @@ func TestElapsedAnchorRetiresAnAllocationAlreadyPastItsWalltime(t *testing.T) {
 	runtime.StartedAt = time.Now().Add(-4 * time.Hour)
 	if !outlivedAllocation(runtime, time.Now()) {
 		t.Fatal("an allocation anchored four hours back on a one-hour walltime was not retired")
+	}
+}
+
+// A UTC stamp sent to a cluster west of UTC lands in that cluster's future, and
+// sacct then refuses the whole range with "Start time ... is after end time",
+// failing every status check. The window is relative so no timezone has to agree.
+func TestSchedulerLookbackIsRelativeAndNeverInTheClusterFuture(t *testing.T) {
+	now := time.Date(2026, 8, 24, 4, 51, 58, 0, time.UTC)
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	runtime.CreatedAt = now.Add(-90 * time.Second)
+
+	got := schedulerLookback([]Runtime{runtime}, now)
+	if !strings.HasPrefix(got, "now-") || !strings.HasSuffix(got, "seconds") {
+		t.Fatalf("lookback %q is not relative to the cluster's clock", got)
+	}
+	seconds, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(got, "now-"), "seconds"), 10, 64)
+	if err != nil {
+		t.Fatalf("lookback %q does not carry a count Slurm can read: %v", got, err)
+	}
+	if seconds <= 0 {
+		t.Fatalf("lookback %q would ask sacct to start in the future", got)
+	}
+	if seconds < 90 {
+		t.Fatalf("lookback %q does not reach back to the oldest runtime", got)
+	}
+}
+
+// A runtime created just now, or one whose clock ran ahead of ours, must still
+// produce a window that reaches backwards.
+func TestSchedulerLookbackHandlesARuntimeNotOlderThanNow(t *testing.T) {
+	now := time.Now()
+	for name, created := range map[string]time.Time{
+		"created now":       now,
+		"created in future": now.Add(10 * time.Minute),
+		"no creation time":  {},
+	} {
+		runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+		runtime.CreatedAt = created
+		got := schedulerLookback([]Runtime{runtime}, now)
+		seconds, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(got, "now-"), "seconds"), 10, 64)
+		if err != nil || seconds <= 0 {
+			t.Errorf("%s: lookback %q is not a backwards window", name, got)
+		}
+	}
+}
+
+// An unbounded window is a scan of the cluster's whole accounting history, which
+// is slow for every user of it, so it is capped.
+func TestSchedulerLookbackIsBounded(t *testing.T) {
+	now := time.Now()
+	ancient := pendingRuntime("rt-111111111111", "alpha", "101")
+	ancient.CreatedAt = time.Unix(1, 0)
+	got := schedulerLookback([]Runtime{ancient}, now)
+	seconds, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(got, "now-"), "seconds"), 10, 64)
+	if err != nil {
+		t.Fatalf("lookback %q does not carry a count Slurm can read", got)
+	}
+	if want := int64(schedulerLookbackMax.Seconds()); seconds != want {
+		t.Fatalf("a 1970 runtime asked sacct for %d seconds of history, want the %d cap", seconds, want)
 	}
 }
