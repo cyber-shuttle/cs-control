@@ -178,7 +178,12 @@ func (b *DeviceCodeBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		b.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	if r.ContentLength != 0 {
+	// These routes take no body, but the declared length cannot be the test:
+	// cs-control only ever listens on loopback, so every real request arrives
+	// through a proxy, and one that re-frames a bodyless POST as chunked leaves
+	// the length unknown -- which Go reports as -1, not 0. Ask what actually
+	// arrived instead.
+	if !emptyRequestBody(r) {
 		b.writeError(w, http.StatusBadRequest, "invalid_request", "request body must be empty")
 		return
 	}
@@ -570,4 +575,18 @@ func (b *DeviceCodeBroker) writeError(w http.ResponseWriter, status int, code, m
 
 func (b *DeviceCodeBroker) writeClosed(w http.ResponseWriter) {
 	b.writeError(w, http.StatusServiceUnavailable, "broker_closed", "authorization service is unavailable")
+}
+
+// emptyRequestBody reports whether the request carries no body at all, however
+// its length was framed.
+func emptyRequestBody(r *http.Request) bool {
+	if r.ContentLength > 0 {
+		return false
+	}
+	if r.Body == nil {
+		return true
+	}
+	var probe [1]byte
+	n, _ := io.ReadFull(r.Body, probe[:])
+	return n == 0
 }
