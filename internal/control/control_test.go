@@ -252,6 +252,24 @@ func TestCreateRejectsWorkspaceInsidePrivateRuntime(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsAllocationsBelowTheFloor(t *testing.T) {
+	for _, below := range []Resources{
+		{Cores: MinCores - 1, MemoryMB: MinMemoryMB, WallMinutes: 60},
+		{Cores: MinCores, MemoryMB: MinMemoryMB - 1, WallMinutes: 60},
+	} {
+		request := createRequest()
+		request.Resources = below
+		if _, err := testService(t).Create(testTunnelContext(), request); err == nil || apierr.For(err).Code != "invalid_resources" {
+			t.Fatalf("%d cores / %d MB was not rejected: %v", below.Cores, below.MemoryMB, err)
+		}
+	}
+	request := createRequest()
+	request.Resources = Resources{Cores: MinCores, MemoryMB: MinMemoryMB, WallMinutes: 60}
+	if _, err := testService(t).Create(testTunnelContext(), request); err != nil {
+		t.Fatalf("the floor itself was rejected: %v", err)
+	}
+}
+
 func TestRuntimeLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 	ssh, scriptLog, _ := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
@@ -295,11 +313,11 @@ func TestRuntimeLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 
 func TestCreateIsIdempotent(t *testing.T) {
 	service := testService(t)
-	first, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 1, MemoryMB: 1024, WallMinutes: 10}})
+	first, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 2, MemoryMB: 4096, WallMinutes: 10}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 1, MemoryMB: 1024, WallMinutes: 10}})
+	second, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 2, MemoryMB: 4096, WallMinutes: 10}})
 	if err != nil || first.ID != second.ID || first.JobID != second.JobID {
 		t.Fatalf("idempotency failed: %#v %#v %v", first, second, err)
 	}

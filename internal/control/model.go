@@ -189,6 +189,13 @@ const DefaultLinkspanPath = "$HOME/.cybershuttle/bin/linkspan"
 // account's home. It is the only value the layout rules accept.
 const defaultRuntimeBase = ".cybershuttle/runtimes"
 
+// The smallest allocation worth scheduling. cs-jupyter offers the same floor
+// in its create form; keep the two in step.
+const (
+	MinCores    = 2
+	MinMemoryMB = 4096
+)
+
 type Config struct {
 	LinkspanPath string
 	RuntimeBase  string
