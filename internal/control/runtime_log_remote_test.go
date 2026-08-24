@@ -12,7 +12,7 @@ import (
 )
 
 func TestReadRemoteRuntimeTailsUsesFixedArgumentsAndParsesStreams(t *testing.T) {
-	ssh, _, _, commandLog := fakeSSH(t)
+	ssh, _, commandLog := fakeSSH(t)
 	scriptLog := filepath.Join(t.TempDir(), "runtime-tail-script")
 	t.Setenv("FAKE_RUNTIME_LOG_SCRIPT", scriptLog)
 	t.Setenv("FAKE_RUNTIME_STDOUT", "first\n\x1b[31msecond\x1b[0m\n")
@@ -59,7 +59,7 @@ func TestReadRemoteRuntimeTailsUsesFixedArgumentsAndParsesStreams(t *testing.T) 
 }
 
 func TestCollectStartingRuntimeLogsOneReadPerHostFourRuntimeCapAndTerminalStop(t *testing.T) {
-	ssh, _, _, commandLog := fakeSSH(t)
+	ssh, _, commandLog := fakeSSH(t)
 	t.Setenv("FAKE_RUNTIME_STDOUT", "hello\n")
 	t.Setenv("FAKE_RUNTIME_STDERR", "\x1b[31mwarning\x1b[0m\n")
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Logs: NewRuntimeLogs()}

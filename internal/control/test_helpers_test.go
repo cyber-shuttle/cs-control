@@ -20,9 +20,6 @@ var testPrincipal = authn.Principal{Subject: "test-owner", Tenant: "test-tenant"
 
 const testIdentityToken = "signed-test-identity-token"
 
-// browserWebSocketProtocols is the subprotocol list a browser sends on a
-// control WebSocket: the protocol name plus both credential channels.
-
 type oauthValidatorFunc func(context.Context, string) (authn.Principal, error)
 
 func (f oauthValidatorFunc) Validate(ctx context.Context, credentials authn.OAuthCredentials) (authn.Principal, error) {

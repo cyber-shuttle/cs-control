@@ -179,18 +179,14 @@ func (m *Client) Delete(ctx context.Context, req DeleteRequest) error {
 	if err != nil {
 		return err
 	}
-	response, err := m.client.Do(request)
+	_, status, err := httpx.Do(m.client, request, maxDevTunnelBody)
 	if err != nil {
 		return SafeError("delete Dev Tunnel", err, req.OAuthToken)
 	}
-	defer response.Body.Close()
-	if _, err := httpx.ReadBounded(response.Body, maxDevTunnelBody); err != nil {
-		return errors.New("read Dev Tunnel delete response")
-	}
-	if response.StatusCode == http.StatusNotFound || response.StatusCode >= 200 && response.StatusCode < 300 {
+	if status == http.StatusNotFound || status >= 200 && status < 300 {
 		return nil
 	}
-	return fmt.Errorf("delete Dev Tunnel: HTTP %d", response.StatusCode)
+	return fmt.Errorf("delete Dev Tunnel: HTTP %d", status)
 }
 
 func validateTunnelIdentity(token, tunnelID, clusterID string) error {

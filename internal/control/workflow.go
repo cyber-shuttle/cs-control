@@ -95,10 +95,7 @@ func (s Service) installRuntimeWorkflow(ctx context.Context, alias string, runti
 	cmd.Stdin = strings.NewReader(runtimeWorkflow(runtime))
 	_, errText, runErr := sshexec.RunBounded(ctx, cmd)
 	if runErr != nil {
-		message := strings.TrimSpace(errText)
-		if message == "" {
-			message = runErr.Error()
-		}
+		message := sshexec.FailureMessage(errText, runErr)
 		return apierr.New("runtime_provisioning_failed", "Installing the runtime workflow on "+alias+" failed: "+message, http.StatusBadGateway)
 	}
 	return nil

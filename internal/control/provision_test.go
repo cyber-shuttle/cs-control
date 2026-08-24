@@ -12,7 +12,7 @@ import (
 // A host that has never run a runtime has neither the interpreter the script
 // starts nor the binary it execs, so creating one installs both first.
 func TestCreateProvisionsABareHost(t *testing.T) {
-	ssh, _, _, _ := fakeSSH(t)
+	ssh, _, _ := fakeSSH(t)
 	dir := t.TempDir()
 	provisionLog, workflowLog := dir+"/provision", dir+"/workflow"
 	t.Setenv("FAKE_PROVISION_LOG", provisionLog)
@@ -53,7 +53,7 @@ func TestCreateProvisionsABareHost(t *testing.T) {
 // A host that cannot be prepared is refused with the reason, and no job is ever
 // submitted to it.
 func TestCreateRefusesAHostItCannotProvision(t *testing.T) {
-	ssh, _, scriptLog, _ := fakeSSH(t)
+	ssh, scriptLog, _ := fakeSSH(t)
 	t.Setenv("FAKE_PROVISION_FAIL", "1")
 	t.Setenv("FAKE_PROVISION_REPORT", "error=linkspan-download")
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Logs: NewRuntimeLogs()}
@@ -76,7 +76,7 @@ func TestSecondCreateIsRefusedWhileTheHostIsBeingPrepared(t *testing.T) {
 	if busy {
 		t.Fatal("host was already marked as being prepared")
 	}
-	ssh, _, scriptLog, _ := fakeSSH(t)
+	ssh, scriptLog, _ := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Logs: NewRuntimeLogs()}
 	configureTestTunnel(t, &service)
 	_, err := service.Create(testTunnelContext(), createRequest())
@@ -98,7 +98,7 @@ func TestSecondCreateIsRefusedWhileTheHostIsBeingPrepared(t *testing.T) {
 // predates host-scoped tokens cannot run one. It is refused while a runtime can
 // still be refused, rather than by an allocation that dies on its first flag.
 func TestCreateRefusesALinkspanThatCannotHostTheTunnel(t *testing.T) {
-	ssh, _, scriptLog, _ := fakeSSH(t)
+	ssh, scriptLog, _ := fakeSSH(t)
 	t.Setenv("FAKE_PROVISION_FAIL", "1")
 	t.Setenv("FAKE_PROVISION_REPORT", "error=linkspan-unsupported")
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Logs: NewRuntimeLogs()}

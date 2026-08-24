@@ -252,10 +252,7 @@ func (s Service) Discover(ctx context.Context, alias string) (Resource, error) {
 			}
 			return Resource{}, framedErr
 		}
-		if message == "" {
-			message = runErr.Error()
-		}
-		return Resource{}, fmt.Errorf("ssh command failed: %s", message)
+		return Resource{}, fmt.Errorf("ssh command failed: %s", sshexec.FailureMessage(message, runErr))
 	}
 	return stdout.result(alias)
 }

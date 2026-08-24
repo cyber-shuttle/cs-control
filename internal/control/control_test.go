@@ -16,7 +16,7 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
-func fakeSSH(t *testing.T) (string, string, string, string) {
+func fakeSSH(t *testing.T) (string, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	status := filepath.Join(dir, "status")
@@ -164,12 +164,12 @@ esac
 	t.Setenv("DISC_ERROR_ACCOUNTS", markerErrorAccounts)
 	t.Setenv("DISC_ERROR_PARTITIONS", markerErrorPartitions)
 	t.Setenv("DISC_ERROR_HOME", markerErrorHome)
-	return path, status, scriptLog, commandLog
+	return path, scriptLog, commandLog
 }
 
 func testService(t *testing.T) Service {
 	t.Helper()
-	ssh, _, _, _ := fakeSSH(t)
+	ssh, _, _ := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan", RuntimeBase: ".cybershuttle/runtimes"}, Now: func() time.Time { return time.Unix(1, 0).UTC() }}
 	configureTestTunnel(t, &service)
 	return service
@@ -180,7 +180,7 @@ func createRequest() CreateRequest {
 }
 
 func TestDiscoverNormalizesSchedulerData(t *testing.T) {
-	ssh, _, _, commandLog := fakeSSH(t)
+	ssh, _, commandLog := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}}
 	resource, err := service.Discover(context.Background(), "delta")
 	if err != nil {
@@ -215,7 +215,7 @@ func TestDiscoverNormalizesSchedulerData(t *testing.T) {
 func TestDiscoverRejectsUnsafeRemoteUsernameBeforeSacctmgr(t *testing.T) {
 	for _, username := range []string{"bad;touch", "$USER", "two\nusers", strings.Repeat("a", 65)} {
 		t.Run(fmt.Sprintf("%q", username), func(t *testing.T) {
-			ssh, _, _, commandLog := fakeSSH(t)
+			ssh, _, commandLog := fakeSSH(t)
 			t.Setenv("FAKE_REMOTE_USER", username)
 			service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}}
 			if _, err := service.Discover(context.Background(), "delta"); err == nil || !strings.Contains(err.Error(), "identify remote user") {
@@ -253,7 +253,7 @@ func TestCreateRejectsWorkspaceInsidePrivateRuntime(t *testing.T) {
 }
 
 func TestRuntimeLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
-	ssh, _, scriptLog, _ := fakeSSH(t)
+	ssh, scriptLog, _ := fakeSSH(t)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
 	configureTestTunnel(t, &service)
 	runtime, err := service.Create(testTunnelContext(), createRequest())

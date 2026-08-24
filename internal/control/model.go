@@ -6,7 +6,7 @@
 // Everything it needs from outside is a composed subsystem it never reaches
 // past: sshexec runs remote commands, sshconfig reads ~/.ssh/config, devtunnel
 // owns the Dev Tunnels API, authn owns identity, gateway serves the SSH
-// authentication socket, and safeio, httpx, wsjson, proc and apierr hold the
+// authentication socket, and safeio and httpx, proc and apierr hold the
 // primitives they share.
 package control
 
@@ -185,6 +185,10 @@ type state struct {
 // none: under the account's own home, which every account can write to.
 const DefaultLinkspanPath = "$HOME/.cybershuttle/bin/linkspan"
 
+// defaultRuntimeBase is where a runtime's private state lives, relative to the
+// account's home. It is the only value the layout rules accept.
+const defaultRuntimeBase = ".cybershuttle/runtimes"
+
 type Config struct {
 	LinkspanPath string
 	RuntimeBase  string
@@ -212,7 +216,7 @@ func (s Service) effectiveConfig() Config {
 		cfg.LinkspanPath = DefaultLinkspanPath
 	}
 	if cfg.RuntimeBase == "" {
-		cfg.RuntimeBase = ".cybershuttle/runtimes"
+		cfg.RuntimeBase = defaultRuntimeBase
 	}
 	return cfg
 }
