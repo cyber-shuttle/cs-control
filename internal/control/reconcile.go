@@ -39,6 +39,14 @@ const (
 	schedulerPropagationWindow = 2 * time.Minute
 	// The gap between a job reaching its --time and Slurm reaping it.
 	allocationWallGrace = 10 * time.Minute
+	// How much further back than the oldest runtime sacct is asked to look, so a
+	// clock that disagrees with ours cannot clip the newest one out of the answer.
+	schedulerLookbackSlack = time.Hour
+	// The furthest back it is ever asked to look. A window is a query against the
+	// cluster's accounting database, so an unbounded one is slow for everybody;
+	// and a runtime still unaccounted for after this long is one the scheduler has
+	// already stopped knowing about, which absence retires on its own.
+	schedulerLookbackMax = 30 * 24 * time.Hour
 )
 
 // startedRuntime reports whether Slurm had begun running the allocation, which
@@ -345,11 +353,10 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 	script.WriteString(sshexec.ShellQuote(schedulerMarkerAccounting))
 	// sacct defaults to jobs from midnight today, which silently hides every
 	// allocation submitted before it -- the runtime then reads as missing rather
-	// than finished, and keeps its last state. Ask from the oldest runtime in
-	// this batch instead. The timestamp is formatted from our own store, never
-	// from a request.
+	// than finished, and keeps its last state. Ask far enough back to cover the
+	// oldest runtime in this batch instead.
 	script.WriteString("\nsacct --noheader -X --starttime=")
-	script.WriteString(sshexec.ShellQuote(earliestCreation(runtimes).Format("2006-01-02T15:04:05")))
+	script.WriteString(sshexec.ShellQuote(schedulerLookback(runtimes, s.now())))
 	script.WriteString(" --name=")
 	script.WriteString(sshexec.ShellQuote(strings.Join(names, ",")))
 	script.WriteString(" --format=JobIDRaw,State,NodeList,JobName,ElapsedRaw --parsable2\n")
@@ -451,15 +458,29 @@ func sortedRuntimeCopies(current *state) []Runtime {
 	return result
 }
 
-// earliestCreation is the accounting window this batch needs: the oldest
-// runtime in it, backed off far enough that a clock skew between here and the
-// login node cannot clip the newest one out of the answer.
-func earliestCreation(runtimes []Runtime) time.Time {
-	oldest := time.Time{}
+// schedulerLookback is how far back sacct is asked to look: far enough to cover
+// the oldest runtime in the batch, plus an hour so a clock that disagrees with
+// ours cannot clip the newest one out of the answer.
+//
+// It is deliberately relative. Slurm reads an absolute --starttime in the
+// cluster's own timezone, which is not necessarily ours, so an absolute stamp
+// can land in the cluster's future -- and sacct then refuses the whole range
+// with "Start time ... is after end time", failing every status check. A
+// relative one the cluster evaluates against its own clock needs no agreement
+// about zones at all.
+func schedulerLookback(runtimes []Runtime, now time.Time) string {
+	oldest := now
 	for _, runtime := range runtimes {
-		if oldest.IsZero() || runtime.CreatedAt.Before(oldest) {
+		if !runtime.CreatedAt.IsZero() && runtime.CreatedAt.Before(oldest) {
 			oldest = runtime.CreatedAt
 		}
 	}
-	return oldest.Add(-time.Hour).UTC()
+	window := now.Sub(oldest) + schedulerLookbackSlack
+	if window < schedulerLookbackSlack {
+		window = schedulerLookbackSlack
+	}
+	if window > schedulerLookbackMax {
+		window = schedulerLookbackMax
+	}
+	return "now-" + strconv.FormatInt(int64(window.Seconds()), 10) + "seconds"
 }
