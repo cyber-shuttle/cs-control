@@ -84,8 +84,12 @@ func TestChildEnvLeavesAUTF8LocaleAlone(t *testing.T) {
 }
 
 // The unit tests above pin what we pass; only OpenSSH can say whether it honours
-// it. It renders non-ASCII it does not trust through vis(3), so a hostname is
-// enough to see which way it goes.
+// it, and that depends on the build. OpenSSH escapes through strnvis: macOS
+// supplies a locale-aware one, while portable OpenSSH bundles its own for Linux
+// because glibc's is unusable, and the bundled copy escapes non-ASCII whatever
+// the locale. A diagnostic is therefore only a usable probe where the platform
+// varies by locale at all, so this measures that first and skips where it cannot
+// tell the two apart.
 func TestOpenSSHDoesNotEscapeNonASCIIUnderChildEnv(t *testing.T) {
 	ssh, err := exec.LookPath("ssh")
 	if err != nil {
@@ -98,19 +102,23 @@ func TestOpenSSHDoesNotEscapeNonASCIIUnderChildEnv(t *testing.T) {
 		out, _ := cmd.CombinedOutput()
 		return string(out)
 	}
-	if escaped := run([]string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C"}); !strings.Contains(escaped, `\342\226`) {
-		t.Skip("this OpenSSH does not octal-escape under the C locale; nothing to prove")
+	path := "PATH=" + os.Getenv("PATH")
+	if !strings.Contains(run([]string{path, "LC_ALL=C"}), `\342\226`) {
+		t.Skip("this OpenSSH does not octal-escape diagnostics under the C locale")
+	}
+	if strings.Contains(run([]string{path, "LC_ALL=" + utf8Locale}), `\342\226`) {
+		t.Skip("this OpenSSH escapes diagnostics whatever the locale, so they cannot measure it")
 	}
 	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
 		t.Setenv(name, "")
 	}
 	if got := run(ChildEnv()); strings.Contains(got, `\342\226`) {
-		t.Fatalf("ssh still octal-escaped non-ASCII under ChildEnv: %s", got)
+		t.Fatalf("ssh octal-escaped non-ASCII under ChildEnv on a build that honours the locale: %s", got)
 	}
 }
 
 // A duplicate name reaches execve twice and the two libcs disagree about which
-// copy wins, so exactly one must survive.
+// copy wins -- glibc takes the first, macOS the last -- so exactly one survives.
 func TestChildEnvLeavesExactlyOneLocaleEntry(t *testing.T) {
 	t.Setenv("LC_ALL", "C")
 	t.Setenv("LC_CTYPE", "")
