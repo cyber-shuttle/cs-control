@@ -89,7 +89,7 @@ exec "$LINKSPAN_BIN" --port "$CS_CONTROL_PORT" --tunnel-enable \
 
 The batch script names no application: what the allocation is for travels with it in the workflow document,
 whose only action is `shell.exec`. Tokens and ports are passed through fixed `sbatch --export` arguments and
-are redacted from errors. Conclusive submission failure compensates the tunnel and credential; ambiguous submission retains durable intent for scheduler recovery. Stop invalidates the tunnel and credential while preserving the scheduler stop state. A terminal allocation is not resumable: creating another one is the only way to run it again.
+are redacted from errors. Conclusive submission failure compensates the tunnel and credential; ambiguous submission retains durable intent for scheduler recovery. Stop invalidates the tunnel and credential while preserving the scheduler stop state. A terminal allocation is not resumable: running it again creates a new allocation under the same runtime identity, replacing its record.
 
 Scheduler state remains SSH/SLURM authoritative. The owner-authenticated `/access` endpoint returns the allocation's Jupyter URI and its token. cs-control does not proxy Jupyter, VS Code, or other runtime data and does not read or clean up shared Linkspan token or readiness-manifest files.
 
