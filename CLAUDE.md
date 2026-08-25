@@ -108,8 +108,10 @@ broker, or token persistence/logging.
 - Conclusive submission failure compensates tunnel and credential state;
   ambiguous submission remains durable for reconciliation. Stop must preserve
   scheduler/tunnel/credential ordering and generation invalidation. A terminal
-  allocation is not resumable: creating another one is the only way to run it
-  again, so there is no restart path to keep consistent with create.
+  allocation is not resumable, so running one again is a create under the same
+  runtime identity (`POST /api/v1/runtimes/{id}/start`): it replaces the record
+  and takes a new generation rather than adding a second card or a second path
+  to keep consistent with create.
 - Tunnel expiry is the final cleanup backstop after ungraceful process or job
   failure.
 - The Linkspan path may be absolute or anchored at `$HOME/`, which discovery
