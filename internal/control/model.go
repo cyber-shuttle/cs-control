@@ -67,7 +67,10 @@ type Resources struct {
 }
 
 type CreateRequest struct {
-	ID             string    `json:"-"`
+	ID string `json:"-"`
+	// Set only by Start: this request runs an existing card again rather than
+	// claiming a new one. It is unexported so no caller can send it.
+	relaunch       bool
 	IdempotencyKey string    `json:"idempotencyKey,omitempty"`
 	SSHHost        string    `json:"sshHost"`
 	Account        string    `json:"account,omitempty"`
@@ -232,6 +235,7 @@ var (
 	errRuntimeNotFound  = apierr.New("runtime_not_found", "runtime not found", 404)
 	errOwnerMismatch    = apierr.New("runtime_owner_mismatch", "runtime is owned by another principal", 403)
 	errInvalidRuntimeID = apierr.New("invalid_runtime_id", "invalid runtime ID", 400)
+	errRuntimeRunning   = apierr.New("runtime_running", "runtime is still running; stop it before running it again", 409)
 	errRouteNotFound    = apierr.New("not_found", "route not found", 404)
 	errMethodNotAllowed = apierr.New("method_not_allowed", "method not allowed", 405)
 )
