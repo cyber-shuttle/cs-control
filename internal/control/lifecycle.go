@@ -105,9 +105,6 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 				reused = true
 				return nil
 			}
-			// A relaunch is the same card running again: its record is replaced
-			// rather than claimed, so the job, node, and generation of the run
-			// that ended do not survive into the one being submitted.
 			if !request.relaunch {
 				return apierr.New("runtime_exists", "runtime ID already exists", 409)
 			}
@@ -232,9 +229,8 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	return created, nil
 }
 
-// Start runs a finished allocation again on the card the owner already has. A
-// terminal allocation cannot resume -- its job, tunnel, and generation are gone
-// -- so this submits a new one under the same identity, settings, and workspace.
+// Start submits a new allocation under a finished runtime's own identity and
+// settings, replacing its record rather than adding one beside it.
 func (s Service) Start(ctx context.Context, id string) (*Runtime, error) {
 	auth, err := authn.TunnelAuthorizationFromContext(ctx)
 	if err != nil {
@@ -250,15 +246,12 @@ func (s Service) Start(ctx context.Context, id string) (*Runtime, error) {
 	if !terminalRuntime(runtime.State) {
 		return nil, errRuntimeRunning
 	}
-	// A finished allocation's tunnel outlives it, and this card is about to point
-	// at a new one, so the old one is released here the way stopping releases it.
+	// The record naming this tunnel is about to be replaced.
 	if runtime.Tunnel.ID != "" {
 		if err := s.compensateAllocationTunnel(auth, *runtime); err != nil {
 			return nil, err
 		}
 	}
-	// The card is about the run it is on, so the finished run's status lines go
-	// with it rather than accumulating across runs.
 	s.Logs.Forget(id)
 	return s.Create(ctx, CreateRequest{
 		ID: id, relaunch: true, SSHHost: runtime.SSHHost, Account: runtime.Account,
@@ -500,8 +493,6 @@ func (s Service) GetCached(id string) (*Runtime, error) {
 	return result, err
 }
 
-// A terminal allocation holds no job, tunnel, or credential: it can only be
-// deleted or run again.
 func terminalRuntime(state string) bool {
 	return state == "STOPPED" || state == "FAILED"
 }
@@ -524,8 +515,7 @@ func setRuntimeNode(runtime *Runtime, value string) error {
 
 // abandonSubmitIntent undoes a runtime that will never reach the scheduler:
 // preparing its host failed, or submitting it conclusively did. A stop that
-// arrived meanwhile keeps its own outcome, and a relaunch keeps the card the
-// owner already had rather than taking it away on a failed run.
+// arrived meanwhile keeps its own outcome, and a relaunch keeps its card.
 func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Runtime, relaunched bool) error {
 	compensateErr := s.compensateAllocationTunnel(auth, intent)
 	stateErr := s.Store.withLock(func(store Store, current *state) error {

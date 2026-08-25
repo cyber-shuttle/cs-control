@@ -9,8 +9,7 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/authn"
 )
 
-// retire drives a created runtime to a terminal state the way a finished
-// allocation reaches one, leaving the scheduler facts of that run behind.
+// retire ends a runtime the way a finished allocation ends: facts of that run intact.
 func retire(t *testing.T, service Service, id string) Runtime {
 	t.Helper()
 	var terminal Runtime

@@ -68,8 +68,7 @@ type Resources struct {
 
 type CreateRequest struct {
 	ID string `json:"-"`
-	// Set only by Start: this request runs an existing card again rather than
-	// claiming a new one. It is unexported so no caller can send it.
+	// Unexported: only Start sets it, never a caller.
 	relaunch       bool
 	IdempotencyKey string    `json:"idempotencyKey,omitempty"`
 	SSHHost        string    `json:"sshHost"`
