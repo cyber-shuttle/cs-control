@@ -86,6 +86,7 @@ func (a *HTTPAPI) mux() *http.ServeMux {
 		"/api/v1/runtimes/script":      {http.MethodPost: answer(http.StatusOK, a.runtimeScript)},
 		"/api/v1/runtimes/validate":    {http.MethodPost: answer(http.StatusOK, a.validateRuntime)},
 		"/api/v1/runtimes/{id}":        {http.MethodGet: answer(http.StatusOK, a.getRuntime), http.MethodDelete: answer(http.StatusOK, a.deleteRuntime)},
+		"/api/v1/runtimes/{id}/start":  {http.MethodPost: answer(http.StatusOK, a.startRuntime)},
 		"/api/v1/runtimes/{id}/stop":   {http.MethodPost: answer(http.StatusOK, a.stopRuntime)},
 		"/api/v1/runtimes/{id}/access": {http.MethodGet: answer(http.StatusOK, a.runtimeAccess)},
 	} {
@@ -224,22 +225,26 @@ func (a *HTTPAPI) getRuntime(request *http.Request) (RuntimeResponse, error) {
 	return RuntimeResponseFrom(*runtime), nil
 }
 
+func (a *HTTPAPI) startRuntime(request *http.Request) (RuntimeResponse, error) {
+	return a.runtimeAction(request, a.Service.Start)
+}
+
 func (a *HTTPAPI) stopRuntime(request *http.Request) (RuntimeResponse, error) {
-	return a.retireRuntime(request, a.Service.Stop)
+	return a.runtimeAction(request, a.Service.Stop)
 }
 
 func (a *HTTPAPI) deleteRuntime(request *http.Request) (RuntimeResponse, error) {
-	return a.retireRuntime(request, a.Service.Delete)
+	return a.runtimeAction(request, a.Service.Delete)
 }
 
-// Stop and delete are the same route shape: name a runtime, act on it, answer
-// with what it became.
-func (a *HTTPAPI) retireRuntime(request *http.Request, retire func(context.Context, string) (*Runtime, error)) (RuntimeResponse, error) {
+// Start, stop, and delete are the same route shape: name a runtime, act on it,
+// answer with what it became.
+func (a *HTTPAPI) runtimeAction(request *http.Request, act func(context.Context, string) (*Runtime, error)) (RuntimeResponse, error) {
 	id, err := routedRuntimeID(request)
 	if err != nil {
 		return RuntimeResponse{}, err
 	}
-	runtime, err := retire(request.Context(), id)
+	runtime, err := act(request.Context(), id)
 	if err != nil {
 		return RuntimeResponse{}, err
 	}

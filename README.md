@@ -61,6 +61,7 @@ POST     /api/v1/runtimes/script
 POST     /api/v1/runtimes/validate
 GET      /api/v1/runtimes/{id}
 DELETE   /api/v1/runtimes/{id}
+POST     /api/v1/runtimes/{id}/start
 POST     /api/v1/runtimes/{id}/stop
 GET      /api/v1/runtimes/{id}/access
 ```

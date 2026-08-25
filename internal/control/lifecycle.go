@@ -95,7 +95,8 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	var jupyterToken string
 	reused, tunnelCreated := false, false
 	err = s.Store.withLock(func(store Store, current *state) error {
-		if existing := current.Runtimes[request.ID]; existing != nil {
+		existing := current.Runtimes[request.ID]
+		if existing != nil {
 			if existing.Owner != auth.Principal {
 				return errOwnerMismatch
 			}
@@ -104,11 +105,19 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 				reused = true
 				return nil
 			}
-			return apierr.New("runtime_exists", "runtime ID already exists", 409)
+			if !request.relaunch {
+				return apierr.New("runtime_exists", "runtime ID already exists", 409)
+			}
+			if !terminalRuntime(existing.State) {
+				return errRuntimeRunning
+			}
 		}
 		now := s.now()
 		intent = prepared.runtime
 		intent.State, intent.CreatedAt, intent.UpdatedAt = "SUBMITTING", now, now
+		if existing != nil {
+			intent.CreatedAt = existing.CreatedAt
+		}
 		var createErr error
 		record, jupyterToken, createErr = s.createAllocationTunnel(ctx, &intent, auth)
 		if createErr != nil {
@@ -117,7 +126,11 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		tunnelCreated = true
 		current.Runtimes[intent.ID] = &intent
 		if err := store.save(current); err != nil {
-			delete(current.Runtimes, intent.ID)
+			if existing != nil {
+				current.Runtimes[intent.ID] = existing
+			} else {
+				delete(current.Runtimes, intent.ID)
+			}
 			return fmt.Errorf("persist submit intent: %w", err)
 		}
 		return nil
@@ -138,7 +151,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	// preparation happen rather than a request that says nothing until it ends.
 	if err := s.provisionRuntime(ctx, request.SSHHost, intent, prepared.linkspan); err != nil {
 		s.runtimeStatus(intent.ID, "Runtime environment preparation failed")
-		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent))
+		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent, request.relaunch))
 	}
 
 	s.runtimeStatus(intent.ID, "Submitting runtime to Slurm")
@@ -149,7 +162,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 			return nil, err
 		}
 		s.runtimeStatus(intent.ID, "Runtime submission failed")
-		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent))
+		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent, request.relaunch))
 	}
 	s.runtimeStatus(intent.ID, "Runtime submitted to Slurm")
 	var created *Runtime
@@ -216,6 +229,36 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	return created, nil
 }
 
+// Start submits a new allocation under a finished runtime's own identity and
+// settings, replacing its record rather than adding one beside it.
+func (s Service) Start(ctx context.Context, id string) (*Runtime, error) {
+	auth, err := authn.TunnelAuthorizationFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	runtime, err := s.GetCached(id)
+	if err != nil {
+		return nil, err
+	}
+	if runtime.Owner != auth.Principal {
+		return nil, errOwnerMismatch
+	}
+	if !terminalRuntime(runtime.State) {
+		return nil, errRuntimeRunning
+	}
+	// The record naming this tunnel is about to be replaced.
+	if runtime.Tunnel.ID != "" {
+		if err := s.compensateAllocationTunnel(auth, *runtime); err != nil {
+			return nil, err
+		}
+	}
+	s.Logs.Forget(id)
+	return s.Create(ctx, CreateRequest{
+		ID: id, relaunch: true, SSHHost: runtime.SSHHost, Account: runtime.Account,
+		Partition: runtime.Partition, RootFolder: runtime.RootFolder, Resources: runtime.Resources,
+	})
+}
+
 func (s Service) Stop(ctx context.Context, id string) (*Runtime, error) {
 	if !idPattern.MatchString(id) {
 		return nil, errInvalidRuntimeID
@@ -233,7 +276,7 @@ func (s Service) Stop(ctx context.Context, id string) (*Runtime, error) {
 		if runtime.Owner != auth.Principal {
 			return errOwnerMismatch
 		}
-		if runtime.State != "STOPPED" && runtime.State != "FAILED" {
+		if !terminalRuntime(runtime.State) {
 			runtime.State, runtime.Error, runtime.UpdatedAt = "STOPPING", "", s.now()
 			if err := store.save(current); err != nil {
 				return err
@@ -294,7 +337,7 @@ func (s Service) Delete(ctx context.Context, id string) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	if stopped == nil || (stopped.State != "STOPPED" && stopped.State != "FAILED") {
+	if stopped == nil || !terminalRuntime(stopped.State) {
 		return nil, apierr.New("runtime_not_stopped", "runtime is still stopping; delete it once the scheduler has released the job", http.StatusConflict)
 	}
 	auth, err := authn.TunnelAuthorizationFromContext(ctx)
@@ -310,7 +353,7 @@ func (s Service) Delete(ctx context.Context, id string) (*Runtime, error) {
 		if runtime.Owner != auth.Principal {
 			return errOwnerMismatch
 		}
-		if runtime.State != "STOPPED" && runtime.State != "FAILED" {
+		if !terminalRuntime(runtime.State) {
 			return apierr.New("runtime_not_stopped", "runtime is no longer stopped", http.StatusConflict)
 		}
 		deleted = detached(runtime)
@@ -450,6 +493,10 @@ func (s Service) GetCached(id string) (*Runtime, error) {
 	return result, err
 }
 
+func terminalRuntime(state string) bool {
+	return state == "STOPPED" || state == "FAILED"
+}
+
 func reconcile(state string) bool {
 	return state == "SUBMITTING" || state == "QUEUED" || state == "STARTING" || state == "READY" || state == "STOPPING"
 }
@@ -468,8 +515,8 @@ func setRuntimeNode(runtime *Runtime, value string) error {
 
 // abandonSubmitIntent undoes a runtime that will never reach the scheduler:
 // preparing its host failed, or submitting it conclusively did. A stop that
-// arrived meanwhile keeps its own outcome.
-func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Runtime) error {
+// arrived meanwhile keeps its own outcome, and a relaunch keeps its card.
+func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Runtime, relaunched bool) error {
 	compensateErr := s.compensateAllocationTunnel(auth, intent)
 	stateErr := s.Store.withLock(func(store Store, current *state) error {
 		currentRuntime := current.Runtimes[intent.ID]
@@ -478,7 +525,14 @@ func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Runt
 		}
 		switch currentRuntime.State {
 		case "SUBMITTING":
-			delete(current.Runtimes, intent.ID)
+			if !relaunched {
+				delete(current.Runtimes, intent.ID)
+				break
+			}
+			currentRuntime.State = "FAILED"
+			currentRuntime.Tunnel = TunnelMetadata{}
+			currentRuntime.Error = boundedOptionalRuntimeError(compensateErr)
+			currentRuntime.UpdatedAt = s.now()
 		case "STOPPING":
 			currentRuntime.State = "STOPPED"
 			currentRuntime.Tunnel = TunnelMetadata{}
