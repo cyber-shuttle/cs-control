@@ -27,6 +27,7 @@ func fakeSSH(t *testing.T) (string, string, string) {
 	discoveryExecCount := filepath.Join(dir, "discovery-exec-count")
 	acceptedJobName := filepath.Join(dir, "accepted-job-name")
 	schedulerQueryCount := filepath.Join(dir, "scheduler-query-count")
+	acceptedJobID := filepath.Join(dir, "accepted-job-id")
 	if err := os.WriteFile(status, []byte("RUNNING\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
   payload=$(cat)
   query_count=0; [ ! -f "$FAKE_SCHEDULER_QUERY_COUNT" ] || query_count=$(cat "$FAKE_SCHEDULER_QUERY_COUNT")
   query_count=$((query_count + 1)); printf '%s\n' "$query_count" > "$FAKE_SCHEDULER_QUERY_COUNT"
-  job_id=12345
+  job_id=12345; [ ! -f "$FAKE_ACCEPTED_JOB_ID" ] || job_id=$(cat "$FAKE_ACCEPTED_JOB_ID")
   if printf '%s' "$payload" | grep -q 'scancel '; then
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s' "$payload" | grep -o 'scancel [^)]*' | sed 's/ 2>&1$//' | tr -d "'" | sed 's/^/batch /' >> "$FAKE_SCANCEL_LOG"
     if [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ]; then printf 'CANCELLED\n' > "$FAKE_STATUS"; fi
@@ -108,12 +109,13 @@ case "$command" in
     [ -z "${FAKE_VALIDATION_STDERR:-}" ] || printf '%s\n' "$FAKE_VALIDATION_STDERR" >&2
     [ "${FAKE_VALIDATION_FAIL:-0}" = 0 ] || exit "${FAKE_VALIDATION_FAIL}"
     ;;
-  "sbatch --export=ALL,JUPYTER_TOKEN="*"CS_TUNNEL_HOST_TOKEN="*" --parsable")
+  "sbatch --job-name="*" --export=ALL,JUPYTER_TOKEN="*"CS_TUNNEL_HOST_TOKEN="*" --parsable")
     cat > "$FAKE_SCRIPT_LOG"
     [ -z "${FAKE_SUBMIT_STARTED:-}" ] || : > "$FAKE_SUBMIT_STARTED"
     while [ -n "${FAKE_SUBMIT_RELEASE:-}" ] && [ ! -e "$FAKE_SUBMIT_RELEASE" ]; do sleep .01; done
-    sed -n 's/^#SBATCH --job-name=//p' "$FAKE_SCRIPT_LOG" | head -n 1 > "$FAKE_ACCEPTED_JOB_NAME"
-    printf '12345;cluster\n'
+    printf '%s\n' "${2#--job-name=}" > "$FAKE_ACCEPTED_JOB_NAME"
+    printf '%s\n' "${FAKE_JOB_ID:-12345}" > "$FAKE_ACCEPTED_JOB_ID"
+    printf '%s;cluster\n' "${FAKE_JOB_ID:-12345}"
     ;;
   "scancel "*)
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s\n' "$command" >> "$FAKE_SCANCEL_LOG"
@@ -125,6 +127,8 @@ case "$command" in
     ;;
   "sh -s -- csctl-provision "*)
     cat > "${FAKE_PROVISION_LOG:-/dev/null}"
+    [ -z "${FAKE_PROVISION_STARTED:-}" ] || : > "$FAKE_PROVISION_STARTED"
+    while [ -n "${FAKE_PROVISION_RELEASE:-}" ] && [ ! -e "$FAKE_PROVISION_RELEASE" ]; do sleep .01; done
     [ "${FAKE_PROVISION_FAIL:-0}" = 0 ] || { printf '%s\n' "${FAKE_PROVISION_REPORT:-error=jupyter}"; exit 75; }
     printf '%s\n' "${FAKE_PROVISION_REPORT:-uv=present}"
     printf 'linkspan=present\nprovision=complete\n'
@@ -150,6 +154,7 @@ esac
 	t.Setenv("FAKE_DISCOVERY_SCRIPT_LOG", discoveryScriptLog)
 	t.Setenv("FAKE_DISCOVERY_EXEC_COUNT", discoveryExecCount)
 	t.Setenv("FAKE_ACCEPTED_JOB_NAME", acceptedJobName)
+	t.Setenv("FAKE_ACCEPTED_JOB_ID", acceptedJobID)
 	t.Setenv("FAKE_SCHEDULER_QUERY_COUNT", schedulerQueryCount)
 	t.Setenv("DISC_USER_BEGIN", markerUserBegin)
 	t.Setenv("DISC_USER_END", markerUserEnd)

@@ -23,15 +23,20 @@ func ambiguousSubmission(err error) bool {
 
 func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime Runtime, script, jupyterToken, hostToken string) (string, error) {
 	jobName := runtime.JobName
+	if !validRuntimeJobName(&runtime) {
+		return "", fmt.Errorf("submit %s failed: job name does not name this allocation", runtime.ID)
+	}
 	// The allocation identity is only known once the tunnel exists, so it rides
 	// the job environment alongside the tokens and leaves the reviewed script
-	// byte-identical to the one Slurm validated.
+	// byte-identical to the one Slurm validated. The job name is part of that
+	// identity: it is what the scheduler and its accounting database answer
+	// under, so it names the generation and not just the card.
 	ports := allocationPorts(runtime.ID, runtime.Generation)
 	// Jupyter Server reads its own token and port from the environment, so the
 	// workflow that starts it names neither and nothing secret is written down.
 	export := fmt.Sprintf("--export=ALL,JUPYTER_TOKEN=%s,CS_TUNNEL_HOST_TOKEN=%s,JUPYTER_PORT=%d,CS_CONTROL_PORT=%d,CS_TUNNEL_ID=%s,CS_TUNNEL_CLUSTER=%s",
 		jupyterToken, hostToken, ports.jupyter, ports.control, runtime.Tunnel.ID, runtime.Tunnel.ClusterID)
-	remote := strings.Join([]string{sshexec.ShellQuote("sbatch"), sshexec.ShellQuote(export), sshexec.ShellQuote("--parsable")}, " ")
+	remote := strings.Join([]string{sshexec.ShellQuote("sbatch"), sshexec.ShellQuote("--job-name=" + jobName), sshexec.ShellQuote(export), sshexec.ShellQuote("--parsable")}, " ")
 	commandCtx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
 	defer cancel()
 	cmd, err := s.Runner.Command(commandCtx, host, remote)
@@ -116,7 +121,7 @@ func validationMessage(result commandResult) string {
 
 func buildScript(runtime Runtime, linkspan string) string {
 	walltime := minutesToWalltime(runtime.Resources.WallMinutes)
-	lines := []string{"#!/bin/bash", "#SBATCH --job-name=" + runtime.JobName, "#SBATCH --nodes=1", "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=" + strconv.Itoa(runtime.Resources.Cores), "#SBATCH --mem=" + strconv.Itoa(runtime.Resources.MemoryMB) + "M", "#SBATCH --time=" + walltime, "#SBATCH --partition=" + runtime.Partition}
+	lines := []string{"#!/bin/bash", "#SBATCH --nodes=1", "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=" + strconv.Itoa(runtime.Resources.Cores), "#SBATCH --mem=" + strconv.Itoa(runtime.Resources.MemoryMB) + "M", "#SBATCH --time=" + walltime, "#SBATCH --partition=" + runtime.Partition}
 	if runtime.Account != "" {
 		lines = append(lines, "#SBATCH --account="+runtime.Account)
 	}
@@ -157,10 +162,15 @@ func minutesToWalltime(minutes int) string {
 	return fmt.Sprintf("%02d:%02d:00", hours, mins)
 }
 
-func jobName(id string) string { return "cs-" + id }
+// A card outlives the allocations it runs, so the name its job answers under
+// carries the generation too. Without that, the scheduler's accounting database
+// reports the run that finished as though it were the run being submitted.
+func jobName(id, generation string) string { return "cs-" + id + "-" + generation }
 
 func validRuntimeJobName(runtime *Runtime) bool {
-	return runtime.JobName == jobName(runtime.ID)
+	// Runtimes submitted before the name carried a generation keep the name
+	// their job is still running under; there is no renaming a live job.
+	return runtime.JobName == jobName(runtime.ID, runtime.Generation) || runtime.JobName == "cs-"+runtime.ID
 }
 
 func (e *submissionError) Error() string { return e.cause.Error() }

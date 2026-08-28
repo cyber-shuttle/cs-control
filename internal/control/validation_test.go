@@ -128,7 +128,7 @@ func TestCreateRevalidatesExactScriptBeforeSubmit(t *testing.T) {
 		t.Fatalf("create validation differs from submission: %v", err)
 	}
 	commands, _ := os.ReadFile(commandLog)
-	if strings.Count(string(commands), "'sbatch' '--test-only'") != 2 || strings.Count(string(commands), "'sbatch' '--export=ALL,JUPYTER_TOKEN=") != 1 {
+	if strings.Count(string(commands), "'sbatch' '--test-only'") != 2 || strings.Count(string(commands), "'sbatch' '--job-name=") != 1 {
 		t.Fatalf("expected validation, create revalidation, then one submit:\n%s", commands)
 	}
 }

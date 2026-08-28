@@ -176,7 +176,10 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		if runtime.State == "SUBMITTING" {
 			runtime.State = "QUEUED"
 		}
-		cancelSubmitted = runtime.State == "STOPPING"
+		// A record that reached a terminal state while this submission was in
+		// flight is not this job's owner. Cancel the job rather than leave an
+		// allocation running for a card that has already finished without it.
+		cancelSubmitted = runtime.State == "STOPPING" || terminalRuntime(runtime.State)
 		runtime.UpdatedAt = s.now()
 		if err := store.save(current); err != nil {
 			return fmt.Errorf("persist submitted job %s: %w", jobID, err)
@@ -211,7 +214,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 			if runtime == nil {
 				return nil
 			}
-			if runtime.JobID == jobID && runtime.State == "STOPPING" {
+			if runtime.JobID == jobID && (runtime.State == "STOPPING" || terminalRuntime(runtime.State)) {
 				runtime.Error, runtime.UpdatedAt = diagnostic, s.now()
 				if err := store.save(current); err != nil {
 					return err
@@ -405,7 +408,7 @@ func (s Service) prepareRuntimeAfterContract(ctx context.Context, request Create
 	}
 	runtime := Runtime{
 		RuntimeResponse: RuntimeResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources},
-		JobName:         jobName(request.ID), PrivateRoot: privateRoot, WorkspaceRoot: workspaceRoot, HomeDir: resource.HomeDir,
+		PrivateRoot: privateRoot, WorkspaceRoot: workspaceRoot, HomeDir: resource.HomeDir,
 	}
 	s.runtimeStatus(request.ID, "Runtime preparation complete")
 	linkspan := resolveRemoteExecutable(cfg.LinkspanPath, resource.HomeDir)
