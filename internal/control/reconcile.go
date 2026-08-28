@@ -68,9 +68,9 @@ func outlivedAllocation(runtime Runtime, now time.Time) bool {
 }
 
 // unknownToScheduler reports that a scheduler which answered has had long
-// enough to know this job and does not. The window belongs to the allocation
-// being submitted, not to the card: running a finished runtime again keeps the
-// card's creation time, whose window ran out during the run it replaced.
+// enough to know this job and does not. Measured from the submission, not the
+// card: a relaunch keeps the card's creation time, whose window ran out during
+// the run it replaced.
 func unknownToScheduler(runtime Runtime, now time.Time) bool {
 	return now.Sub(runtime.UpdatedAt) > schedulerPropagationWindow
 }

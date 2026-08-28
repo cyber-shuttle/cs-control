@@ -23,14 +23,9 @@ func ambiguousSubmission(err error) bool {
 
 func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime Runtime, script, jupyterToken, hostToken string) (string, error) {
 	jobName := runtime.JobName
-	if !validRuntimeJobName(&runtime) {
-		return "", fmt.Errorf("submit %s failed: job name does not name this allocation", runtime.ID)
-	}
-	// The allocation identity is only known once the tunnel exists, so it rides
-	// the job environment alongside the tokens and leaves the reviewed script
-	// byte-identical to the one Slurm validated. The job name is part of that
-	// identity: it is what the scheduler and its accounting database answer
-	// under, so it names the generation and not just the card.
+	// The allocation identity, the job name included, is only known once the
+	// tunnel exists, so it rides the command line alongside the tokens and
+	// leaves the reviewed script byte-identical to the one Slurm validated.
 	ports := allocationPorts(runtime.ID, runtime.Generation)
 	// Jupyter Server reads its own token and port from the environment, so the
 	// workflow that starts it names neither and nothing secret is written down.
@@ -162,14 +157,13 @@ func minutesToWalltime(minutes int) string {
 	return fmt.Sprintf("%02d:%02d:00", hours, mins)
 }
 
-// A card outlives the allocations it runs, so the name its job answers under
-// carries the generation too. Without that, the scheduler's accounting database
-// reports the run that finished as though it were the run being submitted.
+// A card outlives the allocations it runs, so the job name carries the
+// generation: without it the accounting record of the run that finished is read
+// as the outcome of the run being submitted.
 func jobName(id, generation string) string { return "cs-" + id + "-" + generation }
 
 func validRuntimeJobName(runtime *Runtime) bool {
-	// Runtimes submitted before the name carried a generation keep the name
-	// their job is still running under; there is no renaming a live job.
+	// A live job cannot be renamed, so names written before this stay valid.
 	return runtime.JobName == jobName(runtime.ID, runtime.Generation) || runtime.JobName == "cs-"+runtime.ID
 }
 

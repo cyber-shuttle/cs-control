@@ -81,7 +81,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	s.runtimeStatus(request.ID, "Validating runtime with Slurm")
 	checked, err := s.validateScript(ctx, request.SSHHost, prepared.script)
 	if err != nil {
-		s.runtimeStatus(request.ID, statusFor(err, "Slurm validation failed"))
+		s.runtimeStatus(request.ID, "Slurm validation failed")
 		return nil, err
 	}
 	if !checked.passed {
@@ -176,10 +176,9 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		if runtime.State == "SUBMITTING" {
 			runtime.State = "QUEUED"
 		}
-		// A record that reached a terminal state while this submission was in
-		// flight is not this job's owner. Cancel the job rather than leave an
-		// allocation running for a card that has already finished without it.
-		cancelSubmitted = runtime.State == "STOPPING" || terminalRuntime(runtime.State)
+		// Anything but QUEUED means the record moved on without this job, so the
+		// job is cancelled rather than left running for a card that finished.
+		cancelSubmitted = runtime.State != "QUEUED"
 		runtime.UpdatedAt = s.now()
 		if err := store.save(current); err != nil {
 			return fmt.Errorf("persist submitted job %s: %w", jobID, err)
@@ -214,7 +213,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 			if runtime == nil {
 				return nil
 			}
-			if runtime.JobID == jobID && (runtime.State == "STOPPING" || terminalRuntime(runtime.State)) {
+			if runtime.JobID == jobID && runtime.State != "QUEUED" {
 				runtime.Error, runtime.UpdatedAt = diagnostic, s.now()
 				if err := store.save(current); err != nil {
 					return err
@@ -381,7 +380,13 @@ func (s Service) prepareRuntime(ctx context.Context, request CreateRequest) (*pr
 func (s Service) prepareRuntimeAfterContract(ctx context.Context, request CreateRequest) (_ *preparedRuntime, resultErr error) {
 	defer func() {
 		if resultErr != nil {
-			s.runtimeStatus(request.ID, statusFor(resultErr, "Runtime preparation failed"))
+			// A host that wants an interactive login refused the runtime rather
+			// than failing it, and the tail is what the owner reads.
+			status := "Runtime preparation failed"
+			if apierr.For(resultErr).Code == "ssh_authentication_required" {
+				status = "Interactive SSH login required"
+			}
+			s.runtimeStatus(request.ID, status)
 		}
 	}()
 	resource, err := s.Discover(ctx, request.SSHHost)
@@ -413,16 +418,6 @@ func (s Service) prepareRuntimeAfterContract(ctx context.Context, request Create
 	s.runtimeStatus(request.ID, "Runtime preparation complete")
 	linkspan := resolveRemoteExecutable(cfg.LinkspanPath, resource.HomeDir)
 	return &preparedRuntime{request: request, runtime: runtime, script: buildScript(runtime, linkspan), linkspan: linkspan}, nil
-}
-
-// A host that wants an interactive login has refused the runtime, not failed
-// it, and the tail is what the owner reads: it should name the remedy rather
-// than report a failure nobody can act on.
-func statusFor(err error, failure string) string {
-	if apierr.For(err).Code == "ssh_authentication_required" {
-		return "Interactive SSH login required"
-	}
-	return failure
 }
 
 func assignRuntimeID(request CreateRequest) (CreateRequest, error) {
