@@ -80,6 +80,7 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
 fi
 if [ "$wire_command" = "sh -s" ]; then
   cat > "$FAKE_DISCOVERY_SCRIPT_LOG"
+  if [ -n "${FAKE_DISCOVERY_FAIL:-}" ]; then printf '%s\n' "$FAKE_DISCOVERY_FAIL" >&2; exit 255; fi
   count=0; [ ! -f "$FAKE_DISCOVERY_EXEC_COUNT" ] || count=$(cat "$FAKE_DISCOVERY_EXEC_COUNT")
   printf '%s\n' $((count + 1)) > "$FAKE_DISCOVERY_EXEC_COUNT"
   printf 'REMOTE LOGIN BANNER\n' >&2

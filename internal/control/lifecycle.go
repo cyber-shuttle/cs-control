@@ -81,7 +81,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	s.runtimeStatus(request.ID, "Validating runtime with Slurm")
 	checked, err := s.validateScript(ctx, request.SSHHost, prepared.script)
 	if err != nil {
-		s.runtimeStatus(request.ID, "Slurm validation failed")
+		s.runtimeStatus(request.ID, statusFor(err, "Slurm validation failed"))
 		return nil, err
 	}
 	if !checked.passed {
@@ -381,7 +381,7 @@ func (s Service) prepareRuntime(ctx context.Context, request CreateRequest) (*pr
 func (s Service) prepareRuntimeAfterContract(ctx context.Context, request CreateRequest) (_ *preparedRuntime, resultErr error) {
 	defer func() {
 		if resultErr != nil {
-			s.runtimeStatus(request.ID, "Runtime preparation failed")
+			s.runtimeStatus(request.ID, statusFor(resultErr, "Runtime preparation failed"))
 		}
 	}()
 	resource, err := s.Discover(ctx, request.SSHHost)
@@ -413,6 +413,16 @@ func (s Service) prepareRuntimeAfterContract(ctx context.Context, request Create
 	s.runtimeStatus(request.ID, "Runtime preparation complete")
 	linkspan := resolveRemoteExecutable(cfg.LinkspanPath, resource.HomeDir)
 	return &preparedRuntime{request: request, runtime: runtime, script: buildScript(runtime, linkspan), linkspan: linkspan}, nil
+}
+
+// A host that wants an interactive login has refused the runtime, not failed
+// it, and the tail is what the owner reads: it should name the remedy rather
+// than report a failure nobody can act on.
+func statusFor(err error, failure string) string {
+	if apierr.For(err).Code == "ssh_authentication_required" {
+		return "Interactive SSH login required"
+	}
+	return failure
 }
 
 func assignRuntimeID(request CreateRequest) (CreateRequest, error) {

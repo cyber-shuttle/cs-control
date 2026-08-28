@@ -3,10 +3,12 @@ package control
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
@@ -160,5 +162,29 @@ func TestRunAgainFollowsTheNewAllocation(t *testing.T) {
 	}
 	if runtime.JobID != "67890" || runtime.Generation == finished.Generation {
 		t.Fatalf("the card is still following the finished run: %#v (job %q)", runtime.RuntimeResponse, runtime.JobID)
+	}
+}
+
+// A host that wants an interactive login has refused the runtime, not failed
+// it. The tail is what the owner reads while deciding what to do, so it names
+// the remedy rather than reporting a failure nobody can act on.
+func TestPreparationRefusedForALoginSaysSo(t *testing.T) {
+	service, _, _, _ := relaunchRaceService(t)
+	t.Setenv("FAKE_DISCOVERY_FAIL", "Permission denied (publickey,keyboard-interactive).")
+	_, err := service.Create(testTunnelContext(), createRequest())
+	if apierr.For(err).Code != "ssh_authentication_required" {
+		t.Fatalf("a host asking for a login was not reported as such: %v", err)
+	}
+	tail, _ := service.Logs.Tail(createRequest().ID)
+	status := []string{}
+	for _, line := range tail.Lines {
+		status = append(status, line.Text)
+	}
+	joined := strings.Join(status, "|")
+	if !strings.Contains(joined, "Interactive SSH login required") {
+		t.Fatalf("the tail did not name the remedy: %s", joined)
+	}
+	if strings.Contains(joined, "Runtime preparation failed") {
+		t.Fatalf("a login refusal was reported as a failure: %s", joined)
 	}
 }
