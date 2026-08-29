@@ -78,9 +78,19 @@ broker, or token persistence/logging.
   `JUPYTER_TOKEN` and `JUPYTER_PORT`, which it reads itself. Inject those, the
   tunnel host token, and the allocation identity the tunnel only assigns at
   creation (its ID, cluster, and generation-derived ports) with fixed
-  `sbatch --export` arguments. Validation and submission scripts must be
+  `sbatch --export` arguments, and name the job on the same command line with
+  `sbatch --job-name`. Validation and submission scripts must be
   byte-identical and contain no generated secret literal, so nothing that is
   unknown at review time may be written into the script text.
+- The job name is `cs-<runtime id>-<generation>`, so the scheduler and its
+  accounting database answer for one allocation rather than for the card. A
+  card outlives its allocations: without the generation, a run that has just
+  been submitted is reconciled against the accounting record of the run it
+  replaced and inherits that run's outcome. For the same reason the window
+  that tolerates a job Slurm has not published yet is measured from the
+  record's last change, not from the card's creation, which a relaunch keeps.
+  Names written before the generation was part of them stay valid, because a
+  live job cannot be renamed.
 - Create one creator-owned Dev Tunnel per allocation generation, declaring both
   allocation ports at creation. Never request tunnel-wide anonymous access;
   grant anonymous connect only on the Jupyter port, whose authorization is

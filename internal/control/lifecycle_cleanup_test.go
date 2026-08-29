@@ -23,7 +23,7 @@ exit 7
 	}
 	runtime := Runtime{
 		RuntimeResponse: RuntimeResponse{ID: "rt-012345abcdef", Generation: "g-0123456789abcdef", Partition: "cpu", Resources: Resources{Cores: 1, MemoryMB: 128, WallMinutes: 1}},
-		JobName:         jobName("rt-012345abcdef"), PrivateRoot: dir + "/private", WorkspaceRoot: dir,
+		JobName:         jobName("rt-012345abcdef", "g-0123456789abcdef"), PrivateRoot: dir + "/private", WorkspaceRoot: dir,
 	}
 	script := buildScript(runtime, linkspan)
 	const jupyterToken, hostToken = "jupyter-secret", "host-secret"

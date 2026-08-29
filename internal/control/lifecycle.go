@@ -176,7 +176,8 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		if runtime.State == "SUBMITTING" {
 			runtime.State = "QUEUED"
 		}
-		cancelSubmitted = runtime.State == "STOPPING"
+		// The record moved on without this job, so the job goes rather than run on.
+		cancelSubmitted = runtime.State != "QUEUED"
 		runtime.UpdatedAt = s.now()
 		if err := store.save(current); err != nil {
 			return fmt.Errorf("persist submitted job %s: %w", jobID, err)
@@ -211,7 +212,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 			if runtime == nil {
 				return nil
 			}
-			if runtime.JobID == jobID && runtime.State == "STOPPING" {
+			if runtime.JobID == jobID && runtime.State != "QUEUED" {
 				runtime.Error, runtime.UpdatedAt = diagnostic, s.now()
 				if err := store.save(current); err != nil {
 					return err
@@ -378,7 +379,11 @@ func (s Service) prepareRuntime(ctx context.Context, request CreateRequest) (*pr
 func (s Service) prepareRuntimeAfterContract(ctx context.Context, request CreateRequest) (_ *preparedRuntime, resultErr error) {
 	defer func() {
 		if resultErr != nil {
-			s.runtimeStatus(request.ID, "Runtime preparation failed")
+			status := "Runtime preparation failed"
+			if apierr.For(resultErr).Code == "ssh_authentication_required" {
+				status = "Interactive SSH login required"
+			}
+			s.runtimeStatus(request.ID, status)
 		}
 	}()
 	resource, err := s.Discover(ctx, request.SSHHost)
@@ -405,7 +410,7 @@ func (s Service) prepareRuntimeAfterContract(ctx context.Context, request Create
 	}
 	runtime := Runtime{
 		RuntimeResponse: RuntimeResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources},
-		JobName:         jobName(request.ID), PrivateRoot: privateRoot, WorkspaceRoot: workspaceRoot, HomeDir: resource.HomeDir,
+		PrivateRoot:     privateRoot, WorkspaceRoot: workspaceRoot, HomeDir: resource.HomeDir,
 	}
 	s.runtimeStatus(request.ID, "Runtime preparation complete")
 	linkspan := resolveRemoteExecutable(cfg.LinkspanPath, resource.HomeDir)

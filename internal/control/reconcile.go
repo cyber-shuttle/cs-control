@@ -68,9 +68,10 @@ func outlivedAllocation(runtime Runtime, now time.Time) bool {
 }
 
 // unknownToScheduler reports that a scheduler which answered has had long
-// enough to know this job and does not.
+// enough to know this job and does not. Measured from the submission, not the
+// card: a relaunch keeps a creation time whose window ran out long ago.
 func unknownToScheduler(runtime Runtime, now time.Time) bool {
-	return now.Sub(runtime.CreatedAt) > schedulerPropagationWindow
+	return now.Sub(runtime.UpdatedAt) > schedulerPropagationWindow
 }
 
 // reconcileSnapshots performs all scheduler and endpoint I/O without holding

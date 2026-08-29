@@ -118,6 +118,7 @@ func (s Service) createAllocationTunnel(ctx context.Context, runtime *Runtime, a
 	}
 	candidate := *runtime
 	candidate.Generation = generation
+	candidate.JobName = jobName(runtime.ID, generation)
 	candidate.Owner = auth.Principal
 	candidate.Tunnel = TunnelMetadata{ID: record.ID, ClusterID: record.ClusterID, ExpiresAt: record.ExpiresAt.UTC()}
 	credential := GenerationCredential{ConnectToken: record.ConnectToken, JupyterToken: jupyterToken}
