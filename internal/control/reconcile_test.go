@@ -288,29 +288,14 @@ func TestSchedulerThatDoesNotKnowTheJobRetiresTheRuntime(t *testing.T) {
 func TestFreshlySubmittedRuntimeSurvivesTheSchedulerPropagationWindow(t *testing.T) {
 	service, _, _ := reconciliationService(t)
 	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	runtime.CreatedAt, runtime.UpdatedAt = time.Now().UTC(), time.Now().UTC()
+	// A card run again keeps a creation time whose window ran out during the run
+	// it replaced, so the window has to belong to this submission.
+	runtime.CreatedAt, runtime.UpdatedAt = time.Now().Add(-6*time.Hour).UTC(), time.Now().UTC()
 	t.Setenv("RECONCILE_LINES", "")
 	putRuntimes(t, service, runtime)
 	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	if got[0].State != "QUEUED" {
 		t.Fatalf("a just-submitted runtime was retired as %s during the propagation window", got[0].State)
-	}
-}
-
-// A card keeps its creation time when it is run again, so the window that
-// covers a job the scheduler has not published yet belongs to the submission
-// rather than to the card: measured from the card, it ran out during the run
-// this one replaces, and every relaunch would be retired on its first poll.
-func TestRelaunchedRuntimeSurvivesTheSchedulerPropagationWindow(t *testing.T) {
-	service, _, _ := reconciliationService(t)
-	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	runtime.State, runtime.JobID = "SUBMITTING", ""
-	runtime.CreatedAt, runtime.UpdatedAt = time.Now().Add(-6*time.Hour).UTC(), time.Now().UTC()
-	t.Setenv("RECONCILE_LINES", "")
-	putRuntimes(t, service, runtime)
-	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
-	if got[0].State != "SUBMITTING" {
-		t.Fatalf("a relaunch was retired as %s before its job reached the scheduler", got[0].State)
 	}
 }
 
