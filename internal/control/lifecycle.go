@@ -176,8 +176,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		if runtime.State == "SUBMITTING" {
 			runtime.State = "QUEUED"
 		}
-		// Anything but QUEUED means the record moved on without this job, so the
-		// job is cancelled rather than left running for a card that finished.
+		// The record moved on without this job, so the job goes rather than run on.
 		cancelSubmitted = runtime.State != "QUEUED"
 		runtime.UpdatedAt = s.now()
 		if err := store.save(current); err != nil {
@@ -380,8 +379,6 @@ func (s Service) prepareRuntime(ctx context.Context, request CreateRequest) (*pr
 func (s Service) prepareRuntimeAfterContract(ctx context.Context, request CreateRequest) (_ *preparedRuntime, resultErr error) {
 	defer func() {
 		if resultErr != nil {
-			// A host that wants an interactive login refused the runtime rather
-			// than failing it, and the tail is what the owner reads.
 			status := "Runtime preparation failed"
 			if apierr.For(resultErr).Code == "ssh_authentication_required" {
 				status = "Interactive SSH login required"
@@ -413,7 +410,7 @@ func (s Service) prepareRuntimeAfterContract(ctx context.Context, request Create
 	}
 	runtime := Runtime{
 		RuntimeResponse: RuntimeResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources},
-		PrivateRoot: privateRoot, WorkspaceRoot: workspaceRoot, HomeDir: resource.HomeDir,
+		PrivateRoot:     privateRoot, WorkspaceRoot: workspaceRoot, HomeDir: resource.HomeDir,
 	}
 	s.runtimeStatus(request.ID, "Runtime preparation complete")
 	linkspan := resolveRemoteExecutable(cfg.LinkspanPath, resource.HomeDir)

@@ -157,9 +157,8 @@ func minutesToWalltime(minutes int) string {
 	return fmt.Sprintf("%02d:%02d:00", hours, mins)
 }
 
-// A card outlives the allocations it runs, so the job name carries the
-// generation: without it the accounting record of the run that finished is read
-// as the outcome of the run being submitted.
+// A card outlives its allocations, so the name carries the generation: without
+// it the finished run's accounting record reads as this submission's outcome.
 func jobName(id, generation string) string { return "cs-" + id + "-" + generation }
 
 func validRuntimeJobName(runtime *Runtime) bool {

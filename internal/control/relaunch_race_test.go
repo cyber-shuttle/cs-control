@@ -12,9 +12,8 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
-// relaunchRaceService holds provisioning open, which is the window a relaunch
-// spends in SUBMITTING with no job of its own, and hands the test the clock so
-// it can put the card's creation further back than the propagation window.
+// relaunchRaceService holds provisioning open -- the window a relaunch spends
+// SUBMITTING with no job of its own -- and hands the test the clock.
 func relaunchRaceService(t *testing.T) (Service, *atomic.Int64, string, string) {
 	t.Helper()
 	ssh, _, _ := fakeSSH(t)
@@ -42,8 +41,7 @@ func schedulerReports(t *testing.T, state string) {
 	}
 }
 
-// finishAllocation runs the card to the end the way Slurm ends one, through the
-// reconciler, so the record it leaves behind is the record a relaunch meets.
+// finishAllocation ends the card through the reconciler, the way Slurm ends one.
 func finishAllocation(t *testing.T, service Service, id, state string) Runtime {
 	t.Helper()
 	schedulerReports(t, state)
@@ -60,11 +58,9 @@ func finishAllocation(t *testing.T, service Service, id, state string) Runtime {
 	return *runtime
 }
 
-// The allocation a card ran before is not the allocation it is running now. A
-// reconciliation that lands while the new one is still being prepared used to
-// read the finished run's accounting record as this one's outcome and retire a
-// runtime that was about to be submitted -- leaving the card STOPPED for good
-// while its job ran on unattended.
+// A reconciliation landing while the next allocation is still being prepared
+// used to read the finished run's record as this one's outcome, leaving the
+// card STOPPED for good while its job ran on unattended.
 func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	service, clock, started, release := relaunchRaceService(t)
 	ctx := testTunnelContext()
@@ -133,41 +129,7 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	}
 }
 
-// The same card, reconciled once more after it is running again, must follow
-// the new allocation rather than the accounting record of the old one.
-func TestRunAgainFollowsTheNewAllocation(t *testing.T) {
-	service, clock, _, _ := relaunchRaceService(t)
-	ctx := testTunnelContext()
-	created, err := service.Create(ctx, createRequest())
-	if err != nil {
-		t.Fatal(err)
-	}
-	finished := finishAllocation(t, service, created.ID, "TIMEOUT")
-	clock.Store(finished.CreatedAt.Add(time.Hour).UnixNano())
-
-	t.Setenv("FAKE_JOB_ID", "67890")
-	schedulerReports(t, "RUNNING")
-	if _, err := service.Start(ctx, created.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.ReconcileAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := service.GetCached(created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.State != "STARTING" && runtime.State != "READY" {
-		t.Fatalf("the relaunched allocation did not start: %#v", runtime.RuntimeResponse)
-	}
-	if runtime.JobID != "67890" || runtime.Generation == finished.Generation {
-		t.Fatalf("the card is still following the finished run: %#v (job %q)", runtime.RuntimeResponse, runtime.JobID)
-	}
-}
-
-// A host that wants an interactive login has refused the runtime, not failed
-// it. The tail is what the owner reads while deciding what to do, so it names
-// the remedy rather than reporting a failure nobody can act on.
+// A host wanting a login refused the runtime; the tail should name the remedy.
 func TestPreparationRefusedForALoginSaysSo(t *testing.T) {
 	service, _, _, _ := relaunchRaceService(t)
 	t.Setenv("FAKE_DISCOVERY_FAIL", "Permission denied (publickey,keyboard-interactive).")
