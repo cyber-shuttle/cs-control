@@ -33,31 +33,6 @@ func relaunchRaceService(t *testing.T) (Service, *atomic.Int64, string, string) 
 	return service, clock, started, release
 }
 
-// schedulerReports is what the fake scheduler says about the job it accepted.
-func schedulerReports(t *testing.T, state string) {
-	t.Helper()
-	if err := os.WriteFile(os.Getenv("FAKE_STATUS"), []byte(state+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// finishAllocation ends the card through the reconciler, the way Slurm ends one.
-func finishAllocation(t *testing.T, service Service, id, state string) Runtime {
-	t.Helper()
-	schedulerReports(t, state)
-	if err := service.ReconcileAll(testTunnelContext()); err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := service.GetCached(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.State != "STOPPED" {
-		t.Fatalf("allocation did not finish: %#v", runtime.RuntimeResponse)
-	}
-	return *runtime
-}
-
 // A reconciliation landing while the next allocation is still being prepared
 // used to read the finished run's record as this one's outcome, leaving the
 // card STOPPED for good while its job ran on unattended.
@@ -68,7 +43,17 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	finished := finishAllocation(t, service, created.ID, "TIMEOUT")
+	// End the card the way Slurm ends one, through the reconciler.
+	if err := os.WriteFile(os.Getenv("FAKE_STATUS"), []byte("TIMEOUT\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReconcileAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := service.GetCached(created.ID)
+	if err != nil || finished.State != "STOPPED" {
+		t.Fatalf("allocation did not finish: %#v %v", finished, err)
+	}
 
 	// The card is older than the window that lets a just-submitted job be
 	// missing from the scheduler, which is true of every card worth running again.
@@ -131,18 +116,17 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 
 // A host wanting a login refused the runtime; the tail should name the remedy.
 func TestPreparationRefusedForALoginSaysSo(t *testing.T) {
-	service, _, _, _ := relaunchRaceService(t)
+	service := testService(t)
 	t.Setenv("FAKE_DISCOVERY_FAIL", "Permission denied (publickey,keyboard-interactive).")
 	_, err := service.Create(testTunnelContext(), createRequest())
 	if apierr.For(err).Code != "ssh_authentication_required" {
 		t.Fatalf("a host asking for a login was not reported as such: %v", err)
 	}
 	tail, _ := service.Logs.Tail(createRequest().ID)
-	status := []string{}
+	joined := ""
 	for _, line := range tail.Lines {
-		status = append(status, line.Text)
+		joined += line.Text + "|"
 	}
-	joined := strings.Join(status, "|")
 	if !strings.Contains(joined, "Interactive SSH login required") {
 		t.Fatalf("the tail did not name the remedy: %s", joined)
 	}
