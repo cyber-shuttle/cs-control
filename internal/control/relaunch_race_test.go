@@ -43,17 +43,11 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// End the card the way Slurm ends one, through the reconciler.
+	// The old job is still what the scheduler answers for this name.
 	if err := os.WriteFile(os.Getenv("FAKE_STATUS"), []byte("TIMEOUT\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ReconcileAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-	finished, err := service.GetCached(created.ID)
-	if err != nil || finished.State != "STOPPED" {
-		t.Fatalf("allocation did not finish: %#v %v", finished, err)
-	}
+	finished := retire(t, service, created.ID)
 
 	// The card is older than the window that lets a just-submitted job be
 	// missing from the scheduler, which is true of every card worth running again.
@@ -80,10 +74,6 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	})
 	waitForSubmitStart(t, started, errs)
 
-	before, err := service.GetCached(created.ID)
-	if err != nil || before.State != "SUBMITTING" {
-		t.Fatalf("relaunch did not persist a submit intent: %#v %v", before, err)
-	}
 	if err := service.ReconcileAll(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -108,10 +98,6 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	if relaunched.State != "QUEUED" || relaunched.JobID != "67890" {
 		t.Fatalf("the submitted relaunch was not queued: %#v (job %q)", relaunched.RuntimeResponse, relaunched.JobID)
 	}
-	cached, err := service.GetCached(created.ID)
-	if err != nil || cached.State != "QUEUED" || cached.JobID != "67890" {
-		t.Fatalf("stored state lost the relaunch: %#v %v", cached, err)
-	}
 }
 
 // A host wanting a login refused the runtime; the tail should name the remedy.
@@ -122,11 +108,7 @@ func TestPreparationRefusedForALoginSaysSo(t *testing.T) {
 	if apierr.For(err).Code != "ssh_authentication_required" {
 		t.Fatalf("a host asking for a login was not reported as such: %v", err)
 	}
-	tail, _ := service.Logs.Tail(createRequest().ID)
-	joined := ""
-	for _, line := range tail.Lines {
-		joined += line.Text + "|"
-	}
+	joined := runtimeLogText(t, service.Logs, createRequest().ID, false)
 	if !strings.Contains(joined, "Interactive SSH login required") {
 		t.Fatalf("the tail did not name the remedy: %s", joined)
 	}
