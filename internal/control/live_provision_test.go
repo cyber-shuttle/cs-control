@@ -25,7 +25,7 @@ func TestLiveProvisionPreparesABareHost(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	service := Service{
 		Runner: sshexec.Runner{
-			Hosts:      sshconfig.Config{UserPath: filepath.Join(home, ".ssh", "config")},
+			Hosts:      sshconfig.Config{UserPath: filepath.Join(home, ".ssh", "config"), SystemPath: "/etc/ssh/ssh_config"},
 			ControlDir: t.TempDir(),
 			Timeout:    30 * time.Second,
 		},

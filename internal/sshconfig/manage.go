@@ -275,9 +275,9 @@ func blockBounds(lines []string) (int, int) {
 // rewrite replaces the user's config in one atomic step, so a failed write
 // never leaves a half-written configuration behind.
 func (c Config) rewrite(mutate func([]string) ([]string, error)) error {
-	path, _, err := c.paths()
-	if err != nil {
-		return err
+	path := c.UserPath
+	if path == "" {
+		return errors.New("user SSH config path is required")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err

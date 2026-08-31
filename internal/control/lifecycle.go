@@ -465,16 +465,12 @@ func reconcile(state string) bool {
 	return state == "SUBMITTING" || state == "QUEUED" || state == "STARTING" || state == "READY" || state == "STOPPING"
 }
 
-func setRuntimeNode(runtime *Runtime, value string) error {
+func setRuntimeNode(runtime *Runtime, value string) {
 	value = strings.TrimSpace(value)
-	if value == "" || value == "(null)" || value == "None assigned" {
-		return nil
-	}
-	if !nodePattern.MatchString(value) {
-		return fmt.Errorf("invalid compute node %q", value)
+	if value == "" || value == "(null)" || value == "None assigned" || !nodePattern.MatchString(value) {
+		return
 	}
 	runtime.Node = value
-	return nil
 }
 
 // abandonSubmitIntent undoes a runtime that will never reach the scheduler:

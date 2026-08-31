@@ -152,7 +152,7 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 				if runtime.JobID == "" && observation.jobID != "" {
 					runtime.JobID = observation.jobID
 				}
-				_ = setRuntimeNode(runtime, observation.node)
+				setRuntimeNode(runtime, observation.node)
 				if runtime.Node != "" && runtime.Node != previousNode {
 					s.runtimeStatus(runtime.ID, "Compute node assigned: "+runtime.Node)
 				}
