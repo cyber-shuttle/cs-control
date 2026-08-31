@@ -1,6 +1,6 @@
 # CyberShuttle Control
 
-`csctl` is the per-user SSH/SLURM enactment control plane for CyberShuttle allocations. It stores non-secret scheduler, allocation, and tunnel metadata. Dev Tunnel connect credentials are kept separately in private local credential files and are never returned by the API; the per-generation Jupyter token stored beside them is returned only by the owner-authenticated access endpoint.
+`csctl` is the per-user SSH/Slurm enactment control plane for CyberShuttle allocations. It stores non-secret scheduler, allocation, and tunnel metadata. Dev Tunnel connect credentials are kept separately in private local credential files and are never returned by the API; the per-generation Jupyter token stored beside them is returned only by the owner-authenticated access endpoint.
 
 ## Enactment API
 
@@ -70,7 +70,7 @@ state, starts a reconciliation for the next poll to collect, and carries the
 caller's runtimes and their startup tails. It carries a strong `ETag`, so a poll
 whose `If-None-Match` still matches is answered `304 Not Modified` with no body.
 
-Scheduler state remains SSH/SLURM authoritative. The owner-authenticated `/access` endpoint returns the allocation's Jupyter URI and its token. cs-control does not proxy Jupyter, VS Code, or other runtime data.
+Scheduler state remains SSH/Slurm authoritative. The owner-authenticated `/access` endpoint returns the allocation's Jupyter URI and its token. cs-control does not proxy Jupyter, VS Code, or other runtime data.
 
 The runtime states are `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, and `FAILED`. There is one state field: a Slurm word this vocabulary does not cover is treated as no observation rather than a state of its own. Runtime list responses, and the log tails that travel with them, are filtered to the validated owner principal; item and access reads reject a different principal.
 

@@ -118,7 +118,7 @@ broker, or token persistence/logging.
   workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens.
   An allocation hosts a tunnel this control plane created, so its Linkspan must
   accept `--tunnel-host-token`; preparation refuses a host whose Linkspan does
-  not, rather than letting the allocation die on its first flag.
+  not, rather than letting the allocation fail on its first flag.
   Preparation outlives the request that triggered it, so a caller that goes away leaves no half-built
   environment, and one preparation runs per host at a time -- a second caller is refused with `runtime_provisioning_in_progress`
   rather than made to wait behind work it cannot see. A host that cannot be

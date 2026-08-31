@@ -208,7 +208,7 @@ func TestWalltimeExpiryStopsTheRuntimeRatherThanFailingIt(t *testing.T) {
 		"PREEMPTED":     "FAILED",
 	} {
 		if got := nextState("READY", classifySchedulerState(raw)); got != want {
-			t.Errorf("slurm %s left the runtime %s, want %s", raw, got, want)
+			t.Errorf("Slurm %s left the runtime %s, want %s", raw, got, want)
 		}
 	}
 	if classifySchedulerState("TIMEOUT") == classifySchedulerState("COMPLETED") {

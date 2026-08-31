@@ -73,7 +73,7 @@ func TestCreateRefusesAHostItCannotProvision(t *testing.T) {
 		{"error=linkspan-download", "download the Linkspan release"},
 		// The allocation hosts a tunnel the control plane created, so a Linkspan
 		// that predates host-scoped tokens is refused while a runtime can still
-		// be refused, rather than by an allocation that dies on its first flag.
+		// be refused, rather than by an allocation that fails on its first flag.
 		{"error=linkspan-unsupported", "tunnel-host-token"},
 		{"error=workflow", "write the workflow"},
 	} {
