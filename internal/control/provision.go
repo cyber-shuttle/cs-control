@@ -2,15 +2,15 @@ package control
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"strings"
-
-	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 	"sync"
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
+	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
 // Two downloads is not a scheduler round trip, so this gets its own budget
@@ -21,25 +21,29 @@ const provisionTimeout = 5 * time.Minute
 // requires 3.10 or newer, and uv supplies the version rather than the host.
 const provisionPythonVersion = "3.12"
 
-// provisionScript is intentionally constant: the home and the Linkspan path
+// provisionScript is intentionally constant: the paths and the workflow document
 // arrive as arguments, so nothing derived from a request is written into the
 // remote shell program.
 //
 // It installs the two binaries an allocation needs before it can run --
 // Linkspan, which the job execs, and uv, which the workflow builds the
-// environment with -- and reports each outcome as one line the caller turns
-// into runtime status. Present and working is left alone; absent or broken is
-// replaced.
+// environment with -- writes the workflow that allocation will run, and reports
+// each outcome as one line the caller turns into runtime status. Present and
+// working is left alone; absent or broken is replaced.
 const provisionScript = `set -u
 LC_ALL=C
 LANG=C
 export LC_ALL LANG
-[ "$#" -eq 3 ]
+[ "$#" -eq 4 ]
 [ "$1" = csctl-provision ]
 shift
 home=$1
 linkspan=$2
-case "$home$linkspan" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
+workflow=$3
+document=$4
+case "$home" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
+case "$linkspan" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
+case "$workflow" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
 
 uv="$home/.local/bin/uv"
 if [ -x "$uv" ] || command -v uv >/dev/null 2>&1; then
@@ -106,6 +110,15 @@ fi
 # and takes the allocation with it, so it is refused here instead.
 "$linkspan" --help 2>&1 | grep -q -- '-tunnel-host-token' || {
   printf '%s\n' 'error=linkspan-unsupported'; exit 81; }
+
+# What the allocation is for travels with it, staged and moved so a partial
+# write never becomes the document Linkspan reads.
+umask 077
+staged="$workflow.staged"
+install -d -m 700 "$(dirname "$workflow")" 2>/dev/null &&
+  printf '%s' "$document" | base64 -d > "$staged" 2>/dev/null &&
+  [ -s "$staged" ] && mv -f "$staged" "$workflow" || {
+    rm -f "$staged"; printf '%s\n' 'error=workflow'; exit 82; }
 printf '%s\n' 'provision=complete'
 `
 
@@ -119,32 +132,32 @@ var provisionFailures = map[string]string{
 	"linkspan-download":    "could not download the Linkspan release",
 	"linkspan-install":     "could not install the downloaded Linkspan binary",
 	"linkspan-unsupported": "the Linkspan on this host has no --tunnel-host-token, so it cannot host the tunnel this runtime was given",
+	"workflow":             "could not write the workflow the allocation runs",
 }
 
-// provisionRuntime makes a host able to run a runtime before one is submitted
-// to it. A host that already has both is left untouched, so this costs one
-// round trip on every allocation after the first.
 // provisionRuntime gives a host the two binaries an allocation needs and the
-// workflow that allocation will run. The runtime is the durable one: its
-// workflow names the ports this generation was given.
-func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Runtime, linkspan string) error {
+// workflow that allocation will run, in one round trip, before the runtime is
+// submitted to it. What is already there is left untouched. The runtime is the
+// durable one: its workflow names the ports this generation was given.
+func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Runtime, home, linkspan string) error {
 	// One preparation per host at a time. A second caller is told to come back
 	// rather than made to wait behind an install it cannot see, and never runs
 	// a second uv against the environment the first one is building.
-	release, busy := hostPreparations.begin(alias)
-	if busy {
+	if _, busy := hostPreparations.LoadOrStore(alias, true); busy {
 		return apierr.New("runtime_provisioning_in_progress",
 			"The runtime environment on "+alias+" is still being prepared. Try again in a moment.", http.StatusConflict)
 	}
-	defer release()
+	defer hostPreparations.Delete(alias)
 	// Installing an environment is the host's business, not this request's: a
 	// caller that goes away must not leave a half-built one behind.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionTimeout)
 	defer cancel()
 	s.runtimeStatus(runtime.ID, "Preparing the runtime environment")
+	document := base64.StdEncoding.EncodeToString([]byte(runtimeWorkflow(runtime, home)))
 	remote := strings.Join([]string{
 		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-s"), sshexec.ShellQuote("--"),
-		sshexec.ShellQuote("csctl-provision"), sshexec.ShellQuote(runtime.HomeDir), sshexec.ShellQuote(linkspan),
+		sshexec.ShellQuote("csctl-provision"), sshexec.ShellQuote(home), sshexec.ShellQuote(linkspan),
+		sshexec.ShellQuote(runtimeWorkflowPath(runtime)), sshexec.ShellQuote(document),
 	}, " ")
 	cmd, err := s.Runner.Command(ctx, alias, remote)
 	if err != nil {
@@ -170,37 +183,13 @@ func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Run
 			s.runtimeStatus(runtime.ID, "Installed "+installed.what)
 		}
 	}
-	// What the allocation is for travels with it: the workflow Linkspan runs is
-	// installed here, alongside the binaries it needs.
-	if err := s.installRuntimeWorkflow(ctx, alias, runtime); err != nil {
-		return err
-	}
 	s.runtimeStatus(runtime.ID, "Runtime environment ready")
 	return nil
 }
 
 // hostPreparations is process-wide because "is this host being prepared" is a
 // fact about the host, not about any one request.
-var hostPreparations = preparations{active: map[string]bool{}}
-
-type preparations struct {
-	mu     sync.Mutex
-	active map[string]bool
-}
-
-func (p *preparations) begin(alias string) (func(), bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.active[alias] {
-		return func() {}, true
-	}
-	p.active[alias] = true
-	return func() {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		delete(p.active, alias)
-	}, false
-}
+var hostPreparations sync.Map
 
 func provisionOutcome(output string) map[string]string {
 	report := map[string]string{}

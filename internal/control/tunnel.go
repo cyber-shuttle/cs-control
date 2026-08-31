@@ -105,16 +105,16 @@ func (s Service) createAllocationTunnel(ctx context.Context, runtime *Runtime, a
 	})
 	if err != nil {
 		createErr := devtunnel.SafeError("create allocation Dev Tunnel", err, auth.OAuthToken)
-		cleanupErr := s.deletePotentiallyCreatedTunnel(ctx, auth, tunnelID)
+		cleanupErr := s.releaseAllocationTunnel(auth, runtime.ID, generation, TunnelMetadata{ID: tunnelID})
 		return devtunnel.Record{}, "", errors.Join(createErr, cleanupErr)
 	}
 	if record.ID != tunnelID || !devtunnel.ValidClusterID(record.ClusterID) || !devtunnel.ValidToken(record.HostToken) || !devtunnel.ValidToken(record.ConnectToken) || !record.ExpiresAt.After(requestedAt) {
-		cleanupErr := s.cleanupUncommittedTunnel(ctx, auth, runtime.ID, generation, record)
+		cleanupErr := s.releaseAllocationTunnel(auth, runtime.ID, generation, TunnelMetadata{ID: record.ID, ClusterID: record.ClusterID})
 		return devtunnel.Record{}, "", errors.Join(errors.New("created Dev Tunnel metadata is invalid"), cleanupErr)
 	}
 	jupyterToken, err := newJupyterToken()
 	if err != nil {
-		return devtunnel.Record{}, "", errors.Join(err, s.cleanupUncommittedTunnel(ctx, auth, runtime.ID, generation, record))
+		return devtunnel.Record{}, "", errors.Join(err, s.releaseAllocationTunnel(auth, runtime.ID, generation, TunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
 	}
 	candidate := *runtime
 	candidate.Generation = generation
@@ -123,7 +123,7 @@ func (s Service) createAllocationTunnel(ctx context.Context, runtime *Runtime, a
 	candidate.Tunnel = TunnelMetadata{ID: record.ID, ClusterID: record.ClusterID, ExpiresAt: record.ExpiresAt.UTC()}
 	credential := GenerationCredential{ConnectToken: record.ConnectToken, JupyterToken: jupyterToken}
 	if err := s.Credentials.Put(runtime.ID, generation, credential); err != nil {
-		return devtunnel.Record{}, "", errors.Join(err, s.cleanupUncommittedTunnel(ctx, auth, runtime.ID, generation, record))
+		return devtunnel.Record{}, "", errors.Join(err, s.releaseAllocationTunnel(auth, runtime.ID, generation, TunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
 	}
 	*runtime = candidate
 	return record, jupyterToken, nil
@@ -147,31 +147,20 @@ func allocationTunnelDurationSeconds(wallMinutes int) uint32 {
 	return uint32(duration / time.Second)
 }
 
-func (s Service) deletePotentiallyCreatedTunnel(ctx context.Context, auth authn.TunnelAuthorization, tunnelID string) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.Runner.EffectiveTimeout())
-	defer cancel()
-	if err := s.Tunnels.Delete(cleanupCtx, devtunnel.DeleteRequest{OAuthToken: auth.OAuthToken, TunnelID: tunnelID}); err != nil {
-		return devtunnel.SafeError("compensate uncertain Dev Tunnel create", err, auth.OAuthToken)
-	}
-	return nil
-}
-
-func (s Service) cleanupUncommittedTunnel(ctx context.Context, auth authn.TunnelAuthorization, runtimeID, generation string, record devtunnel.Record) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.Runner.EffectiveTimeout())
-	defer cancel()
-	credentialErr := s.Credentials.Delete(runtimeID, generation)
-	deleteErr := s.Tunnels.Delete(cleanupCtx, devtunnel.DeleteRequest{OAuthToken: auth.OAuthToken, TunnelID: record.ID, ClusterID: record.ClusterID})
-	return errors.Join(credentialErr, deleteErr)
-}
-
-func (s Service) compensateAllocationTunnel(auth authn.TunnelAuthorization, runtime Runtime) error {
+// releaseAllocationTunnel gives back one generation's tunnel and the credential
+// stored beside it, in that order. An uncertain create names no cluster, because
+// the response that would have carried one never arrived; the delete is
+// idempotent either way, as is deleting a credential that was never written.
+func (s Service) releaseAllocationTunnel(auth authn.TunnelAuthorization, runtimeID, generation string, tunnel TunnelMetadata) error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
 	defer cancel()
 	var deleteErr error
-	if s.Tunnels != nil && runtime.Tunnel.ID != "" {
-		deleteErr = s.Tunnels.Delete(ctx, devtunnel.DeleteRequest{OAuthToken: auth.OAuthToken, TunnelID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID})
+	if s.Tunnels != nil && tunnel.ID != "" {
+		if err := s.Tunnels.Delete(ctx, devtunnel.DeleteRequest{OAuthToken: auth.OAuthToken, TunnelID: tunnel.ID, ClusterID: tunnel.ClusterID}); err != nil {
+			deleteErr = devtunnel.SafeError("compensate allocation Dev Tunnel", err, auth.OAuthToken)
+		}
 	}
-	return errors.Join(deleteErr, s.Credentials.Delete(runtime.ID, runtime.Generation))
+	return errors.Join(deleteErr, s.Credentials.Delete(runtimeID, generation))
 }
 
 func allocationPortURI(record devtunnel.Record, tunnel TunnelMetadata, description string) (string, error) {

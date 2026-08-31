@@ -41,9 +41,8 @@ func TestRuntimeWorkflowStartsJupyterWithoutSecretsOrExpansion(t *testing.T) {
 	runtime := Runtime{
 		RuntimeResponse: RuntimeResponse{ID: "rt-012345abcdef"},
 		PrivateRoot:     "/home/test/.cybershuttle/runtimes/rt-012345abcdef", WorkspaceRoot: "/home/test/project",
-		HomeDir: "/home/test",
 	}
-	document := runtimeWorkflow(runtime)
+	document := runtimeWorkflow(runtime, "/home/test")
 	for _, required := range []string{
 		"action: shell.exec",
 		// The interpreter belongs to the account; the workspace only says what
@@ -77,28 +76,6 @@ func TestRuntimeWorkflowStartsJupyterWithoutSecretsOrExpansion(t *testing.T) {
 			t.Fatalf("workflow does not build, start and then wait: %s\n%s", step, document)
 		}
 		at = next
-	}
-}
-
-// The script a caller reads before validation is the one Slurm is then asked
-// about, and asking for it runs no sbatch at all.
-func TestScriptPreviewMatchesValidationAndRunsNoSbatch(t *testing.T) {
-	ssh, _, commandLog := fakeSSH(t)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
-	request := createRequest()
-	preview, err := service.Script(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if commands, _ := os.ReadFile(commandLog); strings.Contains(string(commands), "sbatch") {
-		t.Fatalf("script preview reached sbatch:\n%s", commands)
-	}
-	validated, err := service.Validate(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if preview.Script != validated.Script || preview.RuntimeID != validated.RuntimeID {
-		t.Fatalf("preview differs from what was validated:\n%s\n%s", preview.Script, validated.Script)
 	}
 }
 

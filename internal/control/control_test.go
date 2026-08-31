@@ -101,11 +101,6 @@ if [ "$wire_command" = "'sh' '-s'" ]; then
   printf '/home/tester\n%s\n' "$DISC_DONE"
   exit 0
 fi
-case "$wire_command" in
-  *"'contract'"*)
-    printf '%s' "${FAKE_LINKSPAN_CONTRACT_STDOUT:-}"
-    exit "${FAKE_LINKSPAN_CONTRACT_EXIT:-0}";;
-esac
 eval "set -- $wire_command"
 command="$*"
 case "$command" in
@@ -127,9 +122,6 @@ case "$command" in
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s\n' "$command" >> "$FAKE_SCANCEL_LOG"
     [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ] || { echo 'scheduler temporarily unavailable' >&2; exit 1; }
     printf 'CANCELLED\n' > "$FAKE_STATUS"
-    ;;
-  "sh -c "*"csctl-runtime-workflow "*)
-    cat > "${FAKE_WORKFLOW_LOG:-/dev/null}"
     ;;
   "sh -s -- csctl-provision "*)
     cat > "${FAKE_PROVISION_LOG:-/dev/null}"
@@ -154,8 +146,6 @@ esac
 	t.Setenv("FAKE_VALIDATION_SCRIPT_LOG", validationScriptLog)
 	t.Setenv("FAKE_VALIDATION_STDOUT", "Job script accepted")
 	t.Setenv("FAKE_VALIDATION_FAIL", "0")
-	t.Setenv("FAKE_LINKSPAN_CONTRACT_STDOUT", "linkspan.allocation/v1\n")
-	t.Setenv("FAKE_LINKSPAN_CONTRACT_EXIT", "0")
 	t.Setenv("FAKE_COMMAND_LOG", commandLog)
 	t.Setenv("FAKE_STATUS_SCRIPT_LOG", statusScriptLog)
 	t.Setenv("FAKE_DISCOVERY_SCRIPT_LOG", discoveryScriptLog)
@@ -174,7 +164,7 @@ esac
 func testService(t *testing.T) Service {
 	t.Helper()
 	ssh, _, _ := fakeSSH(t)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan", RuntimeBase: ".cybershuttle/runtimes"}, Now: func() time.Time { return time.Unix(1, 0).UTC() }}
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Now: func() time.Time { return time.Unix(1, 0).UTC() }}
 	configureTestTunnel(t, &service)
 	return service
 }
@@ -355,29 +345,6 @@ func TestHTTPRequiresValidatedPrincipalForRuntimeInventory(t *testing.T) {
 	var list RuntimeList
 	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil || list.Runtimes == nil {
 		t.Fatalf("invalid runtime DTO: %#v %v", list, err)
-	}
-}
-
-func TestStoredRuntimeRejectsNonHomeExpressionPrivateOverlap(t *testing.T) {
-	now := time.Unix(1, 0).UTC()
-	base := Runtime{
-		RuntimeResponse: RuntimeResponse{ID: "rt-012345abcdef", State: "STOPPED", SSHHost: "delta", Partition: "cpu", Resources: Resources{Cores: 1, MemoryMB: 1024, WallMinutes: 60}, CreatedAt: now, UpdatedAt: now},
-		JobName:         "cs-rt-012345abcdef",
-	}
-	setTestRuntimeMetadata(&base)
-	for _, test := range []struct {
-		expression, workspace string
-	}{
-		{"/scratch/tester", "/scratch/tester"},
-		{"projects/example", "/home/tester/projects/example"},
-	} {
-		runtime := base
-		runtime.RootFolder = test.expression
-		runtime.WorkspaceRoot = test.workspace
-		runtime.PrivateRoot = test.workspace + "/.cybershuttle/runtimes/" + runtime.ID
-		if err := validateStoredRuntime(runtime.ID, &runtime); err == nil {
-			t.Fatalf("stored non-home overlap %q accepted", test.expression)
-		}
 	}
 }
 

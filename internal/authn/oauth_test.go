@@ -63,12 +63,8 @@ func TestOAuthBoundaryExactOriginsBearerAndNative(t *testing.T) {
 		return Principal{Subject: "owner", Tenant: "tenant"}, nil
 	})
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := PrincipalFromContext(r.Context())
-		if !ok || principal.Subject != "owner" || principal.Tenant != "tenant" {
-			t.Fatalf("principal = %#v, %v", principal, ok)
-		}
 		auth, err := TunnelAuthorizationFromContext(r.Context())
-		if err != nil || auth.OAuthToken != token || auth.Principal != principal {
+		if err != nil || auth.OAuthToken != token || auth.Principal != (Principal{Subject: "owner", Tenant: "tenant"}) {
 			t.Fatalf("tunnel authorization = %#v, %v", auth, err)
 		}
 		w.WriteHeader(http.StatusNoContent)

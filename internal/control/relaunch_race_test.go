@@ -26,7 +26,7 @@ func relaunchRaceService(t *testing.T) (Service, *atomic.Int64, string, string) 
 	service := Service{
 		Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second},
 		Store:  Store{Dir: filepath.Join(dir, "state")},
-		Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan", RuntimeBase: ".cybershuttle/runtimes"},
+		Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"},
 		Now:    func() time.Time { return time.Unix(0, clock.Load()).UTC() },
 	}
 	configureTestTunnel(t, &service)

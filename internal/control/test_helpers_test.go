@@ -3,7 +3,6 @@ package control
 import (
 	"context"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -45,8 +44,8 @@ type testTunnelManager struct {
 	creates     []devtunnel.CreateRequest
 	gets        []devtunnel.GetRequest
 	deletes     []devtunnel.DeleteRequest
-	generation  string
 	createErr   error
+	deleteErr   error
 	getResponse *devtunnel.Record
 	expiresAt   time.Time
 }
@@ -57,9 +56,6 @@ func (m *testTunnelManager) Create(_ context.Context, request devtunnel.CreateRe
 	m.creates = append(m.creates, request)
 	if m.createErr != nil {
 		return devtunnel.Record{}, m.createErr
-	}
-	if marker := strings.LastIndex(request.TunnelID, "-g-"); marker >= 0 {
-		m.generation = request.TunnelID[marker+1:]
 	}
 	m.expiresAt = time.Now().UTC().Add(time.Duration(request.DurationSeconds) * time.Second)
 	return devtunnel.Record{ID: request.TunnelID, ClusterID: "use", ConnectToken: testConnectToken, HostToken: testHostToken, ExpiresAt: m.expiresAt}, nil
@@ -79,7 +75,7 @@ func (m *testTunnelManager) Delete(_ context.Context, request devtunnel.DeleteRe
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deletes = append(m.deletes, request)
-	return nil
+	return m.deleteErr
 }
 
 func testTunnelContext() context.Context {
@@ -87,7 +83,6 @@ func testTunnelContext() context.Context {
 }
 
 func testTunnelContextFrom(ctx context.Context) context.Context {
-	ctx = authn.WithPrincipal(ctx, testPrincipal)
 	return authn.WithTunnelAuthorization(ctx, authn.TunnelAuthorization{OAuthToken: "test-oauth-token", Principal: testPrincipal})
 }
 
