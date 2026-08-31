@@ -22,8 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Requests have already passed the exact-origin OAuth boundary, so CheckOrigin
-// adds nothing on top of it.
+// Requests have already passed the exact-origin OAuth boundary.
 var controlUpgrader = websocket.Upgrader{Subprotocols: []string{authn.ControlWebSocketProtocol}, CheckOrigin: func(*http.Request) bool { return true }}
 
 const (
@@ -41,10 +40,8 @@ const (
 
 var (
 	authWriteTimeout = 5 * time.Second
-	// Answering a second factor leaves this connection with nothing to carry for
-	// as long as the person takes, and an idle WebSocket is the first thing a
-	// proxy between the browser and here closes. The keep-alive is what makes a
-	// slow approval survive the wait.
+	// An idle WebSocket is the first thing a proxy closes, and answering a second
+	// factor leaves this one idle for as long as the person takes.
 	authKeepAlive = 20 * time.Second
 )
 
@@ -94,9 +91,9 @@ func NewSSHAuthManager(runner sshexec.Runner) *SSHAuthManager {
 }
 
 func (m *SSHAuthManager) admit(alias string) (*authSession, error) {
-	// Reject a duplicate alias before resolving `ssh -G`. Resolution may invoke
-	// helpers and take seconds; without this early guard a second WebSocket can
-	// wait for teardown and then unexpectedly become a new authentication.
+	// Reject a duplicate alias before resolving `ssh -G`, which may invoke helpers
+	// and take seconds: a second WebSocket would otherwise wait for teardown and
+	// then become a new authentication.
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -162,9 +159,9 @@ func (m *SSHAuthManager) finish(session *authSession, own bool) bool {
 }
 
 func (m *SSHAuthManager) command(session *authSession) (*exec.Cmd, bool, error) {
-	// A manager keeps the lifecycle flock for masters it created. If OpenSSH's
-	// ControlPersist process expires, that lock outlives the socket and would
-	// otherwise make the next authentication wait forever on itself.
+	// A manager keeps the lifecycle flock for masters it created, so an expired
+	// ControlPersist process leaves a lock that outlives its socket and would make
+	// the next authentication wait forever on itself.
 	if healthy, err := m.reclaimExpiredOwned(session.alias, session.controlPath); err != nil || healthy {
 		return nil, healthy, err
 	}
@@ -183,9 +180,8 @@ func (m *SSHAuthManager) command(session *authSession) (*exec.Cmd, bool, error) 
 	if err != nil {
 		return nil, false, err
 	}
-	// Authenticate and persist only. Keeping every option before the host and
-	// using -N/-T means OpenSSH never starts a remote shell, command, or PTY, so
-	// shell startup files, MOTD, and module output cannot pollute this prompt.
+	// Authenticate and persist only: with every option before the host, -N/-T stop
+	// OpenSSH starting a remote shell whose MOTD would pollute this prompt.
 	host := args[len(args)-1]
 	options := []string{"-q", "-T", "-N", "-o", "LogLevel=ERROR"}
 	args = append(args[:len(args)-1], append(options, host)...)
@@ -219,8 +215,7 @@ func (s *authSession) closeIO() {
 }
 
 // stopAndReap ends a session that never became an owned master. A closed
-// waitDone already tells KillGroup the process was reaped, so this needs no
-// record of its own.
+// waitDone already tells KillGroup the process was reaped.
 func stopAndReap(session *authSession) {
 	session.mu.Lock()
 	cmd, master, waitDone := session.cmd, session.master, session.waitDone
@@ -238,9 +233,8 @@ func closeMaster(master *ownedMaster) {
 	if master == nil {
 		return
 	}
-	// Server-owned authentication keeps the foreground OpenSSH process. Kill
-	// and reap that exact process group; never address or unlink whatever may
-	// currently occupy its former ControlPath.
+	// Reap this exact process group; never unlink whatever now occupies its
+	// former ControlPath.
 	sshexec.KillGroup(master.cmd, master.waitDone)
 	if master.master != nil {
 		_ = master.master.Close()
@@ -248,11 +242,10 @@ func closeMaster(master *ownedMaster) {
 	sshexec.UnlockControl(master.lock)
 }
 
-// reclaimExpiredOwned returns true while this manager's exact foreground
-// master remains alive and its socket answers. A dead/unhealthy owned process
-// is reaped and its lifecycle lock released before startup retries. The stale
-// socket is deliberately left for locked startup cleanup; a foreign healthy
-// socket is reused later but is never claimed or terminated by this manager.
+// reclaimExpiredOwned reports that this manager's own foreground master is still
+// alive and answering. A dead one is reaped and its lock released before startup
+// retries, leaving the stale socket for locked startup cleanup; a foreign healthy
+// socket is reused later but never claimed or terminated here.
 func (m *SSHAuthManager) reclaimExpiredOwned(alias, path string) (bool, error) {
 	m.mu.Lock()
 	master := m.owned[path]
@@ -288,11 +281,103 @@ func (m *SSHAuthManager) reclaimExpiredOwned(alias, path string) (bool, error) {
 func cleanupFailedSession(session *authSession) {
 	stopAndReap(session)
 	if session.lock != nil {
-		// Failed startup owns no persistent process. Release the startup lock;
-		// stale-path removal belongs only to the next exclusive startup.
+		// Stale-path removal belongs only to the next exclusive startup.
 		sshexec.UnlockControl(session.lock)
 		session.lock = nil
 	}
+}
+
+func writeReady(conn *websocket.Conn) {
+	_ = writeJSON(conn, authWriteTimeout, serverFrame{Type: "ready"})
+	_ = writeJSON(conn, authWriteTimeout, exitFrame(0, ""))
+}
+
+// masterExitFrame reports a fixed message rather than the process error, so no
+// diagnostic from the remote host reaches the browser.
+func masterExitFrame(err error) serverFrame {
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return exitFrame(1, "SSH control master exited before becoming ready")
+	case errors.As(err, &exit):
+		return exitFrame(exit.ExitCode(), "SSH authentication failed")
+	}
+	return exitFrame(1, "SSH authentication failed")
+}
+
+// readClientFrames forwards browser input and resize frames until the socket
+// closes. A client may not queue unbounded credentials or terminal input, so a
+// full queue ends the session rather than buffering behind it.
+func readClientFrames(session *authSession, conn *websocket.Conn, input chan<- authInputOp) <-chan struct{} {
+	done := make(chan struct{})
+	queue := func(operation authInputOp) bool {
+		select {
+		case input <- operation:
+			return true
+		case <-session.ctx.Done():
+		default:
+			session.cancel()
+		}
+		return false
+	}
+	go func() {
+		defer close(done)
+		for {
+			messageType, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			switch messageType {
+			case websocket.BinaryMessage:
+				if len(data) > maxAuthInput {
+					session.cancel()
+					return
+				}
+				if !queue(authInputOp{data: data}) {
+					return
+				}
+			case websocket.TextMessage:
+				var frame clientFrame
+				if err := json.Unmarshal(data, &frame); err != nil {
+					return
+				}
+				if frame.Type == "resize" && !queue(authInputOp{resize: &frame}) {
+					return
+				}
+			default:
+				session.cancel()
+				return
+			}
+		}
+	}()
+	return done
+}
+
+func negotiableWindow(frame clientFrame) bool {
+	return frame.Cols >= ptyMinCols && frame.Cols <= ptyMaxCols && frame.Rows >= ptyMinRows && frame.Rows <= ptyMaxRows
+}
+
+func writeClientInput(session *authSession, master *os.File, input <-chan authInputOp) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case operation := <-input:
+				switch {
+				case operation.resize == nil:
+					if _, err := master.Write(operation.data); err != nil {
+						return
+					}
+				case negotiableWindow(*operation.resize):
+					_ = pty.Setsize(master, &pty.Winsize{Cols: operation.resize.Cols, Rows: operation.resize.Rows})
+				}
+			case <-session.ctx.Done():
+				return
+			}
+		}
+	}()
+	return done
 }
 
 func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *http.Request, alias string) {
@@ -323,8 +408,7 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 		return
 	}
 	if alreadyReady {
-		_ = writeJSON(conn, authWriteTimeout, serverFrame{Type: "ready"})
-		_ = writeJSON(conn, authWriteTimeout, exitFrame(0, ""))
+		writeReady(conn)
 		finished = true
 		m.finish(session, false)
 		return
@@ -347,72 +431,8 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 	output := make(chan []byte, 8)
 	go pumpPTY(session.ctx, master, output, 16<<10)
 	input := make(chan authInputOp, maxQueuedAuthInput/maxAuthInput)
-	clientGone := make(chan struct{})
-	go func() {
-		defer close(clientGone)
-		for {
-			messageType, data, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-			switch messageType {
-			case websocket.BinaryMessage:
-				if len(data) > maxAuthInput {
-					session.cancel()
-					return
-				}
-				select {
-				case input <- authInputOp{data: data}:
-				case <-session.ctx.Done():
-					return
-				default:
-					// A client may not queue unbounded credentials or terminal input.
-					session.cancel()
-					return
-				}
-			case websocket.TextMessage:
-				var frame clientFrame
-				if err := json.Unmarshal(data, &frame); err != nil {
-					return
-				}
-				if frame.Type != "resize" {
-					continue
-				}
-				select {
-				case input <- authInputOp{resize: &frame}:
-				case <-session.ctx.Done():
-					return
-				default:
-					session.cancel()
-					return
-				}
-			default:
-				session.cancel()
-				return
-			}
-		}
-	}()
-	inputWriterDone := make(chan struct{})
-	go func() {
-		defer close(inputWriterDone)
-		for {
-			select {
-			case operation := <-input:
-				if operation.resize != nil {
-					frame := operation.resize
-					if frame.Cols >= ptyMinCols && frame.Cols <= ptyMaxCols && frame.Rows >= ptyMinRows && frame.Rows <= ptyMaxRows {
-						_ = pty.Setsize(master, &pty.Winsize{Cols: frame.Cols, Rows: frame.Rows})
-					}
-					continue
-				}
-				if _, err := master.Write(operation.data); err != nil {
-					return
-				}
-			case <-session.ctx.Done():
-				return
-			}
-		}
-	}()
+	clientGone := readClientFrames(session, conn, input)
+	inputWriterDone := writeClientInput(session, master, input)
 
 	readiness := time.NewTicker(50 * time.Millisecond)
 	defer readiness.Stop()
@@ -429,39 +449,28 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 				return
 			}
 		case <-readiness.C:
-			if m.runner.MasterHealthy(alias, session.controlPath) {
-				if m.finish(session, true) {
-					_ = writeJSON(conn, authWriteTimeout, serverFrame{Type: "ready"})
-					_ = writeJSON(conn, authWriteTimeout, exitFrame(0, ""))
-					finished = true
-					session.cancel() // stop browser I/O goroutines, not the owned process
-					// The owned master keeps the PTY it authenticated on, and
-					// nothing reads it once this loop ends. Drain it, so a full
-					// buffer can never block the master it belongs to.
-					go func() { _, _ = io.Copy(io.Discard, master) }()
-					return
-				}
+			if !m.runner.MasterHealthy(alias, session.controlPath) {
+				continue
+			}
+			finished = true
+			if !m.finish(session, true) {
 				cleanupFailedSession(session)
 				m.finish(session, false)
-				finished = true
 				_ = writeJSON(conn, authWriteTimeout, exitFrame(1, "SSH authentication service is stopping"))
 				return
 			}
+			writeReady(conn)
+			session.cancel() // stop browser I/O goroutines, not the owned process
+			// Nothing reads the PTY the owned master authenticated on once this
+			// loop ends, so drain it: a full buffer would block that master.
+			go func() { _, _ = io.Copy(io.Discard, master) }()
+			return
 		case <-waitDone:
 			_ = master.Close()
 			session.mu.Lock()
 			err := session.waitErr
 			session.mu.Unlock()
-			// A fixed message rather than the process error, so no diagnostic
-			// from the remote host reaches the browser.
-			code, message := 1, "SSH authentication failed"
-			var exit *exec.ExitError
-			if err == nil {
-				message = "SSH control master exited before becoming ready"
-			} else if errors.As(err, &exit) {
-				code = exit.ExitCode()
-			}
-			_ = writeJSON(conn, authWriteTimeout, exitFrame(code, message))
+			_ = writeJSON(conn, authWriteTimeout, masterExitFrame(err))
 			return
 		case <-clientGone:
 			return

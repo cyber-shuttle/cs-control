@@ -7,20 +7,16 @@ import (
 )
 
 // The allocation runs Linkspan; Linkspan runs this. Everything an allocation is
-// for lives here rather than in the batch script, which names no application:
-// the environment is built, its dependencies are installed, the server is
-// started, and nothing calls the runtime usable until the server answers.
+// for lives here rather than in the batch script, which names no application.
 //
-// shell.exec runs each command without a shell, splits it on whitespace, and
-// expands nothing, so every path is a validated remote path, every port is the
-// one this runtime was given, and the token Jupyter Server needs reaches it
-// through the environment Linkspan inherits from the job.
+// shell.exec runs each command without a shell, splits on whitespace and expands
+// nothing, so every path here is a validated remote path and the token Jupyter
+// Server needs reaches it through the environment Linkspan inherits.
 func runtimeWorkflow(runtime Runtime, home string) string {
 	uv := strings.TrimSuffix(home, "/") + "/.local/bin/uv"
 	env := jupyterEnvironment(home)
-	// The interpreter is provisioned per account, beside the binary the job
-	// execs. One account, one environment: a workspace chooses what a server
-	// opens, not what runs it. The browser never computes paths.
+	// One account, one environment, beside the binary the job execs: a workspace
+	// chooses what a server opens, not what runs it.
 	python := env + "/bin/python"
 	port := strconv.Itoa(int(allocationPorts(runtime.ID, runtime.Generation).jupyter))
 	steps := []struct{ name, command string }{
@@ -29,15 +25,15 @@ func runtimeWorkflow(runtime Runtime, home string) string {
 		{"Install the server", strings.Join([]string{
 			uv, "pip", "install", "--quiet", "--python", python,
 			"jupyter-server", "ipykernel", "jupyter-server-terminals"}, " ")},
-		// setsid returns as soon as it has forked, so the server outlives this
-		// step and the step after it can wait for the server rather than for it.
+		// setsid returns once forked, so the server outlives this step and the
+		// next step waits on the server rather than on this.
 		{"Start Jupyter Server", strings.Join([]string{
 			"setsid", "--fork", python, "-m", "jupyter_server",
 			"--no-browser", "--ip=127.0.0.1",
 			"--ServerApp.root_dir=" + runtime.WorkspaceRoot,
 			"--ServerApp.allow_origin=*"}, " ")},
-		// An answer of any kind means the server is listening; which answer it
-		// is depends on a token this file is not allowed to hold.
+		// Any answer means the server is listening; which one depends on a token
+		// this file may not hold.
 		{"Wait for Jupyter Server", strings.Join([]string{
 			"curl", "--silent", "--show-error", "--output", "/dev/null",
 			"--retry", "90", "--retry-delay", "2", "--retry-connrefused",

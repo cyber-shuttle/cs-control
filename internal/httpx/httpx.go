@@ -19,9 +19,9 @@ import (
 
 const userAgent = "cs-control/0.1.0"
 
-// ParseBaseURL accepts only a bare http(s) origin with an optional path: no
-// credentials, query or fragment, so a configured base URL cannot smuggle
-// parameters into every request built from it. subject names it in errors.
+// ParseBaseURL accepts only a bare http(s) origin with an optional path -- no
+// credentials, query or fragment -- so a base URL cannot smuggle parameters into
+// every request built from it. subject names it in errors.
 func ParseBaseURL(raw, subject string) (*url.URL, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil ||
@@ -64,10 +64,9 @@ func Do(client *http.Client, request *http.Request, limit int64) ([]byte, int, e
 	return body, response.StatusCode, nil
 }
 
-// NewRequest builds an outbound request carrying this process's standard
-// headers, and its bearer when one is supplied. Every subsystem that calls an
-// external service builds its requests here, so the user agent and the Accept
-// and Authorization policy exist in one place.
+// NewRequest builds an outbound request with this process's standard headers and
+// its bearer when one is supplied, so the user agent and the Accept and
+// Authorization policy exist in one place.
 func NewRequest(ctx context.Context, method, endpoint, bearer string, body io.Reader) (*http.Request, error) {
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {

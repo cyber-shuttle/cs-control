@@ -14,8 +14,8 @@ import (
 	"syscall"
 )
 
-// EnsurePrivateDir creates dir with its parents, holds it at mode 0700, and
-// returns PrivateDir's verdict, so no caller can proceed on an unverified path.
+// EnsurePrivateDir creates dir at mode 0700 and returns PrivateDir's verdict, so
+// no caller proceeds on an unverified path.
 func EnsurePrivateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err

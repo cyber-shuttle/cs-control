@@ -46,10 +46,9 @@ type Principal struct {
 	Tenant  string `json:"tenant"`
 }
 
-// OAuthCredentials are request-scoped and must never be logged or persisted.
-// The access token is an independently validated Dev Tunnels capability; the
-// signed ID token is the sole identity bearer. No subject or at_hash binding is
-// claimed between them.
+// OAuthCredentials are request-scoped and never logged or persisted. The access
+// token is an independently validated Dev Tunnels capability; the signed ID token
+// is the sole identity bearer, with no binding claimed between them.
 type OAuthCredentials struct {
 	AccessToken string
 	IDToken     string
@@ -116,9 +115,8 @@ func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "origin is not allowed", http.StatusForbidden)
 			return
 		}
-		// ETag is not a CORS-safelisted response header, so without this a
-		// cross-origin client cannot read it and the conditional runtime poll
-		// never sends If-None-Match.
+		// ETag is not CORS-safelisted, so without this a cross-origin client cannot
+		// read it and the conditional runtime poll never sends If-None-Match.
 		w.Header().Set("Access-Control-Expose-Headers", "ETag")
 	}
 	if r.Method == http.MethodOptions && origin != "" && r.Header.Get("Access-Control-Request-Method") != "" {
@@ -339,8 +337,8 @@ func (v *DevTunnelOAuthValidator) ValidateAccess(ctx context.Context, token stri
 	query.Set("api-version", devtunnel.APIVersion)
 	endpoint.RawQuery = query.Encode()
 
-	// The response shape is irrelevant: Dev Tunnels accepting the token is the
-	// whole check, so this only requires a bounded, well-formed JSON body.
+	// Dev Tunnels accepting the token is the whole check, so only a bounded,
+	// well-formed JSON body is required.
 	var limits []json.RawMessage
 	if err := httpx.GetJSON(ctx, v.client, endpoint.String(), token, maxOAuthResponse, &limits); err != nil {
 		return fmt.Errorf("validate delegated token with Dev Tunnels: %w", err)
@@ -351,11 +349,9 @@ func (v *DevTunnelOAuthValidator) ValidateAccess(ctx context.Context, token stri
 // Bounded and character-restricted, so subsystems may store or compare it.
 var tenantSegment = regexp.MustCompile(`^[A-Za-z0-9.-]{1,256}$`)
 
-// parseTenantAuthority accepts only a pinned, tenant-specific Microsoft
-// authority and returns it with its tenant segment. The multi-tenant aliases
-// are refused here rather than at one of two call sites, so no entry point can
-// be configured to accept an identity from any tenant. Callers append the path
-// their endpoint uses.
+// parseTenantAuthority accepts only a pinned, tenant-specific Microsoft authority
+// and returns it with its tenant segment. Refusing the multi-tenant aliases here
+// rather than per call site keeps any entry point from accepting any tenant.
 func parseTenantAuthority(raw string) (*url.URL, string, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "login.microsoftonline.com" ||
@@ -392,9 +388,8 @@ type TunnelAuthorization struct {
 
 type tunnelAuthorizationContextKey struct{}
 
-// WithTunnelAuthorization carries a validated identity and the delegated token
-// it arrived with. The OAuth boundary is the only production caller; nothing
-// downstream may mint an authorization of its own.
+// WithTunnelAuthorization carries a validated identity and the delegated token it
+// arrived with. The OAuth boundary is the only production caller.
 func WithTunnelAuthorization(ctx context.Context, auth TunnelAuthorization) context.Context {
 	return context.WithValue(ctx, tunnelAuthorizationContextKey{}, auth)
 }

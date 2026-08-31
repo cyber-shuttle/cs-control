@@ -18,8 +18,7 @@ import (
 // argument vector. Every subsystem that names a host validates it here.
 func ValidAlias(value string) bool { return aliasPattern.MatchString(value) }
 
-// ErrInvalidAlias is what every subsystem reports for an alias this package
-// rejects, so the refusal reads the same wherever it is raised.
+// ErrInvalidAlias reads the same wherever a rejected alias is reported.
 var ErrInvalidAlias = apierr.New("invalid_ssh_alias", "invalid SSH alias", 400)
 
 var aliasPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)

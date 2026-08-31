@@ -8,16 +8,14 @@ import (
 )
 
 // backgroundInterval is how often a runtime nobody is watching is reconciled.
-// It is slow on purpose: a viewer polls far more often than this, so the tick
-// only matters for allocations whose owner has closed the tab, and it costs one
-// batched SSH round per host that still has one.
+// Slow on purpose: a viewer polls far more often, so this tick only matters once
+// the owner has closed the tab, at one batched SSH round per host.
 const backgroundInterval = 30 * time.Second
 
-// RuntimeRefresher runs at most one scheduler reconciliation at a time, and no
+// RuntimeRefresher runs at most one scheduler reconciliation at a time and no
 // more often than once a second. Every read triggers one, so a viewer converges
-// at its own polling rate; a slow background tick runs the same reconciliation
-// when nobody is reading, so a runtime whose owner closed the tab still reaches
-// its terminal state rather than keeping whatever it was last seen in.
+// at its own polling rate, and a background tick reconciles for an owner who has
+// closed the tab.
 type RuntimeRefresher struct {
 	reconcile func(context.Context) error
 	interval  time.Duration
@@ -43,10 +41,9 @@ func NewRuntimeRefresher(service Service) *RuntimeRefresher {
 	return refresher
 }
 
-// tick reconciles on a slow cadence regardless of whether anyone is reading.
-// Trigger already collapses a tick that lands on a viewer's poll, and
-// reconciliation makes no SSH call at all when no runtime is in a state worth
-// observing, so an idle control plane stays idle.
+// tick reconciles on a slow cadence whether or not anyone is reading. Trigger
+// collapses a tick landing on a viewer's poll, and reconciliation makes no SSH
+// call when nothing is worth observing, so an idle control plane stays idle.
 func (r *RuntimeRefresher) tick(every time.Duration) {
 	defer r.wg.Done()
 	ticker := time.NewTicker(every)
@@ -61,9 +58,9 @@ func (r *RuntimeRefresher) tick(every time.Duration) {
 	}
 }
 
-// Trigger starts a reconciliation unless one is already running or the last one
-// finished less than interval ago, and reports whether one is now in flight.
-// The interval is login-node load protection and nothing bypasses it.
+// Trigger starts a reconciliation unless one is running or the last finished
+// less than interval ago, and reports whether one is now in flight. The interval
+// is login-node load protection and nothing bypasses it.
 func (r *RuntimeRefresher) Trigger() bool {
 	r.mu.Lock()
 	switch {

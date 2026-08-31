@@ -26,9 +26,8 @@ const (
 )
 
 // MicrosoftOAuthValidator validates two independent bearers: the Dev Tunnels
-// access token is a capability accepted by the Dev Tunnels API, while the ID
-// token is the sole identity bearer. There is intentionally no subject or
-// at_hash binding between them.
+// access token is a capability, the ID token is the sole identity bearer, and no
+// binding between them is claimed.
 type MicrosoftOAuthValidator struct {
 	access   *DevTunnelOAuthValidator
 	identity *OIDCValidator
@@ -220,23 +219,11 @@ func (v *OIDCValidator) loadKeys(ctx context.Context) (cachedOIDCKeys, error) {
 	}
 	call, start := v.refreshCallLocked()
 	v.mu.Unlock()
-	if start {
-		go v.runRefresh(call)
-	}
-	if err := waitOIDCRefresh(ctx, call); err != nil {
-		return cachedOIDCKeys{}, err
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if call.err != nil {
-		return cachedOIDCKeys{}, call.err
-	}
-	return v.cache, nil
+	return v.awaitRefresh(ctx, call, start)
 }
 
-// The single global cooldown is the whole bound on unknown-kid refreshes: the
-// first unknown kid triggers one refresh, every other kid inside the window is
-// answered from the cached set.
+// One global cooldown bounds unknown-kid refreshes: the first triggers a refresh,
+// every other kid inside the window is answered from the cached set.
 func (v *OIDCValidator) refreshUnknownKID(ctx context.Context, kid string) (cachedOIDCKeys, error) {
 	v.mu.Lock()
 	now := v.now()
@@ -250,6 +237,13 @@ func (v *OIDCValidator) refreshUnknownKID(ctx context.Context, kid string) (cach
 		v.nextUnknownRefresh = now.Add(oidcUnknownKIDCooldown)
 	}
 	v.mu.Unlock()
+	return v.awaitRefresh(ctx, call, start)
+}
+
+// awaitRefresh starts the fetch this caller claimed, waits for whichever call is
+// in flight, and answers with the cache that call produced. The lock must be
+// released before entering.
+func (v *OIDCValidator) awaitRefresh(ctx context.Context, call *oidcRefreshCall, start bool) (cachedOIDCKeys, error) {
 	if start {
 		go v.runRefresh(call)
 	}

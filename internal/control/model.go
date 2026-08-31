@@ -85,8 +85,7 @@ type TunnelMetadata struct {
 }
 
 // RuntimeResponse is the narrow allocation state exposed to browser clients.
-// Runtime embeds it, so a field is public exactly when it is declared here and
-// the two shapes cannot drift apart.
+// Runtime embeds it, so a field is public exactly when it is declared here.
 type RuntimeResponse struct {
 	ID         string    `json:"id"`
 	Generation string    `json:"generation"`
@@ -107,9 +106,8 @@ type Runtime struct {
 	Tunnel  TunnelMetadata  `json:"tunnel"`
 	JobID   string          `json:"jobId,omitempty"`
 	JobName string          `json:"jobName"`
-	// When Slurm was first seen running this allocation. Its --time is measured
-	// from there, so this is what lets the clock retire a runtime the scheduler
-	// has stopped answering for. Zero until the allocation starts.
+	// When Slurm was first seen running this allocation, and so what --time is
+	// measured from. Zero until it starts.
 	StartedAt     time.Time `json:"startedAt,omitempty"`
 	Node          string    `json:"node,omitempty"`
 	PrivateRoot   string    `json:"privateRoot"`
@@ -154,11 +152,11 @@ type preparedRuntime struct {
 	request CreateRequest
 	runtime Runtime
 	script  string
-	// The account's own home on this host. The interpreter a runtime starts is
-	// a tool of the account, not of the workspace it opens.
+	// The account's own home: the interpreter a runtime starts is a tool of the
+	// account, not of the workspace it opens.
 	home string
-	// Where Linkspan belongs on this host, with any $HOME anchor already
-	// resolved, so provisioning and the script name the same file.
+	// Where Linkspan belongs, $HOME already resolved, so provisioning and the
+	// script name the same file.
 	linkspan string
 }
 
@@ -173,16 +171,14 @@ type state struct {
 	Runtimes map[string]*Runtime `json:"runtimes"`
 }
 
-// DefaultLinkspanPath is where a runtime installs Linkspan when a host has
-// none: under the account's own home, which every account can write to.
+// DefaultLinkspanPath is where a runtime installs Linkspan when a host has none.
 const DefaultLinkspanPath = "$HOME/.cybershuttle/bin/linkspan"
 
-// defaultRuntimeBase is where a runtime's private state lives, relative to the
-// account's home.
+// defaultRuntimeBase is a runtime's private state, relative to the account's home.
 const defaultRuntimeBase = ".cybershuttle/runtimes"
 
-// The smallest allocation worth scheduling. cs-jupyter offers the same floor
-// in its create form; keep the two in step.
+// The smallest allocation worth scheduling. cs-jupyter's create form offers the
+// same floor; keep the two in step.
 const (
 	MinCores    = 2
 	MinMemoryMB = 4096
@@ -224,7 +220,7 @@ var (
 	errMethodNotAllowed = apierr.New("method_not_allowed", "method not allowed", 405)
 )
 
-// Everything that answers a caller returns one of these, so no response shares
+// Everything answering a caller returns one of these, so no response shares
 // memory with the state the lock protects.
 func detached(runtime *Runtime) *Runtime {
 	value := *runtime

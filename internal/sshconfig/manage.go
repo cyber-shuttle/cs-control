@@ -14,21 +14,19 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/safeio"
 )
 
-// Entries this package writes live between these two markers. Everything
-// outside them is the user's own configuration: it is read, never rewritten,
-// and the hosts it declares cannot be removed through the API.
+// Entries this package writes live between these markers. Everything outside is
+// the user's own: read, never rewritten, and not removable through the API.
 const (
 	blockBegin = "# >>> cybershuttle managed >>>"
 	blockEnd   = "# <<< cybershuttle managed <<<"
 )
 
-// A directive value ends up in the user's config file and then in an ssh
-// argument vector, so it carries no whitespace, quoting, or line break.
+// A directive value reaches an ssh argument vector, so it carries no whitespace,
+// quoting or line break.
 var valuePattern = regexp.MustCompile(`^[A-Za-z0-9_@%:./+=,~-]{1,256}$`)
 
-// Options that only name how a connection authenticates or keeps itself alive.
-// Anything that can run a local program (ProxyCommand, LocalCommand) or pull in
-// more configuration (Include, Match) is absent by intent.
+// Only how a connection authenticates or keeps itself alive. Anything that runs a
+// local program or includes more configuration is absent by intent.
 var allowedOptions = map[string]string{
 	"proxyjump":                "ProxyJump",
 	"stricthostkeychecking":    "StrictHostKeyChecking",
@@ -272,8 +270,8 @@ func blockBounds(lines []string) (int, int) {
 	return -1, -1
 }
 
-// rewrite replaces the user's config in one atomic step, so a failed write
-// never leaves a half-written configuration behind.
+// rewrite replaces the user's config atomically, so a failed write leaves nothing
+// half-written behind.
 func (c Config) rewrite(mutate func([]string) ([]string, error)) error {
 	path := c.UserPath
 	if path == "" {

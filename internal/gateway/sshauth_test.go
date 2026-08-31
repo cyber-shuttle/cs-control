@@ -64,7 +64,6 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	server.Config.Handler = handler
 	server.Start()
 	defer server.Close()
-	defer auth.Close()
 
 	unauthorized, err := http.Get(server.URL + "/api/v1/ssh/delta/auth")
 	if err != nil {
