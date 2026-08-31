@@ -38,45 +38,22 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	if err != nil {
 		return nil, err
 	}
-	if request.IdempotencyKey != "" {
-		var existing *Runtime
-		err := s.Store.withLock(func(_ Store, current *state) error {
-			if runtime := current.Runtimes[request.ID]; runtime != nil {
-				if runtime.Owner != auth.Principal {
-					return errOwnerMismatch
-				}
-				if !sameCreateRequest(runtime, request) {
-					return apierr.New("idempotency_conflict", "idempotency key was already used for another request", 409)
-				}
-				existing = detached(runtime)
-			}
-			return nil
-		})
-		if err != nil || existing != nil {
-			return existing, err
-		}
+	reused, err := s.reusableRuntime(request, auth.Principal)
+	if err != nil || reused != nil {
+		return reused, err
 	}
 	prepared, err := s.prepareRuntime(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-
-	s.runtimeStatus(request.ID, "Validating runtime with Slurm")
-	checked, err := s.validateScript(ctx, request.SSHHost, prepared.script)
-	if err != nil {
-		s.runtimeStatus(request.ID, "Slurm validation failed")
+	if err := s.validateForCreate(ctx, request, prepared.script); err != nil {
 		return nil, err
 	}
-	if !checked.passed {
-		s.runtimeStatus(request.ID, "Slurm validation failed")
-		return nil, apierr.New("slurm_validation_failed", validationMessage(checked), 400)
-	}
-	s.runtimeStatus(request.ID, "Slurm validation passed")
 
 	var intent Runtime
 	var record devtunnel.Record
 	var jupyterToken string
-	reused, tunnelCreated := false, false
+	idempotent, tunnelCreated := false, false
 	err = s.Store.withLock(func(store Store, current *state) error {
 		existing := current.Runtimes[request.ID]
 		if existing != nil {
@@ -85,7 +62,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 			}
 			if request.IdempotencyKey != "" && sameCreateRequest(existing, request) {
 				intent = *existing
-				reused = true
+				idempotent = true
 				return nil
 			}
 			if !request.relaunch {
@@ -119,14 +96,13 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		}
 		return nil, err
 	}
-	if reused {
+	if idempotent {
 		return &intent, nil
 	}
 
-	// A host that has never run one of these has neither the interpreter the
-	// script starts nor the binary it execs, and installing them takes minutes.
-	// The runtime is already durable here, so the reader watching it sees the
-	// preparation happen rather than a request that says nothing until it ends.
+	// Installing the interpreter and the binary a first-time host lacks takes
+	// minutes. The runtime is already durable, so the reader watching it sees
+	// the preparation rather than a request that says nothing until it ends.
 	if err := s.provisionRuntime(ctx, request.SSHHost, intent, prepared.home, prepared.linkspan); err != nil {
 		s.runtimeStatus(intent.ID, "Runtime environment preparation failed")
 		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent, request.relaunch))
@@ -143,10 +119,72 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent, request.relaunch))
 	}
 	s.runtimeStatus(intent.ID, "Runtime submitted to Slurm")
+	created, superseded, err := s.recordSubmittedJob(intent.ID, jobID)
+	if err != nil {
+		s.runtimeStatus(intent.ID, "Runtime submission could not be saved")
+		return nil, s.cancelUnsavedJob(ctx, request.SSHHost, jobID, err)
+	}
+	if created.State == "QUEUED" {
+		s.runtimeStatus(intent.ID, "Runtime is queued")
+	}
+	if !superseded {
+		return created, nil
+	}
+	replaced, err := s.cancelSupersededJob(request.SSHHost, intent.ID, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if replaced != nil {
+		created = replaced
+	}
+	return created, nil
+}
+
+// reusableRuntime is the runtime an idempotency key already created, and only
+// when the same request created it.
+func (s Service) reusableRuntime(request CreateRequest, principal authn.Principal) (*Runtime, error) {
+	if request.IdempotencyKey == "" {
+		return nil, nil
+	}
+	var existing *Runtime
+	err := s.Store.withLock(func(_ Store, current *state) error {
+		runtime := current.Runtimes[request.ID]
+		if runtime == nil {
+			return nil
+		}
+		if runtime.Owner != principal {
+			return errOwnerMismatch
+		}
+		if !sameCreateRequest(runtime, request) {
+			return apierr.New("idempotency_conflict", "idempotency key was already used for another request", 409)
+		}
+		existing = detached(runtime)
+		return nil
+	})
+	return existing, err
+}
+
+func (s Service) validateForCreate(ctx context.Context, request CreateRequest, script string) error {
+	s.runtimeStatus(request.ID, "Validating runtime with Slurm")
+	checked, err := s.validateScript(ctx, request.SSHHost, script)
+	if err == nil && !checked.passed {
+		err = apierr.New("slurm_validation_failed", validationMessage(checked), 400)
+	}
+	if err != nil {
+		s.runtimeStatus(request.ID, "Slurm validation failed")
+		return err
+	}
+	s.runtimeStatus(request.ID, "Slurm validation passed")
+	return nil
+}
+
+// recordSubmittedJob attaches the job to its durable record, and reports a record
+// that moved on without it: that job goes rather than runs on.
+func (s Service) recordSubmittedJob(runtimeID, jobID string) (*Runtime, bool, error) {
 	var created *Runtime
-	cancelSubmitted := false
-	err = s.Store.withLock(func(store Store, current *state) error {
-		runtime := current.Runtimes[intent.ID]
+	superseded := false
+	err := s.Store.withLock(func(store Store, current *state) error {
+		runtime := current.Runtimes[runtimeID]
 		if runtime == nil {
 			return errors.New("submitted runtime disappeared from state")
 		}
@@ -154,8 +192,7 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		if runtime.State == "SUBMITTING" {
 			runtime.State = "QUEUED"
 		}
-		// The record moved on without this job, so the job goes rather than run on.
-		cancelSubmitted = runtime.State != "QUEUED"
+		superseded = runtime.State != "QUEUED"
 		runtime.UpdatedAt = s.now()
 		if err := store.save(current); err != nil {
 			return fmt.Errorf("persist submitted job %s: %w", jobID, err)
@@ -163,49 +200,46 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		created = detached(runtime)
 		return nil
 	})
-	if err != nil {
-		s.runtimeStatus(intent.ID, "Runtime submission could not be saved")
-		_, cancelErr := s.Runner.Run(ctx, request.SSHHost, nil, "scancel", jobID)
-		if cancelErr != nil {
-			return nil, fmt.Errorf("%w; compensation scancel failed: %v", err, cancelErr)
-		}
-		return nil, fmt.Errorf("%w; job was cancelled", err)
+	return created, superseded, err
+}
+
+// cancelUnsavedJob gives back a job no record now names.
+func (s Service) cancelUnsavedJob(ctx context.Context, host, jobID string, saveErr error) error {
+	if _, err := s.Runner.Run(ctx, host, nil, "scancel", jobID); err != nil {
+		return fmt.Errorf("%w; compensation scancel failed: %v", saveErr, err)
 	}
-	if created != nil && created.State == "QUEUED" {
-		s.runtimeStatus(intent.ID, "Runtime is queued")
+	return fmt.Errorf("%w; job was cancelled", saveErr)
+}
+
+// cancelSupersededJob cancels a job its record has already moved past. Stop may
+// win while sbatch is in flight, before a job ID exists, so the cancellation
+// happens before Create returns rather than at a later poll.
+func (s Service) cancelSupersededJob(host, runtimeID, jobID string) (*Runtime, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
+	_, cancelErr := s.Runner.Run(ctx, host, nil, "scancel", jobID)
+	cancel()
+	diagnostic := ""
+	if cancelErr != nil {
+		diagnostic = cancelErr.Error()
 	}
-	if cancelSubmitted {
-		// Stop may win while sbatch is still in flight and before a job ID is
-		// visible. Once submission returns, cancel that exact job before Create
-		// can return; do not wait for a later poll to uphold the stop intent.
-		cancelCtx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
-		_, cancelErr := s.Runner.Run(cancelCtx, request.SSHHost, nil, "scancel", jobID)
-		cancel()
-		diagnostic := ""
-		if cancelErr != nil {
-			diagnostic = cancelErr.Error()
-		}
-		err = s.Store.withLock(func(store Store, current *state) error {
-			runtime := current.Runtimes[intent.ID]
-			if runtime == nil {
-				return nil
-			}
-			if runtime.JobID == jobID && runtime.State != "QUEUED" {
-				runtime.Error, runtime.UpdatedAt = diagnostic, s.now()
-				if err := store.save(current); err != nil {
-					return err
-				}
-			}
-			// A concurrent terminal update wins both persistence and the Create
-			// response; cancellation diagnostics may never revive stale state.
-			created = detached(runtime)
+	var result *Runtime
+	err := s.Store.withLock(func(store Store, current *state) error {
+		runtime := current.Runtimes[runtimeID]
+		if runtime == nil {
 			return nil
-		})
-		if err != nil {
-			return nil, err
 		}
-	}
-	return created, nil
+		if runtime.JobID == jobID && runtime.State != "QUEUED" {
+			runtime.Error, runtime.UpdatedAt = diagnostic, s.now()
+			if err := store.save(current); err != nil {
+				return err
+			}
+		}
+		// A concurrent terminal update wins both persistence and the response:
+		// cancellation diagnostics never revive stale state.
+		result = detached(runtime)
+		return nil
+	})
+	return result, err
 }
 
 // Start submits a new allocation under a finished runtime's own identity and
@@ -269,9 +303,8 @@ func (s Service) Stop(ctx context.Context, id string) (*Runtime, error) {
 	var narration []string
 	if reconcile(snapshot.State) {
 		s.runtimeStatus(id, "Requesting scheduler cancellation")
-		// Stop observes the scheduler through the same batched round the
-		// background refresher uses, so a stop and a refresh can never disagree
-		// about what the scheduler said.
+		// Stop observes the scheduler through the refresher's own batched round,
+		// so the two can never disagree about what it said.
 		stopCtx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
 		candidates, lines := s.reconcileSnapshots(stopCtx, []Runtime{snapshot})
 		cancel()
@@ -307,10 +340,9 @@ func (s Service) Stop(ctx context.Context, id string) (*Runtime, error) {
 	return result, errors.Join(managementErr, err)
 }
 
-// Delete removes an allocation the owner is finished with. Stop is the only
-// path that releases the job, tunnel, and credentials in the right order, so a
-// live allocation is stopped first and a record is only dropped once the
-// scheduler has confirmed the job is gone.
+// Delete removes an allocation the owner is finished with. Stop is the only path
+// that releases job, tunnel and credentials in the right order, so a live
+// allocation is stopped first and dropped only once the job is confirmed gone.
 func (s Service) Delete(ctx context.Context, id string) (*Runtime, error) {
 	stopped, err := s.Stop(ctx, id)
 	if err != nil {
@@ -408,8 +440,8 @@ func sameCreateRequest(runtime *Runtime, request CreateRequest) bool {
 	return runtime.SSHHost == request.SSHHost && runtime.Account == request.Account && runtime.Partition == request.Partition && runtime.RootFolder == request.RootFolder && runtime.Resources == request.Resources
 }
 
-// Returns the persisted inventory without scheduler or endpoint I/O, so a read
-// answers immediately and reconciliation catches up behind it.
+// ListCached returns the persisted inventory without scheduler or endpoint I/O,
+// so a read answers immediately and reconciliation catches up behind it.
 func (s Service) ListCached() ([]Runtime, error) {
 	var result []Runtime
 	err := s.Store.withLock(func(_ Store, current *state) error {
@@ -427,8 +459,8 @@ func (s Service) ReconcileAll(ctx context.Context) error {
 		return err
 	}
 	candidates, narration := s.reconcileSnapshots(ctx, snapshots)
-	// A canceled refresh has no authoritative result. Do not even enter the
-	// merge lock: the persisted inventory must remain byte-for-byte unchanged.
+	// A canceled refresh has no authoritative result, so it must not even enter
+	// the merge lock.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -477,9 +509,8 @@ func setRuntimeNode(runtime *Runtime, value string) {
 	runtime.Node = value
 }
 
-// abandonSubmitIntent undoes a runtime that will never reach the scheduler:
-// preparing its host failed, or submitting it conclusively did. A stop that
-// arrived meanwhile keeps its own outcome, and a relaunch keeps its card.
+// abandonSubmitIntent undoes a runtime that will never reach the scheduler. A
+// stop that arrived meanwhile keeps its outcome, and a relaunch keeps its card.
 func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Runtime, relaunched bool) error {
 	compensateErr := s.releaseAllocationTunnel(auth, intent.ID, intent.Generation, intent.Tunnel)
 	stateErr := s.Store.withLock(func(store Store, current *state) error {

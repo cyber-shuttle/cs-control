@@ -22,9 +22,8 @@ var runtimeCredentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`/[^\s'\"]*\.cybershuttle/runtimes/rt-[a-f0-9]{12}(?:/[^\s'\"]*)?`),
 }
 
-// RuntimeLogLine is one sanitized, browser-safe line of runtime startup output.
-// The time is when the line was observed here, which is what an owner reading a
-// stalled allocation needs: how long ago it last said anything.
+// RuntimeLogLine is one sanitized, browser-safe line of runtime startup output,
+// timed when it was observed here: how long ago a stalled allocation last spoke.
 type RuntimeLogLine struct {
 	Stream string    `json:"stream"`
 	Text   string    `json:"text"`
@@ -37,10 +36,8 @@ type RuntimeLogTail struct {
 	Lines     []RuntimeLogLine `json:"lines"`
 }
 
-// runtimeLogBuffer keeps this process's own narration apart from the remote
-// tail. Narration accumulates; the remote tail is whatever the last read
-// returned, so it is replaced rather than merged and there is nothing to
-// reconcile between two copies of the same file.
+// runtimeLogBuffer keeps this process's own narration, which accumulates, apart
+// from the remote tail, which is replaced by whatever the last read returned.
 type runtimeLogBuffer struct {
 	statusBytes int
 	status      []RuntimeLogLine
@@ -51,8 +48,8 @@ func (b *runtimeLogBuffer) lines() []RuntimeLogLine {
 	return append(append([]RuntimeLogLine(nil), b.status...), b.remote...)
 }
 
-// RuntimeLogs is a focused, bounded process-local store for runtime startup
-// output. It is intentionally independent of persisted runtime state.
+// RuntimeLogs is a bounded process-local store for runtime startup output,
+// deliberately independent of persisted runtime state.
 type RuntimeLogs struct {
 	mu        sync.RWMutex
 	tails     map[string]*runtimeLogBuffer
@@ -71,8 +68,7 @@ func (l *RuntimeLogs) now() time.Time {
 	return time.Now().UTC()
 }
 
-// Forget drops a deleted runtime's tail so a reused process does not keep
-// output for an allocation the owner has removed.
+// Forget drops a deleted runtime's tail, which a reused process would keep.
 func (l *RuntimeLogs) Forget(runtimeID string) {
 	if l == nil {
 		return
@@ -83,9 +79,9 @@ func (l *RuntimeLogs) Forget(runtimeID string) {
 	delete(l.sensitive, runtimeID)
 }
 
-// Append sanitizes and appends one or more CR/LF-delimited lines of this
-// process's own narration. Repeating the current final line is a no-op so
-// periodic phase observations do not grow the tail or advance its revision.
+// Append sanitizes and appends CR/LF-delimited lines of this process's own
+// narration. Repeating the final line is a no-op, so a periodic phase
+// observation neither grows the tail nor advances its revision.
 func (l *RuntimeLogs) Append(runtimeID, text string) {
 	if l == nil || !idPattern.MatchString(runtimeID) {
 		return
@@ -114,9 +110,8 @@ func (l *RuntimeLogs) Append(runtimeID, text string) {
 	}
 }
 
-// MergeRemote replaces the stored remote tail with what the last read returned.
-// The remote script always returns the whole bounded tail, so there is nothing
-// to diff against the previous copy.
+// MergeRemote replaces the stored remote tail. The remote script always returns
+// the whole bounded tail, so there is nothing to diff against the previous copy.
 func (l *RuntimeLogs) MergeRemote(runtimeID, stdout, stderr string) {
 	if l == nil || !idPattern.MatchString(runtimeID) {
 		return
@@ -125,13 +120,9 @@ func (l *RuntimeLogs) MergeRemote(runtimeID, stdout, stderr string) {
 	sensitive := append([]string(nil), l.sensitive[runtimeID]...)
 	l.mu.RUnlock()
 	remote := make([]RuntimeLogLine, 0, maxRuntimeLogLines)
-	for _, stream := range []string{"stdout", "stderr"} {
-		text := stdout
-		if stream == "stderr" {
-			text = stderr
-		}
-		for _, line := range sanitizedRuntimeLogLines(text, sensitive) {
-			remote = append(remote, RuntimeLogLine{Stream: stream, Text: line})
+	for _, source := range []struct{ stream, text string }{{"stdout", stdout}, {"stderr", stderr}} {
+		for _, line := range sanitizedRuntimeLogLines(source.text, sensitive) {
+			remote = append(remote, RuntimeLogLine{Stream: source.stream, Text: line})
 		}
 	}
 	if len(remote) > maxRuntimeLogLines {
@@ -180,8 +171,7 @@ func (l *RuntimeLogs) Tail(runtimeID string) (RuntimeLogTail, bool) {
 }
 
 // ownedRuntimeTails returns the tail of each supplied runtime. Callers pass the
-// already owner-filtered set, so a tail can never travel to a principal that
-// does not own the runtime that produced it.
+// already owner-filtered set, so a tail never travels to a foreign principal.
 func (s Service) ownedRuntimeTails(owned []Runtime) []RuntimeLogTail {
 	tails := make([]RuntimeLogTail, 0, len(owned))
 	for _, runtime := range owned {
@@ -192,9 +182,8 @@ func (s Service) ownedRuntimeTails(owned []Runtime) []RuntimeLogTail {
 	return tails
 }
 
-// SetRuntimeSensitive replaces the exact values that must be removed from all
-// subsequently stored output for one runtime. Longer values are applied first
-// so nested paths collapse to one stable marker.
+// SetRuntimeSensitive replaces the exact values redacted from one runtime's
+// later output. Longer values apply first, so nested paths collapse to one marker.
 func (l *RuntimeLogs) SetRuntimeSensitive(runtimeID string, values ...string) {
 	if l == nil || !idPattern.MatchString(runtimeID) {
 		return
@@ -252,20 +241,18 @@ func redactRuntimeLogLine(value string, sensitive []string) string {
 var (
 	// A complete terminal control sequence in either encoding: CSI, the string
 	// controls with their ST or BEL terminators, and a plain escape. Each has a
-	// trailing alternative that consumes an unterminated one through the end of
-	// the stream rather than exposing its payload.
+	// trailing alternative consuming an unterminated one to end of stream.
 	terminalSequences = regexp.MustCompile(`(?s)(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b\[|\x9b).*` +
 		`|(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c)|(?:\x1b\]|\x9d).*` +
 		`|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c)|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f]).*` +
 		`|\x1b[ -/]*[0-~]|\x1b[ -/]*`)
-	// Everything else a terminal would act on. Line endings survive; they are
-	// what the tail is split on.
+	// Everything else a terminal would act on. Line endings survive: the tail
+	// is split on them.
 	terminalControls = regexp.MustCompile(`[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]`)
 )
 
-// stripRuntimeLogControls removes terminal control sequences for both 7-bit ESC
-// and C1 introducers. It never interprets terminal content: the whole stream is
-// stripped at once, so a string control cannot leak its payload by ending a line.
+// stripRuntimeLogControls strips both 7-bit ESC and C1 introducers over the whole
+// stream at once, so a string control cannot leak its payload by ending a line.
 func stripRuntimeLogControls(value string) string {
 	return terminalControls.ReplaceAllString(terminalSequences.ReplaceAllString(value, ""), "")
 }

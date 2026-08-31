@@ -40,8 +40,7 @@ type HTTPAPI struct {
 }
 
 // SSHAuthRoute serves the interactive SSH authentication WebSocket. The router
-// names the shape it needs so the runtime domain does not depend on the gateway
-// that supplies it.
+// names the shape it needs, so the runtime domain never imports the gateway.
 type SSHAuthRoute interface {
 	ServeWebSocket(writer http.ResponseWriter, request *http.Request, alias string)
 }
@@ -74,8 +73,8 @@ func NewHTTPHandler(service Service, auth SSHAuthRoute) *HTTPAPI {
 	return api
 }
 
-// Patterns carry no method, so a literal segment always outranks a wildcard one
-// and every method refusal lands in route.
+// Patterns carry no method, so a literal segment outranks a wildcard one and
+// every method refusal lands in route.
 func (a *HTTPAPI) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, handlers := range map[string]map[string]http.HandlerFunc{
@@ -105,8 +104,8 @@ func (a *HTTPAPI) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 
 func (a *HTTPAPI) Close() { a.Refresher.Close() }
 
-// answer adapts a route that produces a value or a refusal, so writing one or
-// the other exists once rather than in every handler.
+// answer adapts a route producing a value or a refusal, so writing one or the
+// other exists once rather than in every handler.
 func answer[T any](status int, produce func(*http.Request) (T, error)) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		value, err := produce(request)
@@ -147,8 +146,7 @@ func (a *HTTPAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
 	a.Auth.ServeWebSocket(writer, request, request.PathValue("alias"))
 }
 
-// Abandoning the request cancels this context, which terminates the remote
-// process group, so there is no cancellation protocol to speak.
+// Abandoning the request cancels this context and so the remote process group.
 func (a *HTTPAPI) discoverSlurm(request *http.Request) (Resource, error) {
 	return a.Service.Discover(request.Context(), request.PathValue("alias"))
 }
@@ -161,12 +159,10 @@ func (a *HTTPAPI) validateRuntime(request *http.Request) (*ValidationResult, err
 	return a.Service.Validate(request.Context(), create)
 }
 
-// Answers from persisted state and starts a reconciliation for the next poll to
-// collect, so a caller never waits on SSH. Tails are filtered to the same owned
-// set as the runtimes: a tail is as private as the runtime that produced it. The
-// browser polls this for as long as a job sits in a queue and every poll carries
-// every tail, so an unchanged body -- ETagged after filtering, and therefore
-// never matching across owners -- answers 304 instead.
+// listRuntimes answers from persisted state and starts a reconciliation for the
+// next poll to collect, so a caller never waits on SSH. Tails are filtered to the
+// same owned set as the runtimes, and the ETag is taken after that filtering, so
+// it never matches across owners; an unchanged body answers 304.
 func (a *HTTPAPI) listRuntimes(writer http.ResponseWriter, request *http.Request) {
 	body, err := a.ownedRuntimeList(request)
 	if err != nil {
@@ -249,8 +245,7 @@ func (a *HTTPAPI) deleteRuntime(request *http.Request) (RuntimeResponse, error) 
 	return a.runtimeAction(request, a.Service.Delete)
 }
 
-// Start, stop, and delete are the same route shape: name a runtime, act on it,
-// answer with what it became.
+// Start, stop and delete share one shape: name a runtime, act, answer.
 func (a *HTTPAPI) runtimeAction(request *http.Request, act func(context.Context, string) (*Runtime, error)) (RuntimeResponse, error) {
 	id, err := routedRuntimeID(request)
 	if err != nil {

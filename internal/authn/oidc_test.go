@@ -19,28 +19,45 @@ import (
 	"time"
 )
 
+// oidcServer answers OIDC discovery plus whatever routes the caller adds. The
+// URL is known only once the server exists, so metadata reads it back through
+// the closure.
+func oidcServer(t *testing.T, routes map[string]http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handler, ok := routes[r.URL.Path]; ok {
+			handler(w, r)
+			return
+		}
+		if r.URL.Path == "/.well-known/openid-configuration" {
+			writeTestJSON(t, w, map[string]string{"issuer": server.URL + "/issuer", "jwks_uri": server.URL + "/keys"})
+			return
+		}
+		t.Errorf("unexpected OIDC request %s", r.URL)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func jwksRoute(t *testing.T, kid string, public *rsa.PublicKey) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) { writeTestJSON(t, w, testJWKS(kid, public)) }
+}
+
 func TestMicrosoftOAuthValidatorAcceptsIndependentCapabilityAndIdentityBearers(t *testing.T) {
 	key := testRSAKey(t)
 	const kid = "identity-key"
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/userlimits":
-			// The opaque JWE is independently accepted as a Dev Tunnels
-			// capability; it has no locally asserted subject to bind to the ID token.
+	server := oidcServer(t, map[string]http.HandlerFunc{
+		"/keys": jwksRoute(t, kid, &key.PublicKey),
+		// The opaque JWE is independently accepted as a Dev Tunnels capability; it
+		// has no locally asserted subject to bind to the ID token.
+		"/userlimits": func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Authorization") != "Bearer protected.encrypted-key.iv.ciphertext.tag" {
-				t.Fatalf("access authorization = %q", r.Header.Get("Authorization"))
+				t.Errorf("access authorization = %q", r.Header.Get("Authorization"))
 			}
 			_, _ = w.Write([]byte(`[]`))
-		case "/.well-known/openid-configuration":
-			writeTestJSON(t, w, map[string]string{"issuer": server.URL + "/issuer", "jwks_uri": server.URL + "/keys"})
-		case "/keys":
-			writeTestJSON(t, w, testJWKS(kid, &key.PublicKey))
-		default:
-			t.Fatalf("unexpected OIDC request %s", r.URL)
-		}
-	}))
-	defer server.Close()
+		},
+	})
 
 	identity, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
 	if err != nil {
@@ -67,18 +84,7 @@ func TestOIDCValidatorRejectsInvalidIdentityTokensWithoutLeaks(t *testing.T) {
 	key := testRSAKey(t)
 	other := testRSAKey(t)
 	const kid = "identity-key"
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/.well-known/openid-configuration":
-			writeTestJSON(t, w, map[string]string{"issuer": server.URL + "/issuer", "jwks_uri": server.URL + "/keys"})
-		case "/keys":
-			writeTestJSON(t, w, testJWKS(kid, &key.PublicKey))
-		default:
-			t.Fatalf("unexpected request %s", r.URL)
-		}
-	}))
-	defer server.Close()
+	server := oidcServer(t, map[string]http.HandlerFunc{"/keys": jwksRoute(t, kid, &key.PublicKey)})
 	validator, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
 	if err != nil {
 		t.Fatal(err)
@@ -233,16 +239,11 @@ func TestOIDCValidatorRejectsWrongJWKAlgorithmAndEncryptionUse(t *testing.T) {
 			key := testRSAKey(t)
 			jwk := testJWK("rejected-key", &key.PublicKey)
 			test.mutate(jwk)
-			var server *httptest.Server
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/.well-known/openid-configuration":
-					writeTestJSON(t, w, map[string]string{"issuer": server.URL + "/issuer", "jwks_uri": server.URL + "/keys"})
-				case "/keys":
+			server := oidcServer(t, map[string]http.HandlerFunc{
+				"/keys": func(w http.ResponseWriter, _ *http.Request) {
 					writeTestJSON(t, w, map[string]any{"keys": []map[string]string{jwk}})
-				}
-			}))
-			defer server.Close()
+				},
+			})
 			validator, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
 			if err != nil {
 				t.Fatal(err)

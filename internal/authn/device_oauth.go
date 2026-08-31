@@ -289,8 +289,8 @@ func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, or
 	b.deliverTokens(w, handle, tokens.AccessToken, tokens.IDToken, tokens.ExpiresIn)
 }
 
-// pollOutcome is how one upstream token response ends: whether the broker entry
-// is discarded, how far its interval backs off, and what the browser is told. An
+// pollOutcome is how one upstream token response ends: whether the entry is
+// discarded, how far its interval backs off, and what the browser is told. An
 // empty code means the authorization is still pending.
 type pollOutcome struct {
 	remove   bool

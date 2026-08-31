@@ -5,6 +5,7 @@ package sshexec
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -32,8 +33,7 @@ const (
 	controlSocketHashBytes      = 10
 )
 
-// ControlTempRoot is replaced in tests that need a short, predictable control
-// directory.
+// ControlTempRoot is replaced in tests needing a short, predictable directory.
 var ControlTempRoot = os.TempDir
 
 // Runner executes commands on a remote host. Hosts supplies the alias lookup
@@ -45,12 +45,7 @@ type Runner struct {
 	Hosts      sshconfig.Config
 }
 
-func (r Runner) Bin() string {
-	if r.SSHBin != "" {
-		return r.SSHBin
-	}
-	return "ssh"
-}
+func (r Runner) Bin() string { return cmp.Or(r.SSHBin, "ssh") }
 
 func (r Runner) EffectiveTimeout() time.Duration {
 	if r.Timeout > 0 {
@@ -59,26 +54,21 @@ func (r Runner) EffectiveTimeout() time.Duration {
 	return 20 * time.Second
 }
 
-func (r Runner) sshBaseArgs(batchMode string) []string {
-	return []string{
+func (r Runner) sshArgs(alias string, interactive bool, identity string) ([]string, error) {
+	batchMode, persist := "yes", "600"
+	if interactive {
+		// ControlPersist takes master ownership away from the process that starts
+		// it: OpenSSH backgrounds the master on authentication and the foreground
+		// exits 0, which reads as an exit before readiness and leaves a master
+		// nothing can reap. Without it the foreground process is the master.
+		batchMode, persist = "no", "no"
+	}
+	args := []string{
 		"-o", "BatchMode=" + batchMode,
 		"-o", "ConnectTimeout=10",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 	}
-}
-
-func (r Runner) sshArgs(alias string, interactive bool, identity string) ([]string, error) {
-	batchMode, persist := "yes", "600"
-	if interactive {
-		// An interactive master is owned by the process that starts it, and
-		// ControlPersist takes that ownership away: OpenSSH backgrounds the
-		// master the moment it authenticates and the foreground exits 0, which
-		// reads as an exit before readiness and leaves a master nothing can
-		// reap. Without it the foreground process is the master.
-		batchMode, persist = "no", "no"
-	}
-	args := r.sshBaseArgs(batchMode)
 	if r.ControlDir != "" {
 		path, err := r.controlPath(alias, identity)
 		if err != nil {
@@ -128,8 +118,8 @@ func KillGroup(cmd *exec.Cmd, exited <-chan struct{}) {
 	<-exited
 }
 
-// Every entry point lands here, so argument quoting and output bounding exist in
-// exactly one place.
+// run is where every entry point lands, so argument quoting and output bounding
+// exist in exactly one place.
 func (r Runner) run(ctx context.Context, alias, identity string, stdin io.Reader, remoteArgs ...string) (string, string, error) {
 	if len(remoteArgs) == 0 {
 		return "", "", errors.New("remote command is required")
@@ -181,8 +171,6 @@ type Capture struct {
 	stderr    CaptureStream
 }
 
-// CaptureStream is one stream of a Capture: the sink a command writes through
-// and what it accumulated.
 type CaptureStream struct {
 	capture *Capture
 	buf     bytes.Buffer
@@ -224,12 +212,11 @@ func (r Runner) controlPath(alias, identity string) (string, error) {
 	if !sshconfig.ValidAlias(alias) {
 		return "", sshconfig.ErrInvalidAlias
 	}
-	// ControlDir is a stable namespace (normally the state directory), not the
-	// socket location. OpenSSH appends a temporary suffix while binding, and
-	// macOS has a particularly small AF_UNIX path limit.
+	// ControlDir names a stable namespace, not the socket location: OpenSSH
+	// appends a temporary suffix while binding and macOS caps AF_UNIX paths hard.
 	hash := sha256.Sum256([]byte(alias + "\x00" + identity + "\x00" + r.ControlDir + "\x00" + r.Bin()))
 	baseName := "m-" + hex.EncodeToString(hash[:controlSocketHashBytes])
-	directory, err := PrivateControlDirectory(baseName)
+	directory, err := privateControlDirectory(baseName)
 	if err != nil {
 		return "", err
 	}
@@ -240,7 +227,7 @@ func (r Runner) controlPath(alias, identity string) (string, error) {
 	return path, nil
 }
 
-func PrivateControlDirectory(baseName string) (string, error) {
+func privateControlDirectory(baseName string) (string, error) {
 	name := fmt.Sprintf("csctl-%d", os.Getuid())
 	roots := []string{ControlTempRoot()}
 	if filepath.Clean(roots[0]) != "/tmp" {
@@ -288,20 +275,20 @@ func AuthenticationRequired(alias string) error {
 	return apierr.New("ssh_authentication_required", "SSH authentication is required for "+alias, 409)
 }
 
+var authenticationMarkers = []string{
+	"permission denied", "host key verification failed", "no supported authentication methods",
+	"authentication failed", "keyboard-interactive", "too many authentication failures",
+}
+
 func AuthenticationFailure(message string) bool {
 	value := strings.ToLower(message)
-	for _, marker := range []string{"permission denied", "host key verification failed", "no supported authentication methods", "authentication failed", "keyboard-interactive", "too many authentication failures"} {
-		if strings.Contains(value, marker) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(authenticationMarkers, func(marker string) bool { return strings.Contains(value, marker) })
 }
 
 func (runner Runner) MasterHealthy(alias, path string) bool {
-	// ServeWebSocket polls this every 50 ms while a user authenticates, so the
-	// stat keeps a missing socket from forking ssh on every tick -- and keeps
-	// what ssh is pointed at a private socket this user owns.
+	// ServeWebSocket polls this every 50 ms while a user authenticates: the stat
+	// keeps a missing socket from forking ssh on every tick, and keeps what ssh is
+	// pointed at a private socket this user owns.
 	info, err := os.Lstat(path)
 	if err != nil {
 		return false
@@ -336,8 +323,7 @@ func (runner Runner) AcquireControlLock(ctx context.Context, alias, path string)
 			_ = lock.Close()
 			return nil, false, err
 		}
-		// Another process owns startup/lifecycle. Reuse its master once healthy,
-		// but never claim or terminate it.
+		// Another process owns this master: reuse it once healthy, never claim it.
 		if runner.MasterHealthy(alias, path) {
 			_ = lock.Close()
 			return nil, true, nil
@@ -384,8 +370,6 @@ func (r Runner) Identity(ctx context.Context, alias string) (string, error) {
 	cmd := exec.Command(r.Bin(), "-G", alias)
 	cmd.Env = ChildEnv()
 	captured := NewCapture()
-	// Effective configuration contains identity and socket paths. Buffer stdout
-	// for the connection fingerprint but expose only diagnostics from stderr.
 	cmd.Stdout, cmd.Stderr = captured.Stdout(), captured.Stderr()
 	if err := RunCommand(ctx, cmd); err != nil {
 		if ctx.Err() != nil {
@@ -427,9 +411,8 @@ func (r Runner) Run(ctx context.Context, alias string, stdin io.Reader, remoteAr
 	return stdout, ClassifyFailure(alias, stderr, err)
 }
 
-// RunOutput is Run for a caller that reads stderr or the exit status itself. It
-// returns the process error unclassified; ClassifyFailure turns it into the
-// refusal the browser sees.
+// RunOutput is Run for a caller that reads stderr or the exit status itself, and
+// returns the process error unclassified.
 func (r Runner) RunOutput(ctx context.Context, alias string, stdin io.Reader, remoteArgs ...string) (string, string, error) {
 	identity, err := r.Identity(ctx, alias)
 	if err != nil {
@@ -438,8 +421,8 @@ func (r Runner) RunOutput(ctx context.Context, alias string, stdin io.Reader, re
 	return r.run(ctx, alias, identity, stdin, remoteArgs...)
 }
 
-// How a subsystem that needs its own stdin or output sinks gets one without
-// assembling an ssh command line of its own.
+// Command is how a subsystem that needs its own stdin or output sinks gets one
+// without assembling an ssh command line.
 func (r Runner) Command(ctx context.Context, alias string, remote ...string) (*exec.Cmd, error) {
 	identity, err := r.Identity(ctx, alias)
 	if err != nil {
@@ -462,23 +445,18 @@ func RunBounded(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
 	return captured.Stdout().String(), captured.Stderr().String(), err
 }
 
-// utf8Locale is a request for UTF-8 character classification and no language,
-// which is what a service wants: it fixes what is legible without importing a
-// language's collation or message catalogue.
+// utf8Locale asks for UTF-8 character classification and no language, without a
+// locale's collation or message catalogue.
 const utf8Locale = "C.UTF-8"
 
 // ChildEnv is the environment every ssh cs-control starts runs in.
 //
-// OpenSSH passes text a remote host sends -- keyboard-interactive prompts,
-// banners, its own diagnostics about them -- through vis(3), which renders
-// anything the current locale calls unprintable as an octal escape. A service
-// inherits no locale at all: launchd and systemd both start one with an empty
-// environment. Under the C locale that results, every non-ASCII byte becomes
-// "\342\226\210", so a prompt drawn in UTF-8 block characters -- a QR code, a
-// box-drawn banner -- reaches the browser as unreadable octal text.
-//
-// Control characters stay escaped whatever the locale, so this changes what is
-// legible, not what is safe. A locale that already asks for UTF-8 is left alone.
+// OpenSSH renders remote text -- prompts, banners, its own diagnostics -- through
+// vis(3), which escapes whatever the current locale calls unprintable. A service
+// inherits no locale (launchd and systemd both start one with an empty
+// environment), so under the resulting C locale a QR code or box-drawn banner
+// reaches the browser as octal. Control characters stay escaped in any locale, so
+// this changes what is legible, not what is safe.
 func ChildEnv() []string {
 	environment := os.Environ()
 	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
@@ -486,10 +464,8 @@ func ChildEnv() []string {
 			return environment
 		}
 	}
-	// LC_ALL has to replace what is there, not sit after it: a duplicate name
-	// reaches execve twice, and glibc answers getenv with the first copy while
-	// macOS answers with the last. Appending alone therefore fixes this on a Mac
-	// and leaves it broken on the Linux hosts this actually runs on.
+	// LC_ALL must replace what is there, not sit after it: a duplicate reaches
+	// execve twice, and glibc reads the first copy where macOS reads the last.
 	kept := make([]string, 0, len(environment)+1)
 	for _, entry := range environment {
 		if !strings.HasPrefix(entry, "LC_ALL=") {
@@ -499,15 +475,13 @@ func ChildEnv() []string {
 	return append(kept, "LC_ALL="+utf8Locale)
 }
 
-// utf8Request reports whether a locale name asks for UTF-8 character
-// classification, which is all this needs from it.
 func utf8Request(value string) bool {
 	upper := strings.ToUpper(value)
 	return strings.Contains(upper, "UTF-8") || strings.Contains(upper, "UTF8")
 }
 
-// FailureMessage is what a failed remote command has to say for itself: its
-// stderr, or the process error when stderr said nothing.
+// FailureMessage is what a failed remote command says for itself: its stderr, or
+// the process error when stderr said nothing.
 func FailureMessage(stderr string, err error) string {
 	if message := strings.TrimSpace(stderr); message != "" {
 		return message

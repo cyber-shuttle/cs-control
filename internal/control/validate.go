@@ -11,6 +11,12 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 )
 
+// Every workspace refusal carries one code, so a client can act on the class of
+// failure while the message names the particular one.
+func invalidRootFolder(message string) error {
+	return apierr.New("invalid_root_folder", message, 400)
+}
+
 func validatePartitionResources(values []Partition, name string, resources Resources) error {
 	matches := make([]Partition, 0, 1)
 	for _, value := range values {
@@ -89,7 +95,7 @@ func validateCreate(request *CreateRequest) error {
 		return apierr.New("invalid_account", "invalid account", 400)
 	}
 	if !validWorkspaceExpression(request.RootFolder) {
-		return apierr.New("invalid_root_folder", "rootFolder must be a safe absolute, home-relative, or environment-relative POSIX path", 400)
+		return invalidRootFolder("rootFolder must be a safe absolute, home-relative, or environment-relative POSIX path")
 	}
 	if request.Resources.Cores < MinCores || request.Resources.Cores > 4096 {
 		return apierr.New("invalid_resources", "cores must be between 2 and 4096", 400)
@@ -146,7 +152,7 @@ func safeWorkspaceSuffix(value string) bool {
 
 func (s Service) resolveWorkspaceRoot(ctx context.Context, alias, home, expression string) (string, error) {
 	if !validWorkspaceExpression(expression) || !safeRemotePath(home) {
-		return "", apierr.New("invalid_root_folder", "workspace expression is invalid", 400)
+		return "", invalidRootFolder("workspace expression is invalid")
 	}
 	base, suffix := home, ""
 	switch {
@@ -165,11 +171,11 @@ func (s Service) resolveWorkspaceRoot(ctx context.Context, alias, home, expressi
 		if name != "HOME" {
 			output, err := s.Runner.Run(ctx, alias, nil, "printenv", name)
 			if err != nil {
-				return "", apierr.New("invalid_root_folder", "workspace environment variable "+name+" is unavailable", 400)
+				return "", invalidRootFolder("workspace environment variable " + name + " is unavailable")
 			}
 			base, err = oneRemotePath(output)
 			if err != nil {
-				return "", apierr.New("invalid_root_folder", "workspace environment variable "+name+" must contain one absolute safe path", 400)
+				return "", invalidRootFolder("workspace environment variable " + name + " must contain one absolute safe path")
 			}
 		}
 	default:
@@ -180,14 +186,14 @@ func (s Service) resolveWorkspaceRoot(ctx context.Context, alias, home, expressi
 		resolved = pathpkg.Join(base, suffix)
 	}
 	if !safeRemotePath(resolved) {
-		return "", apierr.New("invalid_root_folder", "workspace resolves to an unsafe path", 400)
+		return "", invalidRootFolder("workspace resolves to an unsafe path")
 	}
 	return resolved, nil
 }
 
 func validateWorkspacePrivateLayout(home, workspace, privateRoot, runtimeID, expression string) error {
 	if workspace == privateRoot || strings.HasPrefix(workspace, privateRoot+"/") {
-		return apierr.New("invalid_root_folder", "workspace resolves inside the private runtime directory", 400)
+		return invalidRootFolder("workspace resolves inside the private runtime directory")
 	}
 	if !strings.HasPrefix(privateRoot, workspace+"/") {
 		return nil
@@ -198,7 +204,7 @@ func validateWorkspacePrivateLayout(home, workspace, privateRoot, runtimeID, exp
 	if workspace == home && homeRootExpression(expression) && privateRoot == expected {
 		return nil
 	}
-	return apierr.New("invalid_root_folder", "workspace may contain private runtime state only at $HOME/.cybershuttle/runtimes/{runtimeId}", 400)
+	return invalidRootFolder("workspace may contain private runtime state only at $HOME/.cybershuttle/runtimes/{runtimeId}")
 }
 
 func oneRemotePath(output string) (string, error) {

@@ -13,23 +13,16 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
-// Two downloads is not a scheduler round trip, so this gets its own budget
-// rather than the SSH default.
+// Two downloads is not a scheduler round trip, so it gets its own budget.
 const provisionTimeout = 5 * time.Minute
 
-// The interpreter the managed Jupyter environment is built on. Jupyter Server
-// requires 3.10 or newer, and uv supplies the version rather than the host.
+// Jupyter Server requires 3.10 or newer, and uv supplies it rather than the host.
 const provisionPythonVersion = "3.12"
 
-// provisionScript is intentionally constant: the paths and the workflow document
+// provisionScript is deliberately constant: paths and the workflow document
 // arrive as arguments, so nothing derived from a request is written into the
-// remote shell program.
-//
-// It installs the two binaries an allocation needs before it can run --
-// Linkspan, which the job execs, and uv, which the workflow builds the
-// environment with -- writes the workflow that allocation will run, and reports
-// each outcome as one line the caller turns into runtime status. Present and
-// working is left alone; absent or broken is replaced.
+// remote shell program. It installs Linkspan and uv, writes the workflow, and
+// reports each outcome as one line. Present and working is left alone.
 const provisionScript = `set -u
 LC_ALL=C
 LANG=C
@@ -135,20 +128,17 @@ var provisionFailures = map[string]string{
 }
 
 // provisionRuntime gives a host the two binaries an allocation needs and the
-// workflow that allocation will run, in one round trip, before the runtime is
-// submitted to it. What is already there is left untouched. The runtime is the
-// durable one: its workflow names the ports this generation was given.
+// workflow it will run, in one round trip before submission, leaving whatever is
+// already there untouched.
 func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Runtime, home, linkspan string) error {
-	// One preparation per host at a time. A second caller is told to come back
-	// rather than made to wait behind an install it cannot see, and never runs
-	// a second uv against the environment the first one is building.
+	// One preparation per host: a second caller is told to come back rather than
+	// run a second uv against the environment the first is building.
 	if _, busy := hostPreparations.LoadOrStore(alias, true); busy {
 		return apierr.New("runtime_provisioning_in_progress",
 			"The runtime environment on "+alias+" is still being prepared. Try again in a moment.", http.StatusConflict)
 	}
 	defer hostPreparations.Delete(alias)
-	// Installing an environment is the host's business, not this request's: a
-	// caller that goes away must not leave a half-built one behind.
+	// A caller that goes away must not leave a half-built environment behind.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionTimeout)
 	defer cancel()
 	s.runtimeStatus(runtime.ID, "Preparing the runtime environment")
@@ -186,8 +176,7 @@ func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Run
 	return nil
 }
 
-// hostPreparations is process-wide because "is this host being prepared" is a
-// fact about the host, not about any one request.
+// Process-wide: being prepared is a fact about the host, not about a request.
 var hostPreparations sync.Map
 
 func provisionOutcome(output string) map[string]string {
