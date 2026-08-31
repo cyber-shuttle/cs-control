@@ -20,29 +20,25 @@ import (
 )
 
 const (
-	DevTunnelsNativeClientID   = "c0df98ca-23b4-4bce-bb9f-72039b28d3a5"
-	devTunnelsDeviceScope      = "openid profile offline_access 46da2f7e-b5ef-422a-88d4-2a7f9de6a0b2/.default"
-	deviceGrantType            = "urn:ietf:params:oauth:grant-type:device_code"
-	maxDeviceBrokerEntries     = 256
-	maxDeviceResponse          = 64 << 10
-	deviceRequestTimeout       = 15 * time.Second
-	deviceResponseWriteTimeout = 5 * time.Second
-	deviceStartInterval        = time.Second
-	maxDevicePollInterval      = 60 * time.Second
+	DevTunnelsNativeClientID = "c0df98ca-23b4-4bce-bb9f-72039b28d3a5"
+	devTunnelsDeviceScope    = "openid profile offline_access 46da2f7e-b5ef-422a-88d4-2a7f9de6a0b2/.default"
+	deviceGrantType          = "urn:ietf:params:oauth:grant-type:device_code"
+	maxDeviceBrokerEntries   = 256
+	maxDeviceResponse        = 64 << 10
+	deviceRequestTimeout     = 15 * time.Second
+	deviceStartInterval      = time.Second
+	maxDevicePollInterval    = 60 * time.Second
 )
 
 var deviceHandlePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
 type deviceBrokerEntry struct {
-	deviceCode     []byte
-	accessToken    []byte
-	idToken        []byte
-	origin         string
-	expiresAt      time.Time
-	tokenExpiresAt time.Time
-	interval       time.Duration
-	nextPoll       time.Time
-	inFlight       bool
+	deviceCode []byte
+	origin     string
+	expiresAt  time.Time
+	interval   time.Duration
+	nextPoll   time.Time
+	inFlight   bool
 }
 
 type DeviceCodeBroker struct {
@@ -54,13 +50,8 @@ type DeviceCodeBroker struct {
 	origins         map[string]struct{}
 	client          *http.Client
 	now             func() time.Time
-	random          io.Reader
-	writeTimeout    time.Duration
 	ctx             context.Context
 	cancel          context.CancelFunc
-	closed          bool
-	active          sync.WaitGroup
-	closeOnce       sync.Once
 }
 
 type deviceStartResponse struct {
@@ -81,10 +72,11 @@ type devicePollResponse struct {
 
 // Microsoft endpoints are derived only from a pinned, tenant-specific authority.
 func NewDeviceCodeBroker(authority string, allowedOrigins []string, client *http.Client) (*DeviceCodeBroker, error) {
-	base, err := parseDeviceAuthority(authority)
+	base, tenant, err := parseTenantAuthority(authority)
 	if err != nil {
 		return nil, err
 	}
+	base.Path = "/" + tenant + "/"
 	origins, err := validatedOriginSet(allowedOrigins)
 	if err != nil {
 		return nil, err
@@ -100,23 +92,11 @@ func NewDeviceCodeBroker(authority string, allowedOrigins []string, client *http
 		origins:         origins,
 		client:          bounded,
 		now:             time.Now,
-		random:          rand.Reader,
-		writeTimeout:    deviceResponseWriteTimeout,
 		ctx:             ctx,
 		cancel:          cancel,
 	}
-	broker.active.Add(1)
 	go broker.cleanupLoop()
 	return broker, nil
-}
-
-func parseDeviceAuthority(raw string) (*url.URL, error) {
-	parsed, tenant, err := parseTenantAuthority(raw)
-	if err != nil {
-		return nil, err
-	}
-	parsed.Path = "/" + tenant + "/"
-	return parsed, nil
 }
 
 // Only the two broker routes sit before the OAuth boundary; every other request
@@ -135,60 +115,39 @@ func NewDeviceCodeRoutes(next http.Handler, broker *DeviceCodeBroker) (http.Hand
 	}), nil
 }
 
-// enterLocked takes the broker lock and keeps it, or answers the request and
-// reports false. It is how every entry point refuses work started after Close.
-func (b *DeviceCodeBroker) enterLocked(w http.ResponseWriter) bool {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		b.writeClosed(w)
-		return false
-	}
-	return true
+func writeDeviceError(w http.ResponseWriter, status int, code, message string) {
+	httpx.WriteError(w, apierr.New(code, message, status))
 }
 
+// ponytail: a body on a bodyless route is ignored, not refused; revisit only if
+// a body ever gains meaning here.
 func (b *DeviceCodeBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !b.enterLocked(w) {
-		return
-	}
-	b.active.Add(1)
-	b.mu.Unlock()
-	defer b.active.Done()
-
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		b.writeError(w, http.StatusForbidden, "origin_required", "browser origin is required")
+		writeDeviceError(w, http.StatusForbidden, "origin_required", "browser origin is required")
 		return
 	}
 	if !allowOrigin(w, origin, b.origins) {
-		b.writeError(w, http.StatusForbidden, "origin_not_allowed", "origin is not allowed")
+		writeDeviceError(w, http.StatusForbidden, "origin_not_allowed", "origin is not allowed")
 		return
 	}
 	if r.Method == http.MethodOptions {
 		if r.Header.Get("Access-Control-Request-Method") != http.MethodPost || !preflightHeadersAllowed(r.Header.Get("Access-Control-Request-Headers"), "content-type") {
-			b.writeError(w, http.StatusForbidden, "preflight_not_allowed", "preflight is not allowed")
+			writeDeviceError(w, http.StatusForbidden, "preflight_not_allowed", "preflight is not allowed")
 			return
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		_ = b.writeDeviceJSON(w, http.StatusNoContent, nil)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if r.Method != http.MethodPost {
-		b.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
-		return
-	}
-	// These routes take no body, but the declared length cannot be the test:
-	// cs-control only ever listens on loopback, so every real request arrives
-	// through a proxy, and one that re-frames a bodyless POST as chunked leaves
-	// the length unknown -- which Go reports as -1, not 0. Ask what actually
-	// arrived instead.
-	if !emptyRequestBody(r) {
-		b.writeError(w, http.StatusBadRequest, "invalid_request", "request body must be empty")
+		writeDeviceError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	if r.URL.RawQuery != "" || r.URL.EscapedPath() != r.URL.Path {
-		b.writeError(w, http.StatusNotFound, "not_found", "route not found")
+		writeDeviceError(w, http.StatusNotFound, "not_found", "route not found")
 		return
 	}
 	switch {
@@ -197,29 +156,27 @@ func (b *DeviceCodeBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/api/v1/oauth/device/poll/"):
 		handle := strings.TrimPrefix(r.URL.Path, "/api/v1/oauth/device/poll/")
 		if !deviceHandlePattern.MatchString(handle) {
-			b.writeError(w, http.StatusNotFound, "not_found", "authorization was not found")
+			writeDeviceError(w, http.StatusNotFound, "not_found", "authorization was not found")
 			return
 		}
 		b.handlePoll(w, r, origin, handle)
 	default:
-		b.writeError(w, http.StatusNotFound, "not_found", "route not found")
+		writeDeviceError(w, http.StatusNotFound, "not_found", "route not found")
 	}
 }
 
 func (b *DeviceCodeBroker) handleStart(w http.ResponseWriter, r *http.Request, origin string) {
 	now := b.now()
-	if !b.enterLocked(w) {
-		return
-	}
+	b.mu.Lock()
 	b.cleanupLocked(now)
 	if now.Before(b.nextOriginStart[origin]) {
 		b.mu.Unlock()
-		b.writeError(w, http.StatusTooManyRequests, "rate_limited", "request rate exceeded")
+		writeDeviceError(w, http.StatusTooManyRequests, "rate_limited", "request rate exceeded")
 		return
 	}
 	if len(b.entries) >= maxDeviceBrokerEntries {
 		b.mu.Unlock()
-		b.writeError(w, http.StatusServiceUnavailable, "broker_capacity", "authorization service is busy")
+		writeDeviceError(w, http.StatusServiceUnavailable, "broker_capacity", "authorization service is busy")
 		return
 	}
 	b.nextOriginStart[origin] = now.Add(deviceStartInterval)
@@ -228,11 +185,7 @@ func (b *DeviceCodeBroker) handleStart(w http.ResponseWriter, r *http.Request, o
 	form := url.Values{"client_id": {DevTunnelsNativeClientID}, "scope": {devTunnelsDeviceScope}}
 	value, status, err := b.postForm(r.Context(), b.deviceEndpoint, form, deviceRequestTimeout)
 	if err != nil || status < 200 || status >= 300 {
-		if b.isClosed() {
-			b.writeClosed(w)
-		} else {
-			b.writeError(w, http.StatusBadGateway, "upstream_unavailable", "authorization service is unavailable")
-		}
+		writeDeviceError(w, http.StatusBadGateway, "upstream_unavailable", "authorization service is unavailable")
 		return
 	}
 	var result struct {
@@ -243,39 +196,29 @@ func (b *DeviceCodeBroker) handleStart(w http.ResponseWriter, r *http.Request, o
 		Interval        int64  `json:"interval"`
 	}
 	if json.Unmarshal(value, &result) != nil || !validDeviceAuthorization(result.DeviceCode, result.UserCode, result.VerificationURI, result.ExpiresIn, result.Interval) {
-		b.writeError(w, http.StatusBadGateway, "upstream_invalid", "authorization service returned an invalid response")
+		writeDeviceError(w, http.StatusBadGateway, "upstream_invalid", "authorization service returned an invalid response")
 		return
 	}
 	if result.Interval == 0 {
 		result.Interval = 5
 	}
-	handle, err := b.newHandle()
+	handle, err := newDeviceHandle()
 	if err != nil {
-		b.writeError(w, http.StatusInternalServerError, "broker_unavailable", "authorization service is unavailable")
+		writeDeviceError(w, http.StatusInternalServerError, "broker_unavailable", "authorization service is unavailable")
 		return
 	}
 	now = b.now()
 	entry := &deviceBrokerEntry{deviceCode: []byte(result.DeviceCode), origin: origin, expiresAt: now.Add(time.Duration(result.ExpiresIn) * time.Second), interval: time.Duration(result.Interval) * time.Second, nextPoll: now.Add(time.Duration(result.Interval) * time.Second)}
 	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		clear(entry.deviceCode)
-		b.writeClosed(w)
-		return
-	}
 	if len(b.entries) >= maxDeviceBrokerEntries {
 		b.mu.Unlock()
 		clear(entry.deviceCode)
-		b.writeError(w, http.StatusServiceUnavailable, "broker_capacity", "authorization service is busy")
+		writeDeviceError(w, http.StatusServiceUnavailable, "broker_capacity", "authorization service is busy")
 		return
 	}
 	b.entries[handle] = entry
 	b.mu.Unlock()
-	if err := b.writeDeviceJSON(w, http.StatusOK, deviceStartResponse{Handle: handle, UserCode: result.UserCode, VerificationURI: result.VerificationURI, ExpiresInSeconds: result.ExpiresIn, IntervalSeconds: result.Interval}); err != nil {
-		b.mu.Lock()
-		b.deleteLocked(handle)
-		b.mu.Unlock()
-	}
+	httpx.WriteJSON(w, http.StatusOK, deviceStartResponse{Handle: handle, UserCode: result.UserCode, VerificationURI: result.VerificationURI, ExpiresInSeconds: result.ExpiresIn, IntervalSeconds: result.Interval})
 }
 
 func validDeviceAuthorization(deviceCode, userCode, verificationURI string, expiresIn, interval int64) bool {
@@ -288,19 +231,17 @@ func validDeviceAuthorization(deviceCode, userCode, verificationURI string, expi
 
 func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, origin, handle string) {
 	now := b.now()
-	if !b.enterLocked(w) {
-		return
-	}
+	b.mu.Lock()
 	entry, ok := b.entries[handle]
 	if !ok || entry.origin != origin {
 		b.mu.Unlock()
-		b.writeError(w, http.StatusNotFound, "not_found", "authorization was not found")
+		writeDeviceError(w, http.StatusNotFound, "not_found", "authorization was not found")
 		return
 	}
-	if !now.Before(entry.expiresAt) || len(entry.accessToken) != 0 && !now.Before(entry.tokenExpiresAt) {
+	if !now.Before(entry.expiresAt) {
 		b.deleteLocked(handle)
 		b.mu.Unlock()
-		b.writeError(w, http.StatusGone, "authorization_expired", "authorization expired")
+		writeDeviceError(w, http.StatusGone, "authorization_expired", "authorization expired")
 		return
 	}
 	if entry.inFlight || now.Before(entry.nextPoll) {
@@ -310,27 +251,16 @@ func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, or
 		}
 		w.Header().Set("Retry-After", strconv.FormatInt(int64((retry+time.Second-1)/time.Second), 10))
 		b.mu.Unlock()
-		b.writeError(w, http.StatusTooManyRequests, "rate_limited", "polling too quickly")
+		writeDeviceError(w, http.StatusTooManyRequests, "rate_limited", "polling too quickly")
 		return
 	}
 	entry.inFlight = true
 	entry.nextPoll = now.Add(entry.interval)
 	deviceCode := string(entry.deviceCode)
-	expiresAt := entry.expiresAt
-	accessToken := string(entry.accessToken)
-	idToken := string(entry.idToken)
-	tokenExpiresIn := int64((entry.tokenExpiresAt.Sub(now) + time.Second - 1) / time.Second)
+	remaining := entry.expiresAt.Sub(now)
 	b.mu.Unlock()
 
-	if accessToken != "" && idToken != "" {
-		deviceCode = ""
-		b.deliverTokens(w, handle, accessToken, idToken, tokenExpiresIn)
-		return
-	}
-
-	remaining := expiresAt.Sub(now)
 	value, status, err := b.postForm(r.Context(), b.tokenEndpoint, url.Values{"grant_type": {deviceGrantType}, "client_id": {DevTunnelsNativeClientID}, "device_code": {deviceCode}}, remaining)
-	deviceCode = ""
 	if err != nil {
 		b.settle(w, handle, pollOutcome{status: http.StatusBadGateway, code: "upstream_unavailable", message: "authorization service is unavailable"})
 		return
@@ -356,15 +286,7 @@ func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, or
 		b.settle(w, handle, pollOutcome{remove: true, status: http.StatusBadGateway, code: "upstream_invalid", message: "authorization service returned an invalid response"})
 		return
 	}
-	if !b.storeTokens(handle, tokens.AccessToken, tokens.IDToken, tokens.ExpiresIn) {
-		tokens.AccessToken = ""
-		tokens.IDToken = ""
-		b.writeClosed(w)
-		return
-	}
 	b.deliverTokens(w, handle, tokens.AccessToken, tokens.IDToken, tokens.ExpiresIn)
-	tokens.AccessToken = ""
-	tokens.IDToken = ""
 }
 
 // pollOutcome is how one upstream token response ends: whether the broker entry
@@ -388,18 +310,14 @@ var devicePollOutcomes = map[string]pollOutcome{
 }
 
 // settle applies one outcome to the entry and writes the single response it
-// implies, so every poll result reaches the browser through one path and a
-// broker that closed mid-poll is reported the same way everywhere.
+// implies, so every poll result reaches the browser through one path.
 func (b *DeviceCodeBroker) settle(w http.ResponseWriter, handle string, outcome pollOutcome) {
-	interval, open := b.finishPoll(handle, outcome.remove, outcome.slowDown)
-	switch {
-	case !open:
-		b.writeClosed(w)
-	case outcome.code == "":
-		_ = b.writeDeviceJSON(w, http.StatusAccepted, devicePollResponse{Status: "pending", IntervalSeconds: int64(interval / time.Second)})
-	default:
-		b.writeError(w, outcome.status, outcome.code, outcome.message)
+	interval := b.finishPoll(handle, outcome.remove, outcome.slowDown)
+	if outcome.code == "" {
+		httpx.WriteJSON(w, http.StatusAccepted, devicePollResponse{Status: "pending", IntervalSeconds: int64(interval / time.Second)})
+		return
 	}
+	writeDeviceError(w, outcome.status, outcome.code, outcome.message)
 }
 
 func (b *DeviceCodeBroker) postForm(parent context.Context, endpoint string, form url.Values, maximum time.Duration) ([]byte, int, error) {
@@ -410,11 +328,7 @@ func (b *DeviceCodeBroker) postForm(parent context.Context, endpoint string, for
 		maximum = deviceRequestTimeout
 	}
 	ctx, cancel := context.WithTimeout(parent, maximum)
-	stopBrokerCancel := context.AfterFunc(b.ctx, cancel)
-	defer func() {
-		stopBrokerCancel()
-		cancel()
-	}()
+	defer cancel()
 	request, err := httpx.NewRequest(ctx, http.MethodPost, endpoint, "", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, 0, err
@@ -423,73 +337,41 @@ func (b *DeviceCodeBroker) postForm(parent context.Context, endpoint string, for
 	return httpx.Do(b.client, request, maxDeviceResponse)
 }
 
-func (b *DeviceCodeBroker) newHandle() (string, error) {
-	for range 4 {
-		bytes := make([]byte, 32)
-		if _, err := io.ReadFull(b.random, bytes); err != nil {
-			clear(bytes)
-			return "", err
-		}
-		handle := base64.RawURLEncoding.EncodeToString(bytes)
-		clear(bytes)
-		b.mu.Lock()
-		_, exists := b.entries[handle]
-		b.mu.Unlock()
-		if !exists {
-			return handle, nil
-		}
+func newDeviceHandle() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, bytes); err != nil {
+		return "", err
 	}
-	return "", errors.New("generate unique device authorization handle")
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
-func (b *DeviceCodeBroker) storeTokens(handle, accessToken, idToken string, expiresIn int64) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	entry := b.entries[handle]
-	if b.closed || entry == nil {
-		return false
-	}
-	entry.accessToken = []byte(accessToken)
-	entry.idToken = []byte(idToken)
-	entry.tokenExpiresAt = b.now().Add(time.Duration(expiresIn) * time.Second)
-	return true
-}
-
+// ponytail: a failed loopback response write loses the tokens and the user signs
+// in again; revisit (store-and-redeliver) if that is ever observed.
 func (b *DeviceCodeBroker) deliverTokens(w http.ResponseWriter, handle, accessToken, idToken string, expiresIn int64) {
-	err := b.writeDeviceJSON(w, http.StatusOK, devicePollResponse{Status: "complete", AccessToken: accessToken, IDToken: idToken, ExpiresInSeconds: expiresIn})
-	accessToken = ""
-	idToken = ""
-	b.finishPoll(handle, err == nil, 0)
+	httpx.WriteJSON(w, http.StatusOK, devicePollResponse{Status: "complete", AccessToken: accessToken, IDToken: idToken, ExpiresInSeconds: expiresIn})
+	b.finishPoll(handle, true, 0)
 }
 
-func (b *DeviceCodeBroker) finishPoll(handle string, remove bool, slowDown time.Duration) (time.Duration, bool) {
+func (b *DeviceCodeBroker) finishPoll(handle string, remove bool, slowDown time.Duration) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closed {
-		if remove {
-			b.deleteLocked(handle)
-		}
-		return 0, false
-	}
 	entry := b.entries[handle]
 	if entry == nil {
-		return 0, true
+		return 0
 	}
 	if remove {
 		b.deleteLocked(handle)
-		return 0, true
+		return 0
 	}
 	entry.inFlight = false
 	entry.interval = min(entry.interval+slowDown, maxDevicePollInterval)
 	entry.nextPoll = b.now().Add(entry.interval)
-	return entry.interval, true
+	return entry.interval
 }
 
 func (b *DeviceCodeBroker) deleteLocked(handle string) {
 	if entry := b.entries[handle]; entry != nil {
 		clear(entry.deviceCode)
-		clear(entry.accessToken)
-		clear(entry.idToken)
 		delete(b.entries, handle)
 	}
 }
@@ -510,7 +392,6 @@ func (b *DeviceCodeBroker) cleanupLocked(now time.Time) {
 func (b *DeviceCodeBroker) cleanupLoop() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
-	defer b.active.Done()
 	for {
 		select {
 		case <-ticker.C:
@@ -524,69 +405,11 @@ func (b *DeviceCodeBroker) cleanupLoop() {
 }
 
 func (b *DeviceCodeBroker) Close() {
-	b.closeOnce.Do(func() {
-		b.mu.Lock()
-		b.closed = true
-		b.cancel()
-		b.mu.Unlock()
-
-		b.active.Wait()
-
-		b.mu.Lock()
-		for handle := range b.entries {
-			b.deleteLocked(handle)
-		}
-		clear(b.nextOriginStart)
-		b.mu.Unlock()
-	})
-}
-
-func (b *DeviceCodeBroker) isClosed() bool {
+	b.cancel()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.closed
-}
-
-func (b *DeviceCodeBroker) writeDeviceJSON(w http.ResponseWriter, status int, value any) error {
-	controller := http.NewResponseController(w)
-	if err := controller.SetWriteDeadline(time.Now().Add(b.writeTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		return err
+	for handle := range b.entries {
+		b.deleteLocked(handle)
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	if value != nil {
-		w.Header().Set("Content-Type", "application/json")
-	}
-	w.WriteHeader(status)
-	if value != nil {
-		if err := json.NewEncoder(w).Encode(value); err != nil {
-			return err
-		}
-	}
-	if err := controller.Flush(); err != nil {
-		return err
-	}
-	_ = controller.SetWriteDeadline(time.Time{})
-	return nil
-}
-
-func (b *DeviceCodeBroker) writeError(w http.ResponseWriter, status int, code, message string) {
-	_ = b.writeDeviceJSON(w, status, apierr.Envelope{Error: apierr.For(apierr.New(code, message, status))})
-}
-
-func (b *DeviceCodeBroker) writeClosed(w http.ResponseWriter) {
-	b.writeError(w, http.StatusServiceUnavailable, "broker_closed", "authorization service is unavailable")
-}
-
-// emptyRequestBody reports whether the request carries no body at all, however
-// its length was framed.
-func emptyRequestBody(r *http.Request) bool {
-	if r.ContentLength > 0 {
-		return false
-	}
-	if r.Body == nil {
-		return true
-	}
-	var probe [1]byte
-	n, _ := io.ReadFull(r.Body, probe[:])
-	return n == 0
+	clear(b.nextOriginStart)
 }

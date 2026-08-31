@@ -23,8 +23,6 @@ const (
 	maxOIDCResponse        = 256 << 10
 	oidcCacheTTL           = 5 * time.Minute
 	oidcUnknownKIDCooldown = 30 * time.Second
-	oidcNegativeKIDTTL     = 5 * time.Minute
-	maxOIDCNegativeKIDs    = 256
 )
 
 // MicrosoftOAuthValidator validates two independent bearers: the Dev Tunnels
@@ -42,21 +40,6 @@ func NewMicrosoftOAuthValidator(devTunnelBaseURL, authority, clientID string, cl
 		return nil, err
 	}
 	identity, err := NewOIDCValidator(authority, clientID, client)
-	if err != nil {
-		return nil, err
-	}
-	return &MicrosoftOAuthValidator{access: access, identity: identity}, nil
-}
-
-// newMicrosoftOAuthValidator is the httptest seam. Production callers must use
-// NewMicrosoftOAuthValidator so neither credential can be sent to an
-// unrecognized authority.
-func newMicrosoftOAuthValidator(devTunnelBaseURL, authority, clientID string, client *http.Client) (*MicrosoftOAuthValidator, error) {
-	access, err := newDevTunnelOAuthValidator(devTunnelBaseURL, client)
-	if err != nil {
-		return nil, err
-	}
-	identity, err := newOIDCValidator(authority, clientID, client)
 	if err != nil {
 		return nil, err
 	}
@@ -90,10 +73,9 @@ type oidcKeySet struct {
 }
 
 type cachedOIDCKeys struct {
-	metadata   oidcMetadata
-	keys       map[string]*rsa.PublicKey
-	expires    time.Time
-	generation uint64
+	metadata oidcMetadata
+	keys     map[string]*rsa.PublicKey
+	expires  time.Time
 }
 
 type oidcRefreshCall struct {
@@ -113,23 +95,15 @@ type OIDCValidator struct {
 	cache              cachedOIDCKeys
 	refresh            *oidcRefreshCall
 	nextUnknownRefresh time.Time
-	negativeKIDs       map[string]time.Time
 }
 
 func NewOIDCValidator(authority, clientID string, client *http.Client) (*OIDCValidator, error) {
-	parsed, err := parseProductionOIDCAuthority(authority)
+	parsed, tenant, err := parseTenantAuthority(authority)
 	if err != nil {
 		return nil, err
 	}
+	parsed.Path = "/" + tenant + "/v2.0"
 	return makeOIDCValidator(parsed, clientID, client, true)
-}
-
-func newOIDCValidator(authority, clientID string, client *http.Client) (*OIDCValidator, error) {
-	parsed, err := httpx.ParseBaseURL(authority, "OAuth authority")
-	if err != nil {
-		return nil, err
-	}
-	return makeOIDCValidator(parsed, clientID, client, false)
 }
 
 func makeOIDCValidator(authority *url.URL, clientID string, client *http.Client, production bool) (*OIDCValidator, error) {
@@ -138,16 +112,7 @@ func makeOIDCValidator(authority *url.URL, clientID string, client *http.Client,
 	}
 	bounded := httpx.BoundedClient(client, defaultOAuthTimeout)
 	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &OIDCValidator{authority: authority, clientID: clientID, client: bounded, production: production, now: time.Now, negativeKIDs: make(map[string]time.Time)}, nil
-}
-
-func parseProductionOIDCAuthority(raw string) (*url.URL, error) {
-	parsed, tenant, err := parseTenantAuthority(raw)
-	if err != nil {
-		return nil, err
-	}
-	parsed.Path = "/" + tenant + "/v2.0"
-	return parsed, nil
+	return &OIDCValidator{authority: authority, clientID: clientID, client: bounded, production: production, now: time.Now}, nil
 }
 
 func (v *OIDCValidator) Validate(ctx context.Context, token string) (Principal, error) {
@@ -161,7 +126,7 @@ func (v *OIDCValidator) Validate(ctx context.Context, token string) (Principal, 
 	}
 	key := cache.keys[header.Kid]
 	if key == nil {
-		cache, err = v.refreshUnknownKID(ctx, header.Kid, cache.generation)
+		cache, err = v.refreshUnknownKID(ctx, header.Kid)
 		if err != nil {
 			return Principal{}, err
 		}
@@ -269,57 +234,32 @@ func (v *OIDCValidator) loadKeys(ctx context.Context) (cachedOIDCKeys, error) {
 	return v.cache, nil
 }
 
-func (v *OIDCValidator) refreshUnknownKID(ctx context.Context, kid string, observedGeneration uint64) (cachedOIDCKeys, error) {
+// The single global cooldown is the whole bound on unknown-kid refreshes: the
+// first unknown kid triggers one refresh, every other kid inside the window is
+// answered from the cached set.
+func (v *OIDCValidator) refreshUnknownKID(ctx context.Context, kid string) (cachedOIDCKeys, error) {
 	v.mu.Lock()
 	now := v.now()
-	if v.cache.keys[kid] != nil {
+	if v.cache.keys[kid] != nil || v.refresh == nil && now.Before(v.nextUnknownRefresh) {
 		cache := v.cache
 		v.mu.Unlock()
 		return cache, nil
 	}
-	if v.cache.generation != observedGeneration {
-		v.rememberUnknownKIDLocked(kid, now)
-		cache := v.cache
-		v.mu.Unlock()
-		return cache, nil
+	call, start := v.refreshCallLocked()
+	if start {
+		v.nextUnknownRefresh = now.Add(oidcUnknownKIDCooldown)
 	}
-	if expires, ok := v.negativeKIDs[kid]; ok && now.Before(expires) {
-		cache := v.cache
-		v.mu.Unlock()
-		return cache, nil
-	}
-	if v.refresh != nil {
-		call := v.refresh
-		v.mu.Unlock()
-		if err := waitOIDCRefresh(ctx, call); err != nil {
-			return cachedOIDCKeys{}, err
-		}
-		return v.cacheAfterUnknownRefresh(kid, call)
-	}
-	if now.Before(v.nextUnknownRefresh) {
-		v.rememberUnknownKIDLocked(kid, now)
-		cache := v.cache
-		v.mu.Unlock()
-		return cache, nil
-	}
-	call, _ := v.refreshCallLocked()
-	v.nextUnknownRefresh = now.Add(oidcUnknownKIDCooldown)
 	v.mu.Unlock()
-	go v.runRefresh(call)
+	if start {
+		go v.runRefresh(call)
+	}
 	if err := waitOIDCRefresh(ctx, call); err != nil {
 		return cachedOIDCKeys{}, err
 	}
-	return v.cacheAfterUnknownRefresh(kid, call)
-}
-
-func (v *OIDCValidator) cacheAfterUnknownRefresh(kid string, call *oidcRefreshCall) (cachedOIDCKeys, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if call.err != nil {
 		return cachedOIDCKeys{}, call.err
-	}
-	if v.cache.keys[kid] == nil {
-		v.rememberUnknownKIDLocked(kid, v.now())
 	}
 	return v.cache, nil
 }
@@ -341,15 +281,7 @@ func (v *OIDCValidator) runRefresh(call *oidcRefreshCall) {
 	}
 	v.mu.Lock()
 	if err == nil {
-		v.cache = cachedOIDCKeys{
-			metadata:   metadata,
-			keys:       keys,
-			expires:    v.now().Add(oidcCacheTTL),
-			generation: v.cache.generation + 1,
-		}
-		for kid := range keys {
-			delete(v.negativeKIDs, kid)
-		}
+		v.cache = cachedOIDCKeys{metadata: metadata, keys: keys, expires: v.now().Add(oidcCacheTTL)}
 	}
 	call.err = err
 	if v.refresh == call {
@@ -366,21 +298,6 @@ func waitOIDCRefresh(ctx context.Context, call *oidcRefreshCall) error {
 	case <-call.done:
 		return nil
 	}
-}
-
-func (v *OIDCValidator) rememberUnknownKIDLocked(kid string, now time.Time) {
-	for cached, expires := range v.negativeKIDs {
-		if !now.Before(expires) {
-			delete(v.negativeKIDs, cached)
-		}
-	}
-	if len(v.negativeKIDs) >= maxOIDCNegativeKIDs {
-		for cached := range v.negativeKIDs {
-			delete(v.negativeKIDs, cached)
-			break
-		}
-	}
-	v.negativeKIDs[kid] = now.Add(oidcNegativeKIDTTL)
 }
 
 func (v *OIDCValidator) fetchMetadata(ctx context.Context) (oidcMetadata, error) {

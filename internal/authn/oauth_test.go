@@ -7,11 +7,22 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
+	"github.com/cyber-shuttle/cs-control/internal/httpx"
 )
+
+func testBaseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	base, err := httpx.ParseBaseURL(raw, "test base URL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base
+}
 
 const testIdentityToken = "signed-test-identity-token"
 
@@ -178,10 +189,7 @@ func TestOAuthValidatorAcceptsEncryptedDevTunnelsAccessToken(t *testing.T) {
 		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer server.Close()
-	validator, err := newDevTunnelOAuthValidator(server.URL, server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
+	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client())
 	if err := validator.ValidateAccess(context.Background(), token); err != nil {
 		t.Fatal(err)
 	}
@@ -205,10 +213,7 @@ func TestOAuthValidatorDoesNotFollowBearerToUntrustedRedirect(t *testing.T) {
 		http.Redirect(w, r, hostile.URL, http.StatusTemporaryRedirect)
 	}))
 	defer origin.Close()
-	validator, err := newDevTunnelOAuthValidator(origin.URL, origin.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
+	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, origin.URL), origin.Client())
 	if err := validator.ValidateAccess(context.Background(), token); err == nil {
 		t.Fatal("redirect response accepted")
 	}
@@ -223,11 +228,8 @@ func TestOAuthValidatorRejectsUnvalidatedClaimsAndRedacts(t *testing.T) {
 		http.Error(w, "rejected "+r.Header.Get("Authorization"), http.StatusUnauthorized)
 	}))
 	defer server.Close()
-	validator, err := newDevTunnelOAuthValidator(server.URL, server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = validator.ValidateAccess(context.Background(), secret)
+	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client())
+	err := validator.ValidateAccess(context.Background(), secret)
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("error = %v", err)
 	}

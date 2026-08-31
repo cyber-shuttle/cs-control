@@ -332,14 +332,6 @@ func NewDevTunnelOAuthValidator(baseURL string, client *http.Client) (*DevTunnel
 	return newDevTunnelOAuthValidatorForBase(base, client), nil
 }
 
-func newDevTunnelOAuthValidator(baseURL string, client *http.Client) (*DevTunnelOAuthValidator, error) {
-	base, err := httpx.ParseBaseURL(baseURL, "Dev Tunnels base URL")
-	if err != nil {
-		return nil, err
-	}
-	return newDevTunnelOAuthValidatorForBase(base, client), nil
-}
-
 func newDevTunnelOAuthValidatorForBase(base *url.URL, client *http.Client) *DevTunnelOAuthValidator {
 	bounded := devtunnel.BoundedClient(client, defaultOAuthTimeout)
 	return &DevTunnelOAuthValidator{baseURL: base.String(), client: bounded}
