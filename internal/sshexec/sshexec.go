@@ -214,15 +214,6 @@ func (s *CaptureStream) String() string {
 	return s.buf.String()
 }
 
-// NewBoundedCapture buffers a single stream so a failure can be classified after
-// the fact without retaining unbounded remote output.
-func NewBoundedCapture(name string) *CaptureStream {
-	if name == "stderr" {
-		return NewCapture().Stderr()
-	}
-	return NewCapture().Stdout()
-}
-
 func (r Runner) controlPath(alias, identity string) (string, error) {
 	if r.ControlDir == "" {
 		return "", errors.New("SSH control namespace is not configured")

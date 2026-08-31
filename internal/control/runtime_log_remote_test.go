@@ -2,7 +2,6 @@ package control
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,18 +28,11 @@ func TestReadRemoteRuntimeTailsUsesFixedArgumentsAndParsesStreams(t *testing.T) 
 	if tails[runtimeLogIDOne].stdout != "first\n\x1b[31msecond\x1b[0m\n" || tails[runtimeLogIDTwo].stderr != "warning\rnext\n" {
 		t.Fatalf("parsed tails = %#v", tails)
 	}
-	remoteScript, err := os.ReadFile(scriptLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(remoteScript) != runtimeLogTailScript || strings.Contains(string(remoteScript), runtimeLogIDOne) {
+	remoteScript := string(mustRead(t, scriptLog))
+	if remoteScript != runtimeLogTailScript || strings.Contains(remoteScript, runtimeLogIDOne) {
 		t.Fatal("remote script was not the constant runtime tail script")
 	}
-	commands, err := os.ReadFile(commandLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	command := string(commands)
+	command := string(mustRead(t, commandLog))
 	for _, want := range []string{"'sh' '-s' '--' 'csctl-runtime-log-tail'", "'" + runtimeLogIDOne + "'", "'" + runtimeLogIDTwo + "'"} {
 		if !strings.Contains(command, want) {
 			t.Errorf("fixed remote command missing %q: %s", want, command)
@@ -58,7 +50,7 @@ func TestReadRemoteRuntimeTailsUsesFixedArgumentsAndParsesStreams(t *testing.T) 
 	}
 }
 
-func TestCollectStartingRuntimeLogsOneReadPerHostFourRuntimeCapAndTerminalStop(t *testing.T) {
+func TestCollectStartingRuntimeLogsBatchesPerHostAndSkipsTerminalRuntimes(t *testing.T) {
 	ssh, _, commandLog := fakeSSH(t)
 	t.Setenv("FAKE_RUNTIME_STDOUT", "hello\n")
 	t.Setenv("FAKE_RUNTIME_STDERR", "\x1b[31mwarning\x1b[0m\n")
@@ -74,77 +66,51 @@ func TestCollectStartingRuntimeLogsOneReadPerHostFourRuntimeCapAndTerminalStop(t
 	}
 	service.collectStartingRuntimeLogs(context.Background(), runtimes)
 
-	commands, err := os.ReadFile(commandLog)
-	if err != nil {
-		t.Fatal(err)
+	commands := string(mustRead(t, commandLog))
+	lines := strings.Split(strings.TrimSpace(commands), "\n")
+	// Five starting runtimes against a four-per-request script bound, so the host
+	// takes two reads and no runtime waits for a later round.
+	if len(lines) != 2 {
+		t.Fatalf("tail reads = %q, want two batched host reads", lines)
 	}
-	lines := strings.Split(strings.TrimSpace(string(commands)), "\n")
-	if len(lines) != 1 || !strings.Contains(lines[0], "csctl-runtime-log-tail") {
-		t.Fatalf("tail reads = %q, want one host read", lines)
-	}
-	for _, id := range []string{"rt-000000000001", "rt-000000000002", "rt-000000000003", "rt-000000000004"} {
-		if !strings.Contains(lines[0], id) {
-			t.Errorf("capped read missing %s: %s", id, lines[0])
+	for _, id := range []string{"rt-000000000001", "rt-000000000002", "rt-000000000003", "rt-000000000004", "rt-000000000005"} {
+		if !strings.Contains(commands, id) {
+			t.Errorf("batched read missing %s: %s", id, commands)
 		}
 		tail, ok := service.Logs.Tail(id)
 		if !ok || len(tail.Lines) != 2 || !sameLogLine(tail.Lines[0], "stdout", "hello") || !sameLogLine(tail.Lines[1], "stderr", "warning") {
 			t.Errorf("merged sanitized tail for %s = %#v", id, tail)
 		}
 	}
-	for _, id := range []string{"rt-000000000005", "rt-000000000006", "rt-000000000007"} {
-		if strings.Contains(lines[0], id) {
-			t.Errorf("ineligible runtime %s was tailed: %s", id, lines[0])
+	for _, id := range []string{"rt-000000000006", "rt-000000000007"} {
+		if strings.Contains(commands, id) {
+			t.Errorf("ineligible runtime %s was tailed: %s", id, commands)
 		}
 	}
 
-	before := string(commands)
 	service.collectStartingRuntimeLogs(context.Background(), []Runtime{
 		{RuntimeResponse: RuntimeResponse{ID: runtimeLogIDOne, SSHHost: "alpha", State: "READY"}},
 		{RuntimeResponse: RuntimeResponse{ID: runtimeLogIDTwo, SSHHost: "alpha", State: "STOPPED"}},
 	})
-	after, err := os.ReadFile(commandLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != before {
-		t.Fatalf("terminal collection issued SSH: before=%q after=%q", before, after)
+	if after := string(mustRead(t, commandLog)); after != commands {
+		t.Fatalf("terminal collection issued SSH: before=%q after=%q", commands, after)
 	}
 }
 
-func TestRuntimeLogsMergeRemoteReplacesTheStoredTail(t *testing.T) {
+// The remote script returns the whole tail every time, so re-reading it replaces
+// the stored copy rather than appending the overlap -- and never displaces this
+// process's own narration, which is older than anything the allocation printed.
+func TestRuntimeLogsMergeRemoteReplacesTheStoredTailAndKeepsNarration(t *testing.T) {
 	logs := NewRuntimeLogs()
-	if err := logs.MergeRemote(runtimeLogIDOne, "one\ntwo\n", "warn\n"); err != nil {
-		t.Fatal(err)
-	}
-	if err := logs.MergeRemote(runtimeLogIDOne, "one\ntwo\nthree\n", "warn\nnext\n"); err != nil {
-		t.Fatal(err)
-	}
+	logs.Append(runtimeLogIDOne, "Runtime is queued")
+	logs.MergeRemote(runtimeLogIDOne, "one\ntwo\n", "warn\n")
+	logs.MergeRemote(runtimeLogIDOne, "one\ntwo\nthree\n", "warn\nnext\n")
 	tail, ok := logs.Tail(runtimeLogIDOne)
-	// The remote script returns the whole tail every time, so re-reading it must
-	// leave one copy of each line rather than appending the overlap again.
-	if !ok || len(tail.Lines) != 5 {
+	if !ok || len(tail.Lines) != 6 {
 		t.Fatalf("replaced tail = %#v", tail)
 	}
-	if tail.Lines[2].Text != "three" || !sameLogLine(tail.Lines[4], "stderr", "next") {
+	if !sameLogLine(tail.Lines[0], "status", "Runtime is queued") || tail.Lines[3].Text != "three" || !sameLogLine(tail.Lines[5], "stderr", "next") {
 		t.Fatalf("unexpected replaced tail: %#v", tail.Lines)
-	}
-}
-
-func TestRuntimeLogsKeepsNarrationAheadOfTheRemoteTail(t *testing.T) {
-	logs := NewRuntimeLogs()
-	if err := logs.Append(runtimeLogIDOne, "status", "Runtime is queued"); err != nil {
-		t.Fatal(err)
-	}
-	if err := logs.MergeRemote(runtimeLogIDOne, "job output\n", ""); err != nil {
-		t.Fatal(err)
-	}
-	// Replacing the remote tail must not discard this process's own narration.
-	if err := logs.MergeRemote(runtimeLogIDOne, "job output\nmore\n", ""); err != nil {
-		t.Fatal(err)
-	}
-	tail, _ := logs.Tail(runtimeLogIDOne)
-	if len(tail.Lines) != 3 || tail.Lines[0].Stream != "status" || tail.Lines[0].Text != "Runtime is queued" {
-		t.Fatalf("narration lost after remote replacement: %#v", tail.Lines)
 	}
 }
 

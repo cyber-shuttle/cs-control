@@ -22,7 +22,6 @@ type RuntimeRefresher struct {
 	reconcile func(context.Context) error
 	interval  time.Duration
 	timeout   time.Duration
-	now       func() time.Time
 
 	mu        sync.Mutex
 	running   bool
@@ -37,7 +36,6 @@ func NewRuntimeRefresher(service Service) *RuntimeRefresher {
 		reconcile: service.ReconcileAll,
 		interval:  time.Second,
 		timeout:   60 * time.Second,
-		now:       time.Now,
 		stop:      make(chan struct{}),
 	}
 	refresher.wg.Add(1)
@@ -75,7 +73,7 @@ func (r *RuntimeRefresher) Trigger() bool {
 	case r.running:
 		r.mu.Unlock()
 		return true
-	case r.now().Sub(r.completed) < r.interval:
+	case time.Since(r.completed) < r.interval:
 		r.mu.Unlock()
 		return false
 	}
@@ -90,16 +88,10 @@ func (r *RuntimeRefresher) Trigger() bool {
 			log.Printf("runtime reconciliation failed: %v", err)
 		}
 		r.mu.Lock()
-		r.running, r.completed = false, r.now()
+		r.running, r.completed = false, time.Now()
 		r.mu.Unlock()
 	}()
 	return true
-}
-
-func (r *RuntimeRefresher) Running() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.running
 }
 
 func (r *RuntimeRefresher) Close() {

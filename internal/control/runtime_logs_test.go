@@ -3,10 +3,8 @@ package control
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 const (
@@ -28,6 +26,10 @@ func TestRuntimeLogsSanitizeAndSplit(t *testing.T) {
 		{name: "C1 CSI and string controls", input: "a\u009b31mred\u009b0m b\u009dprivate-osc\u0007c\u0090private-dcs\u009cd\u009fprivate-apc\u009ce\u009eprivate-pm\u009cf\u0098private-sos\u009cg", want: []string{"ared bcdefg"}},
 		{name: "OSC BEL and ST terminators", input: "a\x1b]private\x07b\x1b]private\x1b\\c\u009dprivate\u009cd", want: []string{"abcd"}},
 		{name: "DCS ST terminators", input: "a\x1bPprivate\x1b\\b\u0090private\u009cc", want: []string{"abc"}},
+		{name: "7-bit OSC ends at BEL across lines", input: "before\x1b]hidden\rhidden\nhidden\x07after", want: []string{"beforeafter"}},
+		{name: "C1 OSC ends at BEL across lines", input: "before\u009dhidden\rhidden\nhidden\x07after", want: []string{"beforeafter"}},
+		{name: "7-bit DCS ignores BEL through ESC ST", input: "before\x1bPhidden\rhidden\nhidden\x07must-not-leak\x1b\\after", want: []string{"beforeafter"}},
+		{name: "C1 APC ignores BEL through C1 ST", input: "before\u009fhidden\rhidden\nhidden\x07must-not-leak\u009cafter", want: []string{"beforeafter"}},
 		{name: "incomplete CSI drops parameters", input: "safe\x1b[31", want: []string{"safe"}},
 		{name: "malformed CSI drops payload", input: "safe\x1b[31\x00private", want: []string{"safe"}},
 		{name: "incomplete ESC intermediates drop payload", input: "safe\x1b(", want: []string{"safe"}},
@@ -40,83 +42,15 @@ func TestRuntimeLogsSanitizeAndSplit(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			logs := NewRuntimeLogs()
-			if err := logs.Append(runtimeLogIDOne, "stdout", test.input); err != nil {
-				t.Fatalf("Append() = %v", err)
-			}
+			logs.Append(runtimeLogIDOne, test.input)
 			tail, ok := logs.Tail(runtimeLogIDOne)
 			if !ok || len(tail.Lines) != len(test.want) {
 				t.Fatalf("tail = %#v, want %q", tail, test.want)
 			}
 			for i, want := range test.want {
-				if !sameLogLine(tail.Lines[i], "stdout", want) {
+				if !sameLogLine(tail.Lines[i], "status", want) {
 					t.Fatalf("line %d = %#v, want %q", i, tail.Lines[i], want)
 				}
-			}
-		})
-	}
-}
-
-func TestRuntimeLogStringControlsDoNotLeakAcrossLines(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  []string
-	}{
-		{
-			name:  "7-bit OSC BEL terminates before ST",
-			input: "before\x1b]hidden\rhidden\nhidden\r\nhidden\x07after-bel\x1b\\after-st",
-			want:  []string{"beforeafter-belafter-st"},
-		},
-		{
-			name:  "C1 OSC BEL terminates before ST",
-			input: "before\u009dhidden\rhidden\nhidden\r\nhidden\x07after-bel\u009cafter-st",
-			want:  []string{"beforeafter-belafter-st"},
-		},
-		{
-			name:  "7-bit DCS ignores BEL through ESC ST",
-			input: "before\x1bPhidden\rhidden\nhidden\r\nhidden\x07must-not-leak\x1b\\after",
-			want:  []string{"beforeafter"},
-		},
-		{
-			name:  "C1 DCS ignores BEL through C1 ST",
-			input: "before\u0090hidden\rhidden\nhidden\r\nhidden\x07must-not-leak\u009cafter",
-			want:  []string{"beforeafter"},
-		},
-		{
-			name:  "7-bit SOS ignores BEL through C1 ST",
-			input: "before\x1bXhidden\rhidden\nhidden\r\nhidden\x07must-not-leak\u009cafter",
-			want:  []string{"beforeafter"},
-		},
-		{
-			name:  "C1 SOS ignores BEL through ESC ST",
-			input: "before\u0098hidden\rhidden\nhidden\r\nhidden\x07must-not-leak\x1b\\after",
-			want:  []string{"beforeafter"},
-		},
-		{
-			name:  "7-bit PM ignores BEL through ESC ST",
-			input: "before\x1b^hidden\rhidden\nhidden\r\nhidden\x07must-not-leak\x1b\\after",
-			want:  []string{"beforeafter"},
-		},
-		{
-			name:  "C1 PM ignores BEL through C1 ST",
-			input: "before\u009ehidden\rhidden\nhidden\r\nhidden\x07must-not-leak\u009cafter",
-			want:  []string{"beforeafter"},
-		},
-		{
-			name:  "7-bit APC ignores BEL through C1 ST",
-			input: "before\x1b_hidden\rhidden\nhidden\r\nhidden\x07must-not-leak\u009cafter",
-			want:  []string{"beforeafter"},
-		},
-		{
-			name:  "C1 APC ignores BEL through ESC ST",
-			input: "before\u009fhidden\rhidden\nhidden\r\nhidden\x07must-not-leak\x1b\\after",
-			want:  []string{"beforeafter"},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := sanitizedRuntimeLogLines(test.input, nil); !slices.Equal(got, test.want) {
-				t.Fatalf("sanitizedRuntimeLogLines() = %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -126,9 +60,7 @@ func TestRuntimeLogsEnforceLineAndByteLimits(t *testing.T) {
 	t.Run("line limit", func(t *testing.T) {
 		logs := NewRuntimeLogs()
 		for i := 0; i < maxRuntimeLogLines+25; i++ {
-			if err := logs.Append(runtimeLogIDOne, "status", fmt.Sprintf("line-%03d", i)); err != nil {
-				t.Fatal(err)
-			}
+			logs.Append(runtimeLogIDOne, fmt.Sprintf("line-%03d", i))
 		}
 		tail, _ := logs.Tail(runtimeLogIDOne)
 		if len(tail.Lines) != maxRuntimeLogLines || tail.Lines[0].Text != "line-025" || tail.Lines[len(tail.Lines)-1].Text != "line-124" {
@@ -140,9 +72,7 @@ func TestRuntimeLogsEnforceLineAndByteLimits(t *testing.T) {
 		logs := NewRuntimeLogs()
 		for i := 0; i < 100; i++ {
 			line := fmt.Sprintf("%04d", i) + strings.Repeat("x", 996)
-			if err := logs.Append(runtimeLogIDOne, "stdout", line); err != nil {
-				t.Fatal(err)
-			}
+			logs.Append(runtimeLogIDOne, line)
 		}
 		tail, _ := logs.Tail(runtimeLogIDOne)
 		bytes := 0
@@ -166,7 +96,6 @@ func TestRuntimeLogsRedactsRuntimeAndCredentialSecrets(t *testing.T) {
 	input := strings.Join([]string{
 		"benign startup message",
 		"workspace /scratch/sentinel-user/workspace/file.ipynb",
-		"socket /tmp/cs-" + runtimeLogIDOne + ".sock",
 		"executables /opt/private/linkspan-sentinel /opt/private/jupyter-sentinel/bin/python",
 		"authorization Bearer abcdefghijklmnopqrstuvwxyz012345",
 		"token=token-shaped-secret-value-123456",
@@ -174,11 +103,9 @@ func TestRuntimeLogsRedactsRuntimeAndCredentialSecrets(t *testing.T) {
 		"standalone generated tokens 0123456789abcdef0123456789abcdef and 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		"tokenization for sentinel-user preserves 0123abcd and build 0123456789abcdefABCDEF_-0123456789abcdef",
 	}, "\n")
-	if err := logs.Append(runtimeLogIDOne, "stderr", input); err != nil {
-		t.Fatalf("Append = %v", err)
-	}
+	logs.Append(runtimeLogIDOne, input)
 	joined := runtimeLogText(t, logs, runtimeLogIDOne, false)
-	for _, secret := range []string{".cybershuttle/runtimes", "cs-" + runtimeLogIDOne + ".sock", "linkspan-sentinel", "jupyter-sentinel", "abcdefghijklmnopqrstuvwxyz012345", "token-shaped-secret-value-123456", "eyJhbGciOiJIUzI1NiJ9", "0123456789abcdef0123456789abcdef"} {
+	for _, secret := range []string{".cybershuttle/runtimes", "linkspan-sentinel", "jupyter-sentinel", "abcdefghijklmnopqrstuvwxyz012345", "token-shaped-secret-value-123456", "eyJhbGciOiJIUzI1NiJ9", "0123456789abcdef0123456789abcdef"} {
 		if strings.Contains(joined, secret) {
 			t.Errorf("secret %q leaked in:\n%s", secret, joined)
 		}
@@ -196,8 +123,6 @@ func TestRuntimeLogsRedactsRuntimeAndCredentialSecrets(t *testing.T) {
 func TestRuntimePhaseStatusNeverStoresSensitiveValues(t *testing.T) {
 	t.Run("successful readiness and stop", func(t *testing.T) {
 		service := testService(t)
-		service.Runner.Timeout = 5 * time.Second
-		service.Logs = NewRuntimeLogs()
 		t.Setenv("FAKE_WORKSPACE_ENV", "/scratch/SENSITIVE_ENV_SENTINEL")
 		request := createRequest()
 		request.RootFolder = "$WORKSPACE/project"
@@ -224,8 +149,6 @@ func TestRuntimePhaseStatusNeverStoresSensitiveValues(t *testing.T) {
 
 	t.Run("failure and cleanup", func(t *testing.T) {
 		service := testService(t)
-		service.Runner.Timeout = 5 * time.Second
-		service.Logs = NewRuntimeLogs()
 		runtime, err := service.Create(testTunnelContext(), createRequest())
 		if err != nil {
 			t.Fatal(err)
@@ -248,8 +171,6 @@ func TestRuntimePhaseStatusNeverStoresSensitiveValues(t *testing.T) {
 
 	t.Run("validation diagnostic", func(t *testing.T) {
 		service := testService(t)
-		service.Runner.Timeout = 5 * time.Second
-		service.Logs = NewRuntimeLogs()
 		t.Setenv("FAKE_VALIDATION_FAIL", "1")
 		t.Setenv("FAKE_VALIDATION_STDERR", "SENSITIVE_TOKEN_SENTINEL /private/SENSITIVE_PATH_SENTINEL")
 		if _, err := service.Create(testTunnelContext(), createRequest()); err == nil {

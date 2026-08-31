@@ -1,7 +1,6 @@
 package control
 
 import (
-	"errors"
 	"regexp"
 	"slices"
 	"strings"
@@ -15,17 +14,13 @@ const (
 	maxRuntimeLogLineBytes = 4 << 10
 )
 
-var (
-	errInvalidRuntimeLogStream = errors.New("runtime log stream must be status, stdout, or stderr")
-	runtimeCredentialPatterns  = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`),
-		regexp.MustCompile(`(?i)\b(token|secret|password|api[_-]?key)\s*[:=]\s*[^\s,;]+`),
-		regexp.MustCompile(`\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),
-		regexp.MustCompile(`\b(?:[a-f0-9]{64}|[a-f0-9]{32})\b`),
-		regexp.MustCompile(`/[^\s'\"]*\.cybershuttle/runtimes/rt-[a-f0-9]{12}(?:/[^\s'\"]*)?`),
-		regexp.MustCompile(`/[^\s'\"]*cs-rt-[a-f0-9]{12}\.sock`),
-	}
-)
+var runtimeCredentialPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`),
+	regexp.MustCompile(`(?i)\b(token|secret|password|api[_-]?key)\s*[:=]\s*[^\s,;]+`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),
+	regexp.MustCompile(`\b(?:[a-f0-9]{64}|[a-f0-9]{32})\b`),
+	regexp.MustCompile(`/[^\s'\"]*\.cybershuttle/runtimes/rt-[a-f0-9]{12}(?:/[^\s'\"]*)?`),
+}
 
 // RuntimeLogLine is one sanitized, browser-safe line of runtime startup output.
 // The time is when the line was observed here, which is what an owner reading a
@@ -62,16 +57,11 @@ type RuntimeLogs struct {
 	mu        sync.RWMutex
 	tails     map[string]*runtimeLogBuffer
 	sensitive map[string][]string
-	cursors   map[string]int
 	Now       func() time.Time
 }
 
 func NewRuntimeLogs() *RuntimeLogs {
-	return &RuntimeLogs{
-		tails:     make(map[string]*runtimeLogBuffer),
-		sensitive: make(map[string][]string),
-		cursors:   make(map[string]int),
-	}
+	return &RuntimeLogs{tails: make(map[string]*runtimeLogBuffer), sensitive: make(map[string][]string)}
 }
 
 func (l *RuntimeLogs) now() time.Time {
@@ -91,31 +81,27 @@ func (l *RuntimeLogs) Forget(runtimeID string) {
 	defer l.mu.Unlock()
 	delete(l.tails, runtimeID)
 	delete(l.sensitive, runtimeID)
-	delete(l.cursors, runtimeID)
 }
 
-// Append sanitizes and appends one or more CR/LF-delimited lines. Repeating the
-// current final line is a no-op so periodic phase observations do not grow the
-// tail or advance its revision.
-func (l *RuntimeLogs) Append(runtimeID, stream, text string) error {
-	if stream != "status" && stream != "stdout" && stream != "stderr" {
-		return errInvalidRuntimeLogStream
-	}
+// Append sanitizes and appends one or more CR/LF-delimited lines of this
+// process's own narration. Repeating the current final line is a no-op so
+// periodic phase observations do not grow the tail or advance its revision.
+func (l *RuntimeLogs) Append(runtimeID, text string) {
 	if l == nil || !idPattern.MatchString(runtimeID) {
-		return nil
+		return
 	}
 	l.mu.RLock()
 	sensitive := append([]string(nil), l.sensitive[runtimeID]...)
 	l.mu.RUnlock()
 	lines := sanitizedRuntimeLogLines(text, sensitive)
 	if len(lines) == 0 {
-		return nil
+		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	buffer := l.bufferLocked(runtimeID)
 	for _, line := range lines {
-		entry := RuntimeLogLine{Stream: stream, Text: line, At: l.now()}
+		entry := RuntimeLogLine{Stream: "status", Text: line, At: l.now()}
 		if len(buffer.status) > 0 && buffer.status[len(buffer.status)-1] == entry {
 			continue
 		}
@@ -126,15 +112,14 @@ func (l *RuntimeLogs) Append(runtimeID, stream, text string) error {
 			buffer.status = buffer.status[1:]
 		}
 	}
-	return nil
 }
 
 // MergeRemote replaces the stored remote tail with what the last read returned.
 // The remote script always returns the whole bounded tail, so there is nothing
 // to diff against the previous copy.
-func (l *RuntimeLogs) MergeRemote(runtimeID, stdout, stderr string) error {
+func (l *RuntimeLogs) MergeRemote(runtimeID, stdout, stderr string) {
 	if l == nil || !idPattern.MatchString(runtimeID) {
-		return nil
+		return
 	}
 	l.mu.RLock()
 	sensitive := append([]string(nil), l.sensitive[runtimeID]...)
@@ -155,13 +140,9 @@ func (l *RuntimeLogs) MergeRemote(runtimeID, stdout, stderr string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.bufferLocked(runtimeID).remote = remote
-	return nil
 }
 
 func (l *RuntimeLogs) bufferLocked(runtimeID string) *runtimeLogBuffer {
-	if l.tails == nil {
-		l.tails = make(map[string]*runtimeLogBuffer)
-	}
 	buffer := l.tails[runtimeID]
 	if buffer == nil {
 		buffer = &runtimeLogBuffer{}
@@ -192,9 +173,6 @@ func (l *RuntimeLogs) Tail(runtimeID string) (RuntimeLogTail, bool) {
 // already owner-filtered set, so a tail can never travel to a principal that
 // does not own the runtime that produced it.
 func (s Service) ownedRuntimeTails(owned []Runtime) []RuntimeLogTail {
-	if s.Logs == nil {
-		return nil
-	}
 	tails := make([]RuntimeLogTail, 0, len(owned))
 	for _, runtime := range owned {
 		if tail, ok := s.Logs.Tail(runtime.ID); ok {
@@ -221,35 +199,8 @@ func (l *RuntimeLogs) SetRuntimeSensitive(runtimeID string, values ...string) {
 	}
 	slices.SortFunc(clean, func(a, b string) int { return len(b) - len(a) })
 	l.mu.Lock()
-	if l.sensitive == nil {
-		l.sensitive = make(map[string][]string)
-	}
 	l.sensitive[runtimeID] = clean
 	l.mu.Unlock()
-}
-
-// nextRuntimeLogBatch advances a process-local per-host cursor. Stable input
-// order plus this cursor guarantees bounded collection without extra SSH rounds.
-func (l *RuntimeLogs) nextRuntimeLogBatch(host string, ids []string, limit int) []string {
-	if l == nil || len(ids) == 0 || limit <= 0 {
-		return nil
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.cursors == nil {
-		l.cursors = make(map[string]int)
-	}
-	start := l.cursors[host] % len(ids)
-	count := limit
-	if len(ids) < count {
-		count = len(ids)
-	}
-	selected := make([]string, count)
-	for i := 0; i < count; i++ {
-		selected[i] = ids[(start+i)%len(ids)]
-	}
-	l.cursors[host] = (start + count) % len(ids)
-	return selected
 }
 
 func sanitizedRuntimeLogLines(value string, sensitive []string) []string {
@@ -274,7 +225,7 @@ func sanitizedRuntimeLogLines(value string, sensitive []string) []string {
 
 func redactRuntimeLogLine(value string, sensitive []string) string {
 	trimmed := strings.TrimSpace(value)
-	for _, prefix := range []string{"#!", "#SBATCH", "TOKEN_FILE=", "READY_FILE=", "PRIVATE_ROOT=", "WORKSPACE_ROOT="} {
+	for _, prefix := range []string{"#!", "#SBATCH"} {
 		if strings.HasPrefix(trimmed, prefix) {
 			return "[redacted]"
 		}
@@ -288,99 +239,25 @@ func redactRuntimeLogLine(value string, sensitive []string) string {
 	return value
 }
 
-// stripRuntimeLogControls removes complete terminal control sequences for both
-// 7-bit ESC and UTF-8 C1 introducers. Parsing the complete stream retains string
-// control state across line endings. It never interprets terminal content.
+var (
+	// A complete terminal control sequence in either encoding: CSI, the string
+	// controls with their ST or BEL terminators, and a plain escape. Each has a
+	// trailing alternative that consumes an unterminated one through the end of
+	// the stream rather than exposing its payload.
+	terminalSequences = regexp.MustCompile(`(?s)(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b\[|\x9b).*` +
+		`|(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c)|(?:\x1b\]|\x9d).*` +
+		`|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c)|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f]).*` +
+		`|\x1b[ -/]*[0-~]|\x1b[ -/]*`)
+	// Everything else a terminal would act on. Line endings survive; they are
+	// what the tail is split on.
+	terminalControls = regexp.MustCompile(`[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]`)
+)
+
+// stripRuntimeLogControls removes terminal control sequences for both 7-bit ESC
+// and C1 introducers. It never interprets terminal content: the whole stream is
+// stripped at once, so a string control cannot leak its payload by ending a line.
 func stripRuntimeLogControls(value string) string {
-	runes := []rune(value)
-	var output strings.Builder
-	for i := 0; i < len(runes); {
-		switch runes[i] {
-		case 0x1b:
-			i = skipANSISequence(runes, i)
-			continue
-		case 0x9b:
-			i = skipCSI(runes, i+1)
-			continue
-		case 0x9d:
-			i = skipANSIString(runes, i+1, true)
-			continue
-		case 0x90, 0x98, 0x9e, 0x9f:
-			i = skipANSIString(runes, i+1, false)
-			continue
-		}
-		r := runes[i]
-		if r == '\r' || r == '\n' {
-			output.WriteRune(r)
-			i++
-			continue
-		}
-		if (r >= 0 && r < 0x20) || (r >= 0x7f && r <= 0x9f) {
-			i++
-			continue
-		}
-		output.WriteRune(r)
-		i++
-	}
-	return output.String()
+	return terminalControls.ReplaceAllString(terminalSequences.ReplaceAllString(value, ""), "")
 }
 
-func skipANSISequence(value []rune, start int) int {
-	if start+1 >= len(value) {
-		return len(value)
-	}
-	switch value[start+1] {
-	case '[':
-		return skipCSI(value, start+2)
-	case ']':
-		return skipANSIString(value, start+2, true)
-	case 'P', 'X', '^', '_':
-		return skipANSIString(value, start+2, false)
-	}
-	// ECMA-48 escape sequences are ESC, zero or more intermediate bytes
-	// (0x20-0x2f), then one final byte (0x30-0x7e). Incomplete sequences are
-	// consumed through the end rather than exposing their payload.
-	i := start + 1
-	for i < len(value) && value[i] >= 0x20 && value[i] <= 0x2f {
-		i++
-	}
-	if i < len(value) && value[i] >= 0x30 && value[i] <= 0x7e {
-		return i + 1
-	}
-	return len(value)
-}
-
-func skipCSI(value []rune, start int) int {
-	intermediates := false
-	for i := start; i < len(value); i++ {
-		switch {
-		case value[i] >= 0x40 && value[i] <= 0x7e:
-			return i + 1
-		case value[i] >= 0x30 && value[i] <= 0x3f && !intermediates:
-			continue
-		case value[i] >= 0x20 && value[i] <= 0x2f:
-			intermediates = true
-		default:
-			return len(value)
-		}
-	}
-	return len(value)
-}
-
-func skipANSIString(value []rune, start int, allowBEL bool) int {
-	for i := start; i < len(value); i++ {
-		if value[i] == 0x9c || (allowBEL && value[i] == 0x07) {
-			return i + 1
-		}
-		if value[i] == 0x1b && i+1 < len(value) && value[i+1] == '\\' {
-			return i + 2
-		}
-	}
-	return len(value)
-}
-
-func (s Service) runtimeStatus(runtimeID, text string) {
-	if s.Logs != nil {
-		_ = s.Logs.Append(runtimeID, "status", text)
-	}
-}
+func (s Service) runtimeStatus(runtimeID, text string) { s.Logs.Append(runtimeID, text) }

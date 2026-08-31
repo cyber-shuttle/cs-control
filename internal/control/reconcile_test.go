@@ -13,58 +13,16 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
+// reconciliationService is a service whose scheduler answers are the rows in
+// FAKE_STATUS_LINES. It returns the fake's command log and the path the fake
+// waits on before answering.
 func reconciliationService(t *testing.T) (Service, string, string) {
 	t.Helper()
+	ssh, _, commandLog := fakeSSH(t)
 	dir := t.TempDir()
-	log := filepath.Join(dir, "rounds")
-	scripts := filepath.Join(dir, "scripts")
-	logReads := filepath.Join(dir, "log-reads")
-	release := filepath.Join(dir, "release")
-	ssh := filepath.Join(dir, "ssh")
-	script := `#!/bin/sh
-set -eu
-if [ "$1" = -G ]; then printf 'host %s\nhostname %s.example\nuser tester\nport 22\n' "$2" "$2"; exit 0; fi
-while [ "$1" = -o ]; do shift 2; done
-alias=$1; shift
-wire=$1
-printf '%s|%s\n' "$alias" "$wire" >> "$RECONCILE_LOG"
-case "$wire" in
-  *csctl-runtime-log-tail*)
-    cat >/dev/null
-    log_read_count=0; [ ! -f "$RECONCILE_LOG_READ_COUNT" ] || log_read_count=$(cat "$RECONCILE_LOG_READ_COUNT")
-    log_read_count=$((log_read_count + 1)); printf '%s\n' "$log_read_count" > "$RECONCILE_LOG_READ_COUNT"
-    eval "set -- $wire"
-    shift 4
-    for runtime_id in "$@"; do
-      printf '__CSCTL_RUNTIME_LOG__|%s|stdout|' "$runtime_id"
-      printf 'startup-%s\n' "$runtime_id" | od -An -v -tx1 | tr -d ' \n'
-      printf '\n__CSCTL_RUNTIME_LOG__|%s|stderr|\n' "$runtime_id"
-    done
-    ;;
-  "'sh' '-s' '--' 'csctl-runtime-status'")
-    payload=$(cat)
-    printf '%s\n__CSCTL_SCRIPT_END__\n' "$payload" >> "$RECONCILE_SCRIPTS"
-    [ -z "${RECONCILE_STARTED:-}" ] || : > "$RECONCILE_STARTED"
-    while [ -n "${RECONCILE_RELEASE:-}" ] && [ ! -e "$RECONCILE_RELEASE" ]; do sleep .02; done
-    [ "${RECONCILE_FAIL:-0}" = 0 ] || { printf 'scheduler unavailable\n' >&2; exit 1; }
-    [ -z "${RECONCILE_CANCEL_ERRORS:-}" ] || printf '%b\n' "$RECONCILE_CANCEL_ERRORS"
-    printf '__CSCTL_SQUEUE__\n%b\n__CSCTL_SACCT__\n%b\n' "$RECONCILE_LINES" "$RECONCILE_LINES"
-    ;;
-  "'squeue' '--noheader' '--jobs="*) printf 'PENDING|\n';;
-  "'scancel' "*) :;;
-  *) echo "unexpected command: $wire" >&2; exit 2;;
-esac
-`
-	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("RECONCILE_LOG", log)
-	t.Setenv("RECONCILE_SCRIPTS", scripts)
-	t.Setenv("RECONCILE_LOG_READ_COUNT", logReads)
-	t.Setenv("RECONCILE_RELEASE", "")
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: filepath.Join(dir, "state")}}
 	configureTestTunnel(t, &service)
-	return service, log, release
+	return service, commandLog, filepath.Join(dir, "release")
 }
 
 func setTestRuntimeMetadata(runtime *Runtime) {
@@ -115,7 +73,7 @@ func TestReconcileUsesOneRoundPerMixedHostAndNoneForTerminal(t *testing.T) {
 	two := pendingRuntime("rt-222222222222", "beta", "202")
 	terminal := pendingRuntime("rt-333333333333", "gamma", "303")
 	terminal.State = "FAILED"
-	t.Setenv("RECONCILE_LINES", "101|PENDING||"+one.JobName+"\\n202|PENDING||"+two.JobName)
+	t.Setenv("FAKE_STATUS_LINES", "101|PENDING||"+one.JobName+"\\n202|PENDING||"+two.JobName)
 	putRuntimes(t, service, one, two, terminal)
 	if _, err := reconciledList(context.Background(), service); err != nil {
 		t.Fatal(err)
@@ -136,8 +94,8 @@ func TestStoppingFailedCancelKeepsActiveStateAndDiagnostic(t *testing.T) {
 	service, log, _ := reconciliationService(t)
 	stopping := stoppingRuntime("rt-111111111111", "alpha", "101")
 	unrelated := pendingRuntime("rt-222222222222", "alpha", "202")
-	t.Setenv("RECONCILE_CANCEL_ERRORS", schedulerMarkerCancel+"|id:101|scheduler temporarily unavailable")
-	t.Setenv("RECONCILE_LINES", "101|RUNNING|cn001|"+stopping.JobName+"\\n202|PENDING|cn002|"+unrelated.JobName)
+	t.Setenv("FAKE_CANCEL_ERRORS", "id:101|scheduler temporarily unavailable")
+	t.Setenv("FAKE_STATUS_LINES", "101|RUNNING|cn001|"+stopping.JobName+"\\n202|PENDING|cn002|"+unrelated.JobName)
 	putRuntimes(t, service, stopping, unrelated)
 
 	listed, err := reconciledList(context.Background(), service)
@@ -160,8 +118,8 @@ func TestStoppingFailedCancelKeepsActiveStateAndDiagnostic(t *testing.T) {
 func TestStoppingUnknownSubmissionUsesJobNameAndObservesState(t *testing.T) {
 	service, log, _ := reconciliationService(t)
 	runtime := stoppingRuntime("rt-111111111111", "alpha", "")
-	t.Setenv("RECONCILE_CANCEL_ERRORS", schedulerMarkerCancel+"|name:"+runtime.JobName+"|submission cancellation pending")
-	t.Setenv("RECONCILE_LINES", "777|PENDING||"+runtime.JobName)
+	t.Setenv("FAKE_CANCEL_ERRORS", "name:"+runtime.JobName+"|submission cancellation pending")
+	t.Setenv("FAKE_STATUS_LINES", "777|PENDING||"+runtime.JobName)
 	putRuntimes(t, service, runtime)
 
 	listed, err := reconciledList(context.Background(), service)
@@ -172,7 +130,7 @@ func TestStoppingUnknownSubmissionUsesJobNameAndObservesState(t *testing.T) {
 		t.Fatalf("unknown stopping submission was not reconciled: %#v", listed[0])
 	}
 	assertOneSchedulerRound(t, log, "alpha")
-	script := string(mustRead(t, filepath.Join(filepath.Dir(log), "scripts")))
+	script := string(mustRead(t, os.Getenv("FAKE_STATUS_SCRIPT_LOG")))
 	if !strings.Contains(script, "scancel --name='"+runtime.JobName+"'") {
 		t.Fatalf("unknown submission was not cancelled by unique job name:\n%s", script)
 	}
@@ -198,10 +156,10 @@ func mustRead(t *testing.T, path string) []byte {
 func TestReconcileDoesNotHoldStoreLockDuringSSHAndDoesNotOverwriteStop(t *testing.T) {
 	service, log, release := reconciliationService(t)
 	started := filepath.Join(t.TempDir(), "started")
-	t.Setenv("RECONCILE_STARTED", started)
-	t.Setenv("RECONCILE_RELEASE", release)
+	t.Setenv("FAKE_STATUS_STARTED", started)
+	t.Setenv("FAKE_STATUS_RELEASE", release)
 	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	t.Setenv("RECONCILE_LINES", "101|PENDING||"+runtime.JobName)
+	t.Setenv("FAKE_STATUS_LINES", "101|PENDING||"+runtime.JobName)
 	putRuntimes(t, service, runtime)
 	done := make(chan error, 1)
 	go func() { _, err := reconciledList(context.Background(), service); done <- err }()
@@ -275,7 +233,7 @@ func TestSchedulerThatDoesNotKnowTheJobRetiresTheRuntime(t *testing.T) {
 	service, _, _ := reconciliationService(t)
 	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
 	runtime.State = "READY"
-	t.Setenv("RECONCILE_LINES", "")
+	t.Setenv("FAKE_STATUS_LINES", "")
 	putRuntimes(t, service, runtime)
 	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	if got[0].State != "STOPPED" {
@@ -291,7 +249,7 @@ func TestFreshlySubmittedRuntimeSurvivesTheSchedulerPropagationWindow(t *testing
 	// A card run again keeps a creation time whose window ran out during the run
 	// it replaced, so the window has to belong to this submission.
 	runtime.CreatedAt, runtime.UpdatedAt = time.Now().Add(-6*time.Hour).UTC(), time.Now().UTC()
-	t.Setenv("RECONCILE_LINES", "")
+	t.Setenv("FAKE_STATUS_LINES", "")
 	putRuntimes(t, service, runtime)
 	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	if got[0].State != "QUEUED" {
@@ -305,7 +263,7 @@ func TestUnreachableSchedulerRetiresAnAllocationPastItsWalltime(t *testing.T) {
 	service, _, _ := reconciliationService(t)
 	runtime := runningRuntime("rt-111111111111", "alpha", "101", time.Now().Add(-4*time.Hour), 60)
 	putRuntimes(t, service, runtime)
-	t.Setenv("RECONCILE_FAIL", "1")
+	t.Setenv("FAKE_STATUS_FAIL", "1")
 	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	if got[0].State != "STOPPED" {
 		t.Fatalf("an allocation four hours past a one-hour walltime stayed %s, want STOPPED", got[0].State)
@@ -321,7 +279,7 @@ func TestUnreachableSchedulerKeepsAnAllocationInsideItsWalltime(t *testing.T) {
 	service, _, _ := reconciliationService(t)
 	runtime := runningRuntime("rt-111111111111", "alpha", "101", time.Now().Add(-5*time.Minute), 60)
 	putRuntimes(t, service, runtime)
-	t.Setenv("RECONCILE_FAIL", "1")
+	t.Setenv("FAKE_STATUS_FAIL", "1")
 	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	if got[0].State != "READY" {
 		t.Fatalf("an allocation inside its walltime was retired as %s by an unreachable scheduler", got[0].State)
@@ -331,23 +289,13 @@ func TestUnreachableSchedulerKeepsAnAllocationInsideItsWalltime(t *testing.T) {
 	}
 }
 
-// A queued allocation may wait for days, so no clock retires it -- only the
-// scheduler can, and only by answering.
-func TestQueuedAllocationHasNoWalltimeDeadline(t *testing.T) {
-	queued := pendingRuntime("rt-111111111111", "alpha", "101")
-	queued.StartedAt = time.Now().Add(-30 * 24 * time.Hour)
-	if outlivedAllocation(queued, time.Now()) {
-		t.Fatal("a queued allocation was retired by a deadline it is not under")
-	}
-}
-
 // sacct reports jobs from midnight today unless asked otherwise, which hid
 // every allocation submitted before it.
 func TestSchedulerQueryAsksSacctForJobsOlderThanToday(t *testing.T) {
 	service, _, _ := reconciliationService(t)
-	scripts := os.Getenv("RECONCILE_SCRIPTS")
+	scripts := os.Getenv("FAKE_STATUS_SCRIPT_LOG")
 	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	t.Setenv("RECONCILE_LINES", "101|PENDING||"+runtime.JobName)
+	t.Setenv("FAKE_STATUS_LINES", "101|PENDING||"+runtime.JobName)
 	putRuntimes(t, service, runtime)
 	service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	sent := string(mustRead(t, scripts))
@@ -368,7 +316,7 @@ func TestStartedAtComesFromSlurmElapsedNotThePollTime(t *testing.T) {
 	service, _, _ := reconciliationService(t)
 	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
 	// squeue rows carry four fields; the sacct row carries the elapsed seconds.
-	t.Setenv("RECONCILE_LINES", "101|RUNNING|node1|"+runtime.JobName+"|7200")
+	t.Setenv("FAKE_STATUS_LINES", "101|RUNNING|node1|"+runtime.JobName+"|7200")
 	putRuntimes(t, service, runtime)
 	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	elapsed := time.Since(got[0].StartedAt)
@@ -377,73 +325,56 @@ func TestStartedAtComesFromSlurmElapsedNotThePollTime(t *testing.T) {
 	}
 }
 
-// A job whose elapsed time already exceeds its wall-time is over the moment it
-// is seen, even on the very first observation.
-func TestElapsedAnchorRetiresAnAllocationAlreadyPastItsWalltime(t *testing.T) {
-	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	runtime.State = "READY"
-	runtime.Resources.WallMinutes = 60
-	runtime.StartedAt = time.Now().Add(-4 * time.Hour)
-	if !outlivedAllocation(runtime, time.Now()) {
-		t.Fatal("an allocation anchored four hours back on a one-hour walltime was not retired")
+// Slurm kills a running job at its --time, so an allocation anchored further
+// back than that is over the moment it is seen. A queued one may wait for days
+// under no such deadline: only the scheduler retires that, and only by answering.
+func TestOnlyAStartedAllocationIsUnderAWalltimeDeadline(t *testing.T) {
+	for _, test := range []struct {
+		state string
+		want  bool
+	}{{"READY", true}, {"QUEUED", false}} {
+		runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+		runtime.State = test.state
+		runtime.Resources.WallMinutes = 60
+		runtime.StartedAt = time.Now().Add(-4 * time.Hour)
+		if got := outlivedAllocation(runtime, time.Now()); got != test.want {
+			t.Errorf("a %s allocation four hours into a one-hour walltime = %v, want %v", test.state, got, test.want)
+		}
 	}
 }
 
 // A UTC stamp sent to a cluster west of UTC lands in that cluster's future, and
 // sacct then refuses the whole range with "Start time ... is after end time",
-// failing every status check. The window is relative so no timezone has to agree.
-func TestSchedulerLookbackIsRelativeAndNeverInTheClusterFuture(t *testing.T) {
-	now := time.Date(2026, 8, 24, 4, 51, 58, 0, time.UTC)
-	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	runtime.CreatedAt = now.Add(-90 * time.Second)
-
-	got := schedulerLookback([]Runtime{runtime}, now)
-	if !strings.HasPrefix(got, "now-") || !strings.HasSuffix(got, "seconds") {
-		t.Fatalf("lookback %q is not relative to the cluster's clock", got)
-	}
-	seconds, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(got, "now-"), "seconds"), 10, 64)
-	if err != nil {
-		t.Fatalf("lookback %q does not carry a count Slurm can read: %v", got, err)
-	}
-	if seconds <= 0 {
-		t.Fatalf("lookback %q would ask sacct to start in the future", got)
-	}
-	if seconds < 90 {
-		t.Fatalf("lookback %q does not reach back to the oldest runtime", got)
-	}
-}
-
-// A runtime created just now, or one whose clock ran ahead of ours, must still
-// produce a window that reaches backwards.
-func TestSchedulerLookbackHandlesARuntimeNotOlderThanNow(t *testing.T) {
+// failing every status check. The window is therefore relative, always reaches
+// back far enough to cover the oldest runtime, and is capped so it never becomes
+// a scan of the cluster's whole accounting history.
+func TestSchedulerLookbackIsRelativeBoundedAndReachesTheOldestRuntime(t *testing.T) {
 	now := time.Now()
-	for name, created := range map[string]time.Time{
-		"created now":       now,
-		"created in future": now.Add(10 * time.Minute),
-		"no creation time":  {},
+	longest := int64(schedulerLookbackMax.Seconds())
+	for name, test := range map[string]struct {
+		created  time.Time
+		min, max int64
+	}{
+		"90 seconds old":    {now.Add(-90 * time.Second), 90, longest},
+		"created now":       {now, 1, longest},
+		"created in future": {now.Add(10 * time.Minute), 1, longest},
+		"no creation time":  {time.Time{}, 1, longest},
+		"created in 1970":   {time.Unix(1, 0), longest, longest},
 	} {
 		runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-		runtime.CreatedAt = created
+		runtime.CreatedAt = test.created
 		got := schedulerLookback([]Runtime{runtime}, now)
-		seconds, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(got, "now-"), "seconds"), 10, 64)
-		if err != nil || seconds <= 0 {
-			t.Errorf("%s: lookback %q is not a backwards window", name, got)
+		if !strings.HasPrefix(got, "now-") || !strings.HasSuffix(got, "seconds") {
+			t.Errorf("%s: lookback %q is not relative to the cluster's clock", name, got)
+			continue
 		}
-	}
-}
-
-// An unbounded window is a scan of the cluster's whole accounting history, which
-// is slow for every user of it, so it is capped.
-func TestSchedulerLookbackIsBounded(t *testing.T) {
-	now := time.Now()
-	ancient := pendingRuntime("rt-111111111111", "alpha", "101")
-	ancient.CreatedAt = time.Unix(1, 0)
-	got := schedulerLookback([]Runtime{ancient}, now)
-	seconds, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(got, "now-"), "seconds"), 10, 64)
-	if err != nil {
-		t.Fatalf("lookback %q does not carry a count Slurm can read", got)
-	}
-	if want := int64(schedulerLookbackMax.Seconds()); seconds != want {
-		t.Fatalf("a 1970 runtime asked sacct for %d seconds of history, want the %d cap", seconds, want)
+		seconds, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(got, "now-"), "seconds"), 10, 64)
+		if err != nil {
+			t.Errorf("%s: lookback %q does not carry a count Slurm can read: %v", name, got, err)
+			continue
+		}
+		if seconds < test.min || seconds > test.max {
+			t.Errorf("%s: lookback of %d seconds is outside [%d, %d]", name, seconds, test.min, test.max)
+		}
 	}
 }

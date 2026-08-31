@@ -52,7 +52,6 @@ func serveMixedOwnerRequest(t *testing.T, handler http.Handler, path string) *ht
 
 func TestRuntimeHTTPReadsDoNotExposeAnotherOwner(t *testing.T) {
 	service := testService(t)
-	service.Logs = NewRuntimeLogs()
 	owned := mixedOwnerRuntime("rt-111111111111", testPrincipal)
 	other := mixedOwnerRuntime("rt-222222222222", otherTestPrincipal)
 	putRuntimes(t, service, owned, other)
@@ -84,12 +83,11 @@ func TestRuntimeHTTPReadsDoNotExposeAnotherOwner(t *testing.T) {
 
 func TestRuntimeListDropsAnotherOwnersRuntimesAndLogs(t *testing.T) {
 	service := testService(t)
-	service.Logs = NewRuntimeLogs()
 	owned := mixedOwnerRuntime("rt-111111111111", testPrincipal)
 	other := mixedOwnerRuntime("rt-222222222222", otherTestPrincipal)
 	putRuntimes(t, service, owned, other)
-	_ = service.Logs.Append(owned.ID, "stdout", "owned-log-line")
-	_ = service.Logs.Append(other.ID, "stdout", "other-owner-log-line")
+	service.Logs.Append(owned.ID, "owned-log-line")
+	service.Logs.Append(other.ID, "other-owner-log-line")
 
 	api, handler := mixedOwnerHandler(t, service)
 	defer api.Close()
