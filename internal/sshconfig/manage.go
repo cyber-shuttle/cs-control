@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
+	"github.com/cyber-shuttle/cs-control/internal/safeio"
 )
 
 // Entries this package writes live between these two markers. Everything
@@ -293,21 +294,5 @@ func (c Config) rewrite(mutate func([]string) ([]string, error)) error {
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".cybershuttle-ssh-config-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(temporary.Name())
-	if _, err := temporary.WriteString(strings.Join(updated, "\n") + "\n"); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporary.Name(), path)
+	return safeio.ReplaceFile(path, []byte(strings.Join(updated, "\n")+"\n"), nil)
 }

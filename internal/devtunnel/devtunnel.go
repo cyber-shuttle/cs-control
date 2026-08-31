@@ -101,14 +101,6 @@ func NewClient(baseURL string, client *http.Client) (*Client, error) {
 	return newClientForBase(base, client), nil
 }
 
-func newClient(baseURL string, client *http.Client) (*Client, error) {
-	base, err := httpx.ParseBaseURL(baseURL, "Dev Tunnels base URL")
-	if err != nil {
-		return nil, err
-	}
-	return newClientForBase(base, client), nil
-}
-
 func newClientForBase(base *url.URL, client *http.Client) *Client {
 	return &Client{baseURL: base, client: BoundedClient(client, devTunnelTimeout)}
 }
@@ -131,7 +123,7 @@ func IsAPIHost(host string) bool {
 }
 
 func (m *Client) Create(ctx context.Context, req CreateRequest) (Record, error) {
-	if err := validateTunnelIdentity(req.OAuthToken, req.TunnelID, ""); err != nil || req.DurationSeconds < MinDurationSeconds || req.DurationSeconds > MaxDurationSeconds {
+	if req.DurationSeconds < MinDurationSeconds || req.DurationSeconds > MaxDurationSeconds {
 		return Record{}, errors.New("Dev Tunnel create request is invalid")
 	}
 	body, err := json.Marshal(createTunnelBody{
@@ -143,10 +135,8 @@ func (m *Client) Create(ctx context.Context, req CreateRequest) (Record, error) 
 	if err != nil {
 		return Record{}, errors.New("marshal Dev Tunnel create request")
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, m.client.Timeout)
-	defer cancel()
 	endpoint := m.tunnelURL(req.TunnelID, "", true, false)
-	request, err := m.newRequest(requestCtx, http.MethodPut, endpoint, req.OAuthToken, bytes.NewReader(body))
+	request, err := m.newRequest(ctx, http.MethodPut, endpoint, req.OAuthToken, bytes.NewReader(body))
 	if err != nil {
 		return Record{}, err
 	}
@@ -156,12 +146,7 @@ func (m *Client) Create(ctx context.Context, req CreateRequest) (Record, error) 
 }
 
 func (m *Client) Get(ctx context.Context, req GetRequest) (Record, error) {
-	if err := validateTunnelIdentity(req.AccessToken, req.TunnelID, req.ClusterID); err != nil {
-		return Record{}, errors.New("Dev Tunnel get request is invalid")
-	}
-	requestCtx, cancel := context.WithTimeout(ctx, m.client.Timeout)
-	defer cancel()
-	request, err := m.newRequest(requestCtx, http.MethodGet, m.tunnelURL(req.TunnelID, req.ClusterID, false, true), req.AccessToken, nil)
+	request, err := m.newRequest(ctx, http.MethodGet, m.tunnelURL(req.TunnelID, req.ClusterID, false, true), req.AccessToken, nil)
 	if err != nil {
 		return Record{}, err
 	}
@@ -170,12 +155,7 @@ func (m *Client) Get(ctx context.Context, req GetRequest) (Record, error) {
 }
 
 func (m *Client) Delete(ctx context.Context, req DeleteRequest) error {
-	if err := validateTunnelIdentity(req.OAuthToken, req.TunnelID, req.ClusterID); err != nil {
-		return err
-	}
-	requestCtx, cancel := context.WithTimeout(ctx, m.client.Timeout)
-	defer cancel()
-	request, err := m.newRequest(requestCtx, http.MethodDelete, m.tunnelURL(req.TunnelID, req.ClusterID, false, false), req.OAuthToken, nil)
+	request, err := m.newRequest(ctx, http.MethodDelete, m.tunnelURL(req.TunnelID, req.ClusterID, false, false), req.OAuthToken, nil)
 	if err != nil {
 		return err
 	}
@@ -187,13 +167,6 @@ func (m *Client) Delete(ctx context.Context, req DeleteRequest) error {
 		return nil
 	}
 	return fmt.Errorf("delete Dev Tunnel: HTTP %d", status)
-}
-
-func validateTunnelIdentity(token, tunnelID, clusterID string) error {
-	if token == "" || len(token) > MaxToken || strings.ContainsAny(token, "\x00\r\n") || !devTunnelIDPattern.MatchString(tunnelID) || clusterID != "" && !clusterIDPattern.MatchString(clusterID) {
-		return errors.New("Dev Tunnel request is invalid")
-	}
-	return nil
 }
 
 func (m *Client) newRequest(ctx context.Context, method string, endpoint *url.URL, token string, body io.Reader) (*http.Request, error) {
@@ -239,7 +212,7 @@ func (m *Client) doRecord(request *http.Request, token, expectedID string, requi
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return Record{}, errors.New("parse Dev Tunnel response")
 	}
-	if result.TunnelID != expectedID || !devTunnelIDPattern.MatchString(result.TunnelID) || !clusterIDPattern.MatchString(result.ClusterID) || result.Expiration.IsZero() {
+	if result.TunnelID != expectedID || !clusterIDPattern.MatchString(result.ClusterID) || result.Expiration.IsZero() {
 		return Record{}, errors.New("Dev Tunnel response identity is invalid")
 	}
 	hostToken := result.AccessTokens["host manage:ports"]
@@ -269,7 +242,7 @@ func validateTunnelPorts(values []tunnelPortResponse) ([]PortRecord, error) {
 	ports := make([]PortRecord, 0, len(values))
 	seenPorts := make(map[uint16]struct{}, len(values))
 	for _, port := range values {
-		if port.PortNumber == 0 || !validTunnelProtocol(port.Protocol) || !validBoundedTunnelText(port.Description, 1024, true) || len(port.PortForwardingURIs) > maxPortForwardingURIs {
+		if port.PortNumber == 0 || !validTunnelProtocol(port.Protocol) || len(port.Description) > 1024 || strings.ContainsFunc(port.Description, func(r rune) bool { return r < 0x20 || r == 0x7f }) || len(port.PortForwardingURIs) > maxPortForwardingURIs {
 			return nil, errors.New("Dev Tunnel response port is invalid")
 		}
 		if _, duplicate := seenPorts[port.PortNumber]; duplicate {
@@ -296,18 +269,6 @@ func validateTunnelPorts(values []tunnelPortResponse) ([]PortRecord, error) {
 
 func validTunnelProtocol(protocol string) bool {
 	return slices.Contains([]string{"auto", "tcp", "udp", "ssh", "rdp", "http", "https"}, protocol)
-}
-
-func validBoundedTunnelText(value string, limit int, allowEmpty bool) bool {
-	if len(value) > limit || !allowEmpty && value == "" {
-		return false
-	}
-	for _, char := range value {
-		if char < 0x20 || char == 0x7f {
-			return false
-		}
-	}
-	return true
 }
 
 func ValidatePublicURI(raw string) error {

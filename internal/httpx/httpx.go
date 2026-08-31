@@ -45,29 +45,23 @@ func BoundedClient(client *http.Client, fallback time.Duration) *http.Client {
 	return &bounded
 }
 
-// ReadBounded reads at most limit bytes and fails rather than truncating, so an
-// oversized response is rejected instead of being parsed as a partial one.
-func ReadBounded(reader io.Reader, limit int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, errors.New("response body exceeds limit")
-	}
-	return body, nil
-}
-
-// Do sends request and returns its bounded body alongside the status, leaving
-// status interpretation to the caller.
+// Do sends request and returns its body alongside the status, leaving status
+// interpretation to the caller. An oversized body is rejected rather than
+// truncated, so a partial response is never parsed as a whole one.
 func Do(client *http.Client, request *http.Request, limit int64) ([]byte, int, error) {
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer response.Body.Close()
-	body, err := ReadBounded(response.Body, limit)
-	return body, response.StatusCode, err
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, response.StatusCode, err
+	}
+	if int64(len(body)) > limit {
+		return nil, response.StatusCode, errors.New("response body exceeds limit")
+	}
+	return body, response.StatusCode, nil
 }
 
 // NewRequest builds an outbound request carrying this process's standard
@@ -89,8 +83,6 @@ func NewRequest(ctx context.Context, method, endpoint, bearer string, body io.Re
 
 // GetJSON decodes a bounded successful JSON response into destination.
 func GetJSON(ctx context.Context, client *http.Client, endpoint, bearer string, limit int64, destination any) error {
-	ctx, cancel := context.WithTimeout(ctx, client.Timeout)
-	defer cancel()
 	request, err := NewRequest(ctx, http.MethodGet, endpoint, bearer, nil)
 	if err != nil {
 		return err
