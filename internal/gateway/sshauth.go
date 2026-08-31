@@ -18,14 +18,13 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/httpx"
-	"github.com/cyber-shuttle/cs-control/internal/proc"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 	"github.com/gorilla/websocket"
 )
 
-// controlUpgrader serves both routes. Requests have already passed the
-// exact-origin OAuth boundary.
-var controlUpgrader = newUpgrader(authn.ControlWebSocketProtocol)
+// Requests have already passed the exact-origin OAuth boundary, so CheckOrigin
+// adds nothing on top of it.
+var controlUpgrader = websocket.Upgrader{Subprotocols: []string{authn.ControlWebSocketProtocol}, CheckOrigin: func(*http.Request) bool { return true }}
 
 const (
 	maxAuthFrame       = 64 << 10
@@ -59,11 +58,9 @@ type authSession struct {
 	controlPath string
 	ctx         context.Context
 	cancel      context.CancelFunc
-	done        chan struct{}
 
 	mu       sync.Mutex
 	finished bool
-	owned    bool
 	cmd      *exec.Cmd
 	master   *os.File
 	conn     *websocket.Conn
@@ -74,7 +71,6 @@ type authSession struct {
 
 type ownedMaster struct {
 	alias    string
-	path     string
 	lock     *os.File
 	cmd      *exec.Cmd
 	master   *os.File
@@ -130,7 +126,7 @@ func (m *SSHAuthManager) admit(alias string) (*authSession, error) {
 		}
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
-	session := &authSession{alias: alias, controlPath: path, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	session := &authSession{alias: alias, controlPath: path, ctx: ctx, cancel: cancel}
 	m.active[path] = session
 	m.wg.Add(1)
 	return session, nil
@@ -139,12 +135,6 @@ func (m *SSHAuthManager) admit(alias string) (*authSession, error) {
 func (m *SSHAuthManager) finish(session *authSession, own bool) bool {
 	m.mu.Lock()
 	session.mu.Lock()
-	if session.finished {
-		owned := session.owned
-		session.mu.Unlock()
-		m.mu.Unlock()
-		return owned
-	}
 	// A successful process may race with shutdown. Do not publish ownership
 	// after Close; let the caller reap the exact process while retaining its lock.
 	if own && (m.closed || session.cmd == nil || session.waitDone == nil) {
@@ -152,13 +142,13 @@ func (m *SSHAuthManager) finish(session *authSession, own bool) bool {
 		m.mu.Unlock()
 		return false
 	}
-	session.finished, session.owned = true, own
+	session.finished = true
 	if m.active[session.controlPath] == session {
 		delete(m.active, session.controlPath)
 	}
 	if own {
 		m.owned[session.controlPath] = &ownedMaster{
-			alias: session.alias, path: session.controlPath, lock: session.lock,
+			alias: session.alias, lock: session.lock,
 			cmd: session.cmd, master: session.master, waitDone: session.waitDone,
 		}
 		session.lock = nil
@@ -167,7 +157,6 @@ func (m *SSHAuthManager) finish(session *authSession, own bool) bool {
 	m.mu.Unlock()
 	sshexec.UnlockControl(session.lock)
 	session.lock = nil
-	close(session.done)
 	m.wg.Done()
 	return own
 }
@@ -229,10 +218,8 @@ func (s *authSession) closeIO() {
 	}
 }
 
-var authTerminateGrace = 2 * time.Second
-
 // stopAndReap ends a session that never became an owned master. A closed
-// waitDone already tells TerminateGroup the process was reaped, so this needs no
+// waitDone already tells KillGroup the process was reaped, so this needs no
 // record of its own.
 func stopAndReap(session *authSession) {
 	session.mu.Lock()
@@ -244,7 +231,7 @@ func stopAndReap(session *authSession) {
 	if cmd == nil || cmd.Process == nil || waitDone == nil {
 		return
 	}
-	proc.TerminateGroup(cmd, waitDone, authTerminateGrace)
+	sshexec.KillGroup(cmd, waitDone)
 }
 
 func closeMaster(master *ownedMaster) {
@@ -254,7 +241,7 @@ func closeMaster(master *ownedMaster) {
 	// Server-owned authentication keeps the foreground OpenSSH process. Kill
 	// and reap that exact process group; never address or unlink whatever may
 	// currently occupy its former ControlPath.
-	proc.TerminateGroup(master.cmd, master.waitDone, authTerminateGrace)
+	sshexec.KillGroup(master.cmd, master.waitDone)
 	if master.master != nil {
 		_ = master.master.Close()
 	}
@@ -341,11 +328,6 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 		finished = true
 		m.finish(session, false)
 		return
-	}
-	select {
-	case <-session.ctx.Done():
-		return
-	default:
 	}
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: ptyInitialCols, Rows: ptyInitialRows})
 	if err != nil {
@@ -470,9 +452,14 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 			session.mu.Lock()
 			err := session.waitErr
 			session.mu.Unlock()
-			code, message := exitDetails(err)
+			// A fixed message rather than the process error, so no diagnostic
+			// from the remote host reaches the browser.
+			code, message := 1, "SSH authentication failed"
+			var exit *exec.ExitError
 			if err == nil {
-				code, message = 1, "SSH control master exited before becoming ready"
+				message = "SSH control master exited before becoming ready"
+			} else if errors.As(err, &exit) {
+				code = exit.ExitCode()
 			}
 			_ = writeJSON(conn, authWriteTimeout, exitFrame(code, message))
 			return
