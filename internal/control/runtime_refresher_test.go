@@ -118,9 +118,7 @@ func TestHTTPRuntimeListReturnsCachedWhileSSHBlocksAndSingleFlights(t *testing.T
 	if elapsed := time.Since(before); elapsed > 100*time.Millisecond {
 		t.Fatalf("cached GET blocked for %v", elapsed)
 	}
-	if response.Code != http.StatusOK ||
-		!strings.Contains(response.Body.String(), `"refreshing":true`) ||
-		!strings.Contains(response.Body.String(), `"state":"QUEUED"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"QUEUED"`) {
 		t.Fatalf("unexpected cached response: %d %s", response.Code, response.Body.String())
 	}
 	waitForFile(t, logPath)

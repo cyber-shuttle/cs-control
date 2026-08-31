@@ -44,7 +44,7 @@ func assertJSONContractFixture(t *testing.T, value any, path string) []byte {
 }
 
 func TestRuntimePublicJSONContractIsNarrow(t *testing.T) {
-	fixture := assertJSONContractFixture(t, RuntimeResponseFrom(runtimeContractValue()), "testdata/runtime-contract.json")
+	fixture := assertJSONContractFixture(t, runtimeContractValue().RuntimeResponse, "testdata/runtime-contract.json")
 	for _, forbidden := range []string{"owner", "tunnel", "capability", "token", "privateRoot", "workspaceRoot", "services", "jupyter", "jobId", "jobName", "node", "linkspanSpec", "portUriFormat", "portSshCommandFormat"} {
 		if strings.Contains(strings.ToLower(string(fixture)), strings.ToLower(forbidden)) {
 			t.Fatalf("public runtime fixture contains private field %q: %s", forbidden, fixture)

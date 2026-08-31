@@ -12,7 +12,7 @@ Each subsystem is a package and depends only downward. Add code to the lowest
 layer that can hold it, and never introduce an upward import.
 
 ```
-apierr  safeio  proc                  error shape, private files, process groups
+apierr  safeio                        error shape, private files
 httpx                                 bounded client/body, HTTPS base-URL policy, JSON writers
 sshconfig                             reads ~/.ssh/config, writes only its own managed block, never runs ssh
 sshexec                               argument vectors, control socket, bounded output
@@ -30,25 +30,14 @@ between two subsystems.
 ## Commands
 
 ```bash
-go test -race ./...
+go build ./...
 go vet ./...
-go build -o /tmp/csctl-final ./cmd/csctl
+go test -race ./...
 ```
 
 ## Production server
 
-```bash
-csctl serve \
-  --listen 127.0.0.1:8045 \
-  --oauth-authority https://login.microsoftonline.com/<tenant>/ \
-  --allowed-origin https://workspace.example.edu \
-  --allowed-origin http://127.0.0.1:8000
-```
-
-Tunnel creation uses the global Dev Tunnels management endpoint by default. A
-recognized cluster endpoint can be selected with
-`--devtunnel-management-url` or `CSCTL_DEVTUNNEL_MANAGEMENT_URL`; OAuth access
-token validation remains on the global endpoint.
+Serve invocation: README.md#enactment-api.
 
 At least one exact origin is required. Permit HTTPS or loopback HTTP only; no
 wildcards. HTTP requests carry a Dev Tunnels access token plus a signed
@@ -70,8 +59,9 @@ broker, or token persistence/logging.
   validation result, and `POST /api/v1/runtimes` creates the reviewed
   allocation. Keep validation and create as OAuth-authenticated API actions.
 - The batch script execs Linkspan and names no application. What runs inside
-  an allocation is the workflow's business: provisioning installs a per-runtime
-  workflow beside the allocation, and the script points Linkspan at it, so the
+  an allocation is the workflow's business: the provisioning script writes the
+  per-runtime workflow beside the allocation, and the batch script points
+  Linkspan at it, so the
   service starts through Linkspan once Linkspan is live. `shell.exec` runs
   without a shell and expands nothing, so the workflow carries only validated
   remote paths; the Jupyter identity token and port reach the server through
@@ -89,21 +79,12 @@ broker, or token persistence/logging.
   replaced and inherits that run's outcome. For the same reason the window
   that tolerates a job Slurm has not published yet is measured from the
   record's last change, not from the card's creation, which a relaunch keeps.
-  Names written before the generation was part of them stay valid, because a
-  live job cannot be renamed.
 - Create one creator-owned Dev Tunnel per allocation generation, declaring both
   allocation ports at creation. Never request tunnel-wide anonymous access;
   grant anonymous connect only on the Jupyter port, whose authorization is
   Jupyter Server's own identity token. Disable traffic inspection. Request `customExpiration` as walltime plus
-  cleanup grace, floored at one hour and
-  capped at 30 days. Require the response duration to match and its returned
-  creation/expiration timestamps to agree within the documented one-second
-  serialization tolerance; persist the returned expiration and compensate
-  before committing credentials/state on any mismatch. Create may return both
-  relay formats empty before Linkspan attaches; retain that pre-host state while
-  submitting, queued, starting, stopping, or terminal when the job ends before
-  host attachment. Require management discovery to supply and validate both
-  formats before runtime access or readiness. Treat every Create error as
+  cleanup grace, floored at one hour and capped at 30 days; persist the returned
+  expiration and compensate on a past expiration. Treat every Create error as
   uncertain server-side creation and idempotently delete the deterministic
   tunnel ID with the request authority before returning.
 - Persist only non-secret scheduler and tunnel state in runtime storage. Store
@@ -129,18 +110,16 @@ broker, or token persistence/logging.
   home directory. It defaults to `$HOME/.cybershuttle/bin/linkspan`.
 - An allocation prepares itself. The login node supplies only the two binaries
   a job cannot start without -- the Linkspan release it execs and uv, both
-  single downloads that take seconds -- installed by one constant script during
-  create, after the runtime is durable so its progress streams into the tail
-  the browser polls. The environment, its dependencies, the server, and the
+  single downloads that take seconds -- and the workflow document, all in one
+  constant script during create, after the runtime is durable so its progress
+  streams into the tail the browser polls. The environment, its dependencies, the server, and the
   wait for that server to answer all happen inside the allocation, through the
   workflow Linkspan runs. Both binaries belong to the account, not to a
   workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens.
   An allocation hosts a tunnel this control plane created, so its Linkspan must
   accept `--tunnel-host-token`; preparation refuses a host whose Linkspan does
   not, rather than letting the allocation die on its first flag.
-  Preparation starts when a host is selected -- the discovery route begins it in
-  the background, minutes before the same person submits -- and outlives the
-  request that triggered it, so a caller that goes away leaves no half-built
+  Preparation outlives the request that triggered it, so a caller that goes away leaves no half-built
   environment, and one preparation runs per host at a time -- a second caller is refused with `runtime_provisioning_in_progress`
   rather than made to wait behind work it cannot see. A host that cannot be
   prepared is refused with the reason and never receives a job.
@@ -162,9 +141,8 @@ broker, or token persistence/logging.
 - Use fixed argument arrays, bounded outputs, and timeouts for SSH/Slurm.
 - Carry delegated OAuth and validated principal in request context only; do not
   place them in lifecycle request/state structs.
-- Use OAuth Bearer for tunnel create/delete, persisted connect-token Bearer for
-  management discovery, and `X-Tunnel-Authorization: tunnel` for tunneled
-  control calls.
+- Use OAuth Bearer for tunnel create/delete; `Authorization: tunnel <connect
+  token>` for the management Get behind `/access`.
 - Redact OAuth, host, connect, and Jupyter tokens from errors, logs, scripts,
   runtime responses, and tests. The Jupyter token is allowed only in the
   job environment and the runtime-access JSON.
@@ -176,6 +154,7 @@ broker, or token persistence/logging.
   when nobody is reading, so a runtime whose owner closed the tab still reaches
   its terminal state. There is no push channel:
   `GET /api/v1/runtimes` is the one read the browser polls, and it carries the
-  caller's runtimes, whether a refresh is in flight, and their log tails --
-  filtered to the same owned set, because a tail is as private as the runtime
-  that produced it.
+  caller's runtimes and their log tails -- filtered to the same owned set,
+  because a tail is as private as the runtime that produced it. The strong
+  `ETag` is taken over that filtered body, so it cannot match across principals,
+  and a poll that still matches is answered `304` with no body.

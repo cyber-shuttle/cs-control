@@ -61,7 +61,7 @@ func TestRuntimeAccessDiscoversOwnerJupyterWithoutCallingTheAllocation(t *testin
 	putRuntimes(t, service, runtime)
 	api := NewHTTPHandler(service, nil)
 	defer api.Close()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/runtimes/"+runtime.ID+"/access", nil).WithContext(authn.WithPrincipal(context.Background(), testPrincipal))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/runtimes/"+runtime.ID+"/access", nil).WithContext(testTunnelContext())
 	response := httptest.NewRecorder()
 	api.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -102,7 +102,7 @@ func TestRuntimeAccessIsOwnerOnly(t *testing.T) {
 	api := NewHTTPHandler(service, nil)
 	defer api.Close()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/runtimes/"+runtime.ID+"/access", nil)
-	request = request.WithContext(authn.WithPrincipal(request.Context(), authn.Principal{Subject: "other", Tenant: testPrincipal.Tenant}))
+	request = request.WithContext(authn.WithTunnelAuthorization(request.Context(), authn.TunnelAuthorization{OAuthToken: "test-oauth-token", Principal: authn.Principal{Subject: "other", Tenant: testPrincipal.Tenant}}))
 	response := httptest.NewRecorder()
 	api.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden || strings.Contains(response.Body.String(), testJupyterToken) {

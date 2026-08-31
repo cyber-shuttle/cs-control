@@ -8,8 +8,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/authn"
-	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 )
 
@@ -78,6 +76,9 @@ func gpuSupports(partition Partition, gpuType string, gpuCount int) bool {
 }
 
 func validateCreate(request *CreateRequest) error {
+	if request.ID == "" && request.IdempotencyKey == "" {
+		return apierr.New("invalid_idempotency_key", "idempotencyKey is required", 400)
+	}
 	if !sshconfig.ValidAlias(request.SSHHost) {
 		return sshconfig.ErrInvalidAlias
 	}
@@ -184,7 +185,7 @@ func (s Service) resolveWorkspaceRoot(ctx context.Context, alias, home, expressi
 	return resolved, nil
 }
 
-func validateWorkspacePrivateLayout(home, workspace, privateRoot, runtimeID, runtimeBase, expression string) error {
+func validateWorkspacePrivateLayout(home, workspace, privateRoot, runtimeID, expression string) error {
 	if workspace == privateRoot || strings.HasPrefix(workspace, privateRoot+"/") {
 		return apierr.New("invalid_root_folder", "workspace resolves inside the private runtime directory", 400)
 	}
@@ -194,7 +195,7 @@ func validateWorkspacePrivateLayout(home, workspace, privateRoot, runtimeID, run
 	// HOME is an explicitly supported workspace. Its private state is safe only
 	// at the exact hidden runtime path.
 	expected := pathpkg.Join(home, ".cybershuttle", "runtimes", runtimeID)
-	if workspace == home && homeRootExpression(expression) && runtimeBase == defaultRuntimeBase && privateRoot == expected {
+	if workspace == home && homeRootExpression(expression) && privateRoot == expected {
 		return nil
 	}
 	return apierr.New("invalid_root_folder", "workspace may contain private runtime state only at $HOME/.cybershuttle/runtimes/{runtimeId}", 400)
@@ -215,12 +216,6 @@ func safeRemotePath(value string) bool {
 // A remote executable may be anchored at $HOME, so one setting serves hosts
 // whose accounts do not share a home directory. Discovery resolves the anchor
 // before the path reaches a script.
-// A runtime stored before the home was recorded is still a valid record: the
-// home is read when a runtime is created, and a stored one is never resumed.
-func validStoredHome(runtime *Runtime) bool {
-	return runtime.HomeDir == "" || safeRemotePath(runtime.HomeDir)
-}
-
 func safeRemoteExecutable(value string) bool {
 	if rest, anchored := strings.CutPrefix(value, "$HOME/"); anchored {
 		return safeRemotePath("/" + rest)
@@ -236,58 +231,9 @@ func resolveRemoteExecutable(value, home string) string {
 	return pathpkg.Join(home, rest)
 }
 
-func validateStoredRuntime(key string, runtime *Runtime) error {
-	if runtime == nil || !idPattern.MatchString(key) || runtime.ID != key || !knownState(runtime.State) {
-		return errors.New("runtime identity or state is invalid")
-	}
-	if !sshconfig.ValidAlias(runtime.SSHHost) || !namePattern.MatchString(runtime.Partition) || !validWorkspaceExpression(runtime.RootFolder) || !safeRemotePath(runtime.PrivateRoot) || !safeRemotePath(runtime.WorkspaceRoot) || !validStoredHome(runtime) || !validStoredWorkspacePrivateLayout(runtime) {
-		return errors.New("runtime contains invalid fields")
-	}
-	if !validRuntimeJobName(runtime) || (runtime.JobID != "" && !jobPattern.MatchString(runtime.JobID)) || (runtime.Node != "" && !nodePattern.MatchString(runtime.Node)) {
-		return errors.New("runtime scheduler metadata is invalid")
-	}
-	if runtime.CreatedAt.IsZero() || runtime.UpdatedAt.IsZero() {
-		return errors.New("timestamps are required")
-	}
-	if !generationPattern.MatchString(runtime.Generation) || !authn.ValidIdentityValue(runtime.Owner.Subject) || !authn.ValidIdentityValue(runtime.Owner.Tenant) {
-		return errors.New("runtime allocation identity is invalid")
-	}
-	tunnelID, err := allocationTunnelID(runtime.ID, runtime.Generation)
-	if err != nil {
-		return errors.New("runtime tunnel metadata is invalid")
-	}
-	if runtime.Tunnel.ID == "" {
-		if runtime.Tunnel != (TunnelMetadata{}) || runtime.State != "SUBMITTING" && runtime.State != "STOPPING" && runtime.State != "STOPPED" && runtime.State != "FAILED" {
-			return errors.New("runtime tunnel metadata is invalid")
-		}
-	} else if runtime.Tunnel.ID != tunnelID || !devtunnel.ValidClusterID(runtime.Tunnel.ClusterID) || runtime.Tunnel.ExpiresAt.IsZero() {
-		return errors.New("runtime tunnel metadata is invalid")
-	}
-	return nil
-}
-
-func validStoredWorkspacePrivateLayout(runtime *Runtime) bool {
-	// The same rule as at creation. A stored runtime carries no record of the
-	// home it was discovered against, so the workspace stands in for it: that
-	// makes the home clause trivially true and leaves the overlap decided by
-	// the expression and the exact private path, which is all the stored form
-	// ever checked.
-	return validateWorkspacePrivateLayout(runtime.WorkspaceRoot, runtime.WorkspaceRoot,
-		runtime.PrivateRoot, runtime.ID, defaultRuntimeBase, runtime.RootFolder) == nil
-}
-
 func homeRootExpression(value string) bool {
 	switch value {
 	case ".", "~", "$HOME", "${HOME}":
-		return true
-	default:
-		return false
-	}
-}
-
-func knownState(value string) bool {
-	switch value {
-	case "SUBMITTING", "QUEUED", "STARTING", "READY", "STOPPING", "STOPPED", "FAILED":
 		return true
 	default:
 		return false

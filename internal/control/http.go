@@ -2,6 +2,8 @@ package control
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,8 +84,7 @@ func (a *HTTPAPI) mux() *http.ServeMux {
 		"/api/v1/ssh/{alias}/auth":     {http.MethodGet: requireUpgrade("SSH authentication requires a WebSocket", a.sshAuth)},
 		"/api/v1/ssh/{alias}/slurm":    {http.MethodGet: answer(http.StatusOK, a.discoverSlurm)},
 		"/api/v1/ssh/{alias}/test":     {http.MethodPost: answer(http.StatusOK, a.testHost)},
-		"/api/v1/runtimes":             {http.MethodGet: answer(http.StatusOK, a.listRuntimes), http.MethodPost: answer(http.StatusCreated, a.createRuntime)},
-		"/api/v1/runtimes/script":      {http.MethodPost: answer(http.StatusOK, a.runtimeScript)},
+		"/api/v1/runtimes":             {http.MethodGet: a.listRuntimes, http.MethodPost: answer(http.StatusCreated, a.createRuntime)},
 		"/api/v1/runtimes/validate":    {http.MethodPost: answer(http.StatusOK, a.validateRuntime)},
 		"/api/v1/runtimes/{id}":        {http.MethodGet: answer(http.StatusOK, a.getRuntime), http.MethodDelete: answer(http.StatusOK, a.deleteRuntime)},
 		"/api/v1/runtimes/{id}/start":  {http.MethodPost: answer(http.StatusOK, a.startRuntime)},
@@ -152,14 +153,6 @@ func (a *HTTPAPI) discoverSlurm(request *http.Request) (Resource, error) {
 	return a.Service.Discover(request.Context(), request.PathValue("alias"))
 }
 
-func (a *HTTPAPI) runtimeScript(request *http.Request) (*RuntimeScript, error) {
-	var create CreateRequest
-	if err := decodeJSON(request, &create); err != nil {
-		return nil, err
-	}
-	return a.Service.Script(request.Context(), create)
-}
-
 func (a *HTTPAPI) validateRuntime(request *http.Request) (*ValidationResult, error) {
 	var create CreateRequest
 	if err := decodeJSON(request, &create); err != nil {
@@ -170,22 +163,41 @@ func (a *HTTPAPI) validateRuntime(request *http.Request) (*ValidationResult, err
 
 // Answers from persisted state and starts a reconciliation for the next poll to
 // collect, so a caller never waits on SSH. Tails are filtered to the same owned
-// set as the runtimes: a tail is as private as the runtime that produced it.
-func (a *HTTPAPI) listRuntimes(request *http.Request) (RuntimeList, error) {
+// set as the runtimes: a tail is as private as the runtime that produced it. The
+// browser polls this for as long as a job sits in a queue and every poll carries
+// every tail, so an unchanged body -- ETagged after filtering, and therefore
+// never matching across owners -- answers 304 instead.
+func (a *HTTPAPI) listRuntimes(writer http.ResponseWriter, request *http.Request) {
+	body, err := a.ownedRuntimeList(request)
+	if err != nil {
+		httpx.WriteError(writer, err)
+		return
+	}
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("ETag", etag)
+	if request.Header.Get("If-None-Match") == etag {
+		writer.WriteHeader(http.StatusNotModified)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(body)
+}
+
+func (a *HTTPAPI) ownedRuntimeList(request *http.Request) ([]byte, error) {
 	runtimes, err := a.Service.ListCached()
 	if err != nil {
-		return RuntimeList{}, err
+		return nil, err
 	}
 	principal, err := requestPrincipal(request)
 	if err != nil {
-		return RuntimeList{}, err
+		return nil, err
 	}
 	owned := runtimesOwnedBy(runtimes, principal)
-	return RuntimeList{
-		Runtimes:   publicRuntimes(owned),
-		Refreshing: a.Refresher.Trigger(),
-		Logs:       a.Service.ownedRuntimeTails(owned),
-	}, nil
+	a.Refresher.Trigger()
+	return json.Marshal(RuntimeList{Runtimes: publicRuntimes(owned), Logs: a.Service.ownedRuntimeTails(owned)})
 }
 
 func (a *HTTPAPI) createRuntime(request *http.Request) (RuntimeResponse, error) {
@@ -197,7 +209,7 @@ func (a *HTTPAPI) createRuntime(request *http.Request) (RuntimeResponse, error) 
 	if err != nil {
 		return RuntimeResponse{}, err
 	}
-	return RuntimeResponseFrom(*runtime), nil
+	return runtime.RuntimeResponse, nil
 }
 
 func routedRuntimeID(request *http.Request) (string, error) {
@@ -222,7 +234,7 @@ func (a *HTTPAPI) getRuntime(request *http.Request) (RuntimeResponse, error) {
 		return RuntimeResponse{}, err
 	}
 	a.Refresher.Trigger()
-	return RuntimeResponseFrom(*runtime), nil
+	return runtime.RuntimeResponse, nil
 }
 
 func (a *HTTPAPI) startRuntime(request *http.Request) (RuntimeResponse, error) {
@@ -248,7 +260,7 @@ func (a *HTTPAPI) runtimeAction(request *http.Request, act func(context.Context,
 	if err != nil {
 		return RuntimeResponse{}, err
 	}
-	return RuntimeResponseFrom(*runtime), nil
+	return runtime.RuntimeResponse, nil
 }
 
 func (a *HTTPAPI) runtimeAccess(request *http.Request) (*RuntimeAccessResponse, error) {
@@ -260,11 +272,8 @@ func (a *HTTPAPI) runtimeAccess(request *http.Request) (*RuntimeAccessResponse, 
 }
 
 func requestPrincipal(request *http.Request) (authn.Principal, error) {
-	principal, ok := authn.PrincipalFromContext(request.Context())
-	if !ok || !authn.ValidIdentityValue(principal.Subject) || !authn.ValidIdentityValue(principal.Tenant) {
-		return authn.Principal{}, apierr.New("oauth_principal_required", "validated OAuth principal is required", http.StatusUnauthorized)
-	}
-	return principal, nil
+	auth, err := authn.TunnelAuthorizationFromContext(request.Context())
+	return auth.Principal, err
 }
 
 func runtimesOwnedBy(runtimes []Runtime, principal authn.Principal) []Runtime {
@@ -293,9 +302,6 @@ func (a *HTTPAPI) ownedRuntime(request *http.Request, id string) (*Runtime, erro
 }
 
 func decodeJSON(request *http.Request, target any) error {
-	if request.Body == nil {
-		return apierr.New("invalid_json", "request body is required", 400)
-	}
 	decoder := json.NewDecoder(io.LimitReader(request.Body, maxRequestBody+1))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

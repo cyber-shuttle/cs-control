@@ -36,9 +36,12 @@ func mixedOwnerHandler(t *testing.T, service Service) (*HTTPAPI, http.Handler) {
 	return api, handler
 }
 
-func serveMixedOwnerRequest(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
+func serveMixedOwnerRequest(t *testing.T, handler http.Handler, path string, ifNoneMatch ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodGet, path, nil)
+	for _, etag := range ifNoneMatch {
+		request.Header.Set("If-None-Match", etag)
+	}
 	request.Header.Set("Origin", mixedOwnerOrigin)
 	request.Header.Set("Authorization", "Bearer delegated-token")
 	request.Header.Set(authn.ControlIdentityHeader, testIdentityToken)
@@ -48,38 +51,6 @@ func serveMixedOwnerRequest(t *testing.T, handler http.Handler, path string) *ht
 		t.Fatalf("allowed origin = %q, want %q", got, mixedOwnerOrigin)
 	}
 	return response
-}
-
-func TestRuntimeHTTPReadsDoNotExposeAnotherOwner(t *testing.T) {
-	service := testService(t)
-	service.Logs = NewRuntimeLogs()
-	owned := mixedOwnerRuntime("rt-111111111111", testPrincipal)
-	other := mixedOwnerRuntime("rt-222222222222", otherTestPrincipal)
-	putRuntimes(t, service, owned, other)
-	api, handler := mixedOwnerHandler(t, service)
-	defer api.Close()
-
-	listResponse := serveMixedOwnerRequest(t, handler, "/api/v1/runtimes")
-	var list RuntimeList
-	if listResponse.Code != http.StatusOK || json.Unmarshal(listResponse.Body.Bytes(), &list) != nil {
-		t.Fatalf("runtime list = %d %s", listResponse.Code, listResponse.Body.String())
-	}
-	if len(list.Runtimes) != 1 || list.Runtimes[0].ID != owned.ID || strings.Contains(listResponse.Body.String(), other.ID) {
-		t.Fatalf("mixed-owner runtime list leaked another owner: %s", listResponse.Body.String())
-	}
-
-	otherItem := serveMixedOwnerRequest(t, handler, "/api/v1/runtimes/"+other.ID)
-	if otherItem.Code != http.StatusForbidden || !strings.Contains(otherItem.Body.String(), `"code":"runtime_owner_mismatch"`) {
-		t.Fatalf("other-owner item = %d %s", otherItem.Code, otherItem.Body.String())
-	}
-	missingItem := serveMixedOwnerRequest(t, handler, "/api/v1/runtimes/rt-333333333333")
-	if missingItem.Code != http.StatusNotFound || !strings.Contains(missingItem.Body.String(), `"code":"runtime_not_found"`) {
-		t.Fatalf("missing item = %d %s", missingItem.Code, missingItem.Body.String())
-	}
-	services := serveMixedOwnerRequest(t, handler, "/api/v1/runtimes/"+other.ID+"/services")
-	if services.Code != http.StatusNotFound {
-		t.Fatalf("deleted services route = %d %s", services.Code, services.Body.String())
-	}
 }
 
 func TestRuntimeListDropsAnotherOwnersRuntimesAndLogs(t *testing.T) {
@@ -117,5 +88,19 @@ func TestRuntimeListDropsAnotherOwnersRuntimesAndLogs(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("owner poll exposed %q: %s", forbidden, body)
 		}
+	}
+	// An unchanged inventory answers the next poll without repeating any of it.
+	repeat := serveMixedOwnerRequest(t, handler, "/api/v1/runtimes", response.Header().Get("ETag"))
+	if repeat.Code != http.StatusNotModified || repeat.Body.Len() != 0 {
+		t.Fatalf("unchanged poll = %d %s", repeat.Code, repeat.Body.String())
+	}
+
+	otherItem := serveMixedOwnerRequest(t, handler, "/api/v1/runtimes/"+other.ID)
+	if otherItem.Code != http.StatusForbidden || !strings.Contains(otherItem.Body.String(), `"code":"runtime_owner_mismatch"`) {
+		t.Fatalf("other-owner item = %d %s", otherItem.Code, otherItem.Body.String())
+	}
+	missingItem := serveMixedOwnerRequest(t, handler, "/api/v1/runtimes/rt-333333333333")
+	if missingItem.Code != http.StatusNotFound || !strings.Contains(missingItem.Body.String(), `"code":"runtime_not_found"`) {
+		t.Fatalf("missing item = %d %s", missingItem.Code, missingItem.Body.String())
 	}
 }
