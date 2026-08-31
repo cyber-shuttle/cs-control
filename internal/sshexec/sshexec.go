@@ -300,8 +300,14 @@ func AuthenticationFailure(message string) bool {
 
 func (runner Runner) MasterHealthy(alias, path string) bool {
 	// ServeWebSocket polls this every 50 ms while a user authenticates, so the
-	// stat keeps a missing socket from forking ssh on every tick.
-	if _, err := os.Lstat(path); err != nil {
+	// stat keeps a missing socket from forking ssh on every tick -- and keeps
+	// what ssh is pointed at a private socket this user owns.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm()&0o077 != 0 || int(stat.Uid) != os.Getuid() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

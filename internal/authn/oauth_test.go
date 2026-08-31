@@ -230,3 +230,42 @@ func TestOAuthValidatorRejectsUnvalidatedClaimsAndRedacts(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+// The runtime poll's ETag is only usable cross-origin if the browser is allowed
+// to read the header and to send it back on the next request.
+func TestOAuthBoundaryConditionalPollHeaders(t *testing.T) {
+	const origin = "https://workspace.example.edu"
+	validator := oauthValidatorFunc(func(context.Context, string) (Principal, error) { return testPrincipal, nil })
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"abc"`)
+		w.WriteHeader(http.StatusNotModified)
+	})
+	handler, err := NewOAuthBoundary(next, validator, []string{origin})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	preflight := httptest.NewRequest(http.MethodOptions, "/api/v1/runtimes", nil)
+	preflight.Header.Set("Origin", origin)
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	preflight.Header.Set("Access-Control-Request-Headers", "authorization,if-none-match,"+strings.ToLower(ControlIdentityHeader))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, preflight)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("preflight code=%d body=%q", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(strings.ToLower(rr.Header().Get("Access-Control-Allow-Headers")), "if-none-match") {
+		t.Fatalf("Allow-Headers = %q", rr.Header().Get("Access-Control-Allow-Headers"))
+	}
+
+	actual := httptest.NewRequest(http.MethodGet, "/api/v1/runtimes", nil)
+	actual.Header.Set("Origin", origin)
+	actual.Header.Set("Authorization", "Bearer token-value")
+	actual.Header.Set(ControlIdentityHeader, testIdentityToken)
+	actual.Header.Set("If-None-Match", `"abc"`)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, actual)
+	if rr.Code != http.StatusNotModified || rr.Header().Get("Access-Control-Expose-Headers") != "ETag" {
+		t.Fatalf("code=%d headers=%v", rr.Code, rr.Header())
+	}
+}

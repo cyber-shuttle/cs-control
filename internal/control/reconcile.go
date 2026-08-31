@@ -80,8 +80,16 @@ func unknownToScheduler(runtime Runtime, now time.Time) bool {
 
 // reconcileSnapshots performs all scheduler and endpoint I/O without holding
 // the state lock. Scheduler calls are batched into one SSH execution per host.
-func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []Runtime {
+//
+// Narration is returned per snapshot rather than appended to the tail here: the
+// round runs on a snapshot that the owner may have superseded by stopping or
+// relaunching the runtime, and only the caller's merge lock can tell. Emitting
+// as we go is what let a stale round narrate "Runtime stopped" into the tail of
+// an allocation that had just been started again.
+func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) ([]Runtime, [][]string) {
 	results := append([]Runtime(nil), snapshots...)
+	narration := make([][]string, len(results))
+	status := func(index int, text string) { narration[index] = append(narration[index], text) }
 	byHost := map[string][]int{}
 	for i := range results {
 		if reconcile(results[i].State) {
@@ -112,11 +120,11 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					if outlivedAllocation(results[index], s.now()) {
 						results[index].State = "STOPPED"
 						results[index].Error = ""
-						s.runtimeStatus(results[index].ID, "Allocation reached its wall-time limit")
+						status(index, "Allocation reached its wall-time limit")
 						continue
 					}
 					results[index].Error = err.Error()
-					s.runtimeStatus(results[index].ID, "Runtime status check failed")
+					status(index, "Runtime status check failed")
 				}
 				return
 			}
@@ -137,7 +145,7 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 						if unknownToScheduler(*runtime, s.now()) {
 							runtime.State = "STOPPED"
 							runtime.Error = ""
-							s.runtimeStatus(runtime.ID, "Allocation is no longer known to the scheduler")
+							status(index, "Allocation is no longer known to the scheduler")
 						}
 						continue
 					}
@@ -146,7 +154,7 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					} else {
 						runtime.Error = "scheduler returned no state"
 					}
-					s.runtimeStatus(runtime.ID, "Runtime status is temporarily unavailable")
+					status(index, "Runtime status is temporarily unavailable")
 					continue
 				}
 				if runtime.JobID == "" && observation.jobID != "" {
@@ -154,7 +162,7 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 				}
 				setRuntimeNode(runtime, observation.node)
 				if runtime.Node != "" && runtime.Node != previousNode {
-					s.runtimeStatus(runtime.ID, "Compute node assigned: "+runtime.Node)
+					status(index, "Compute node assigned: "+runtime.Node)
 				}
 				class := classifySchedulerState(observation.state)
 				// A word this scheduler vocabulary does not cover says nothing about
@@ -175,33 +183,33 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 				wasStopping := runtime.State == "STOPPING"
 				next := nextState(runtime.State, class)
 				if next == "STOPPED" || next == "FAILED" {
-					s.runtimeStatus(runtime.ID, "Cleaning up runtime credentials")
+					status(index, "Cleaning up runtime credentials")
 					cleanupErr := s.Credentials.Delete(runtime.ID, runtime.Generation)
 					if cleanupErr != nil {
 						runtime.State = "STOPPING"
 						runtime.Error = "runtime cleanup pending: " + cleanupErr.Error()
-						s.runtimeStatus(runtime.ID, "Runtime cleanup is pending")
+						status(index, "Runtime cleanup is pending")
 						continue
 					}
-					s.runtimeStatus(runtime.ID, "Runtime credential cleanup complete")
+					status(index, "Runtime credential cleanup complete")
 				}
 				runtime.State = next
 				if next != previousState {
 					switch next {
 					case "QUEUED":
-						s.runtimeStatus(runtime.ID, "Runtime is queued")
+						status(index, "Runtime is queued")
 					case "STARTING":
-						s.runtimeStatus(runtime.ID, "Allocation is starting")
+						status(index, "Allocation is starting")
 					case "READY":
-						s.runtimeStatus(runtime.ID, "Allocation is running")
+						status(index, "Allocation is running")
 					case "STOPPED":
 						if class == schedulerExpired {
-							s.runtimeStatus(runtime.ID, "Runtime reached its walltime")
+							status(index, "Runtime reached its walltime")
 						} else {
-							s.runtimeStatus(runtime.ID, "Runtime stopped")
+							status(index, "Runtime stopped")
 						}
 					case "FAILED":
-						s.runtimeStatus(runtime.ID, "Runtime failed")
+						status(index, "Runtime failed")
 					}
 				}
 				if wasStopping && runtime.State == "STOPPING" {
@@ -214,7 +222,7 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 	}
 	wg.Wait()
 	if ctx.Err() != nil {
-		return snapshots
+		return snapshots, make([][]string, len(snapshots))
 	}
 
 	// Startup file collection shares the first running reconciliation round.
@@ -222,16 +230,16 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 	// expose scheduler-confirmed readiness without consulting Linkspan.
 	collected := s.collectStartingRuntimeLogs(ctx, results)
 	if ctx.Err() != nil {
-		return snapshots
+		return snapshots, make([][]string, len(snapshots))
 	}
 	for index := range results {
 		if _, ok := collected[results[index].ID]; ok && results[index].State == "STARTING" {
 			results[index].State = "READY"
-			s.runtimeStatus(results[index].ID, "Allocation is running")
+			status(index, "Allocation is running")
 		}
 	}
 
-	return results
+	return results, narration
 }
 
 // schedulerClass is the family a raw Slurm state belongs to. The scheduler's
@@ -348,7 +356,7 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 	if err != nil {
 		return nil, nil, err
 	}
-	sections, err := framed.Sections(output, schedulerMarkerPrefix, schedulerMarkerCancel, schedulerMarkerQueue, schedulerMarkerAccounting)
+	sections, err := framed.SectionsAfterPreamble(output, schedulerMarkerPrefix, schedulerMarkerCancel, schedulerMarkerQueue, schedulerMarkerAccounting)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -408,8 +416,27 @@ func changedReconciliation(before, after Runtime) bool {
 	return before.State != after.State || before.Error != after.Error || before.JobID != after.JobID || before.Node != after.Node || !before.StartedAt.Equal(after.StartedAt)
 }
 
+// reconciliationSnapshotCurrent reports that the persisted runtime is still the
+// one this round observed, so neither its result nor its narration belongs to a
+// runtime the owner has since stopped or relaunched.
+func reconciliationSnapshotCurrent(current, snapshot *Runtime) bool {
+	return current != nil && current.UpdatedAt.Equal(snapshot.UpdatedAt) && current.State == snapshot.State && current.JobID == snapshot.JobID
+}
+
+// narrateReconciled appends a completed round's narration to the runtime's tail,
+// under the merge lock and only while the snapshot it was written about is still
+// the persisted runtime.
+func (s Service) narrateReconciled(current, snapshot *Runtime, lines []string) {
+	if !reconciliationSnapshotCurrent(current, snapshot) {
+		return
+	}
+	for _, line := range lines {
+		s.runtimeStatus(snapshot.ID, line)
+	}
+}
+
 func mergeReconciled(current, snapshot, candidate *Runtime, now time.Time) bool {
-	if current == nil || !current.UpdatedAt.Equal(snapshot.UpdatedAt) || current.State != snapshot.State || current.JobID != snapshot.JobID {
+	if !reconciliationSnapshotCurrent(current, snapshot) {
 		return false
 	}
 	if !changedReconciliation(*snapshot, *candidate) {

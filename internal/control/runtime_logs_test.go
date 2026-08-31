@@ -1,10 +1,13 @@
 package control
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -207,5 +210,41 @@ func assertNoRuntimeStatusSecrets(t *testing.T, joined string, values ...string)
 		if sensitive != "" && strings.Contains(joined, sensitive) {
 			t.Errorf("sensitive value %q leaked into status tail:\n%s", sensitive, joined)
 		}
+	}
+}
+
+// The runtime poll answers 304 on an unchanged body, so repeating a tail must
+// serialise to exactly what the previous read produced.
+func TestRuntimeLogsUnchangedTailIsByteIdentical(t *testing.T) {
+	logs := NewRuntimeLogs()
+	tick := time.Unix(0, 0).UTC()
+	logs.Now = func() time.Time { tick = tick.Add(time.Second); return tick }
+	logs.Append(runtimeLogIDOne, "same phase")
+	logs.MergeRemote(runtimeLogIDOne, "line one\nline two\n", "")
+	first, ok := logs.Tail(runtimeLogIDOne)
+	if !ok {
+		t.Fatal("no tail")
+	}
+	before, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs.Append(runtimeLogIDOne, "same phase")
+	logs.MergeRemote(runtimeLogIDOne, "line one\nline two\n", "")
+	second, _ := logs.Tail(runtimeLogIDOne)
+	after, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("repeating an unchanged tail changed its body:\n%s\n%s", before, after)
+	}
+	if len(second.Lines) != 3 {
+		t.Fatalf("lines = %#v", second.Lines)
+	}
+	logs.MergeRemote(runtimeLogIDOne, "line one\nline three\n", "")
+	changed, _ := logs.Tail(runtimeLogIDOne)
+	if changed.Lines[1].At != second.Lines[1].At || changed.Lines[2].At == second.Lines[2].At {
+		t.Fatalf("changed tail did not re-stamp exactly the changed line: %#v", changed.Lines)
 	}
 }

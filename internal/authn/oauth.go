@@ -111,9 +111,15 @@ func validateControlOrigin(origin string) error {
 
 func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
-	if origin != "" && !allowOrigin(w, origin, b.originSet) {
-		http.Error(w, "origin is not allowed", http.StatusForbidden)
-		return
+	if origin != "" {
+		if !allowOrigin(w, origin, b.originSet) {
+			http.Error(w, "origin is not allowed", http.StatusForbidden)
+			return
+		}
+		// ETag is not a CORS-safelisted response header, so without this a
+		// cross-origin client cannot read it and the conditional runtime poll
+		// never sends If-None-Match.
+		w.Header().Set("Access-Control-Expose-Headers", "ETag")
 	}
 	if r.Method == http.MethodOptions && origin != "" && r.Header.Get("Access-Control-Request-Method") != "" {
 		if !validPreflight(r) {
@@ -121,7 +127,7 @@ func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+ControlIdentityHeader)
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match, "+ControlIdentityHeader)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -201,7 +207,7 @@ func validPreflight(r *http.Request) bool {
 	default:
 		return false
 	}
-	return preflightHeadersAllowed(r.Header.Get("Access-Control-Request-Headers"), "authorization", "content-type", ControlIdentityHeader)
+	return preflightHeadersAllowed(r.Header.Get("Access-Control-Request-Headers"), "authorization", "content-type", "if-none-match", ControlIdentityHeader)
 }
 
 func bearerToken(header string) (string, bool) {

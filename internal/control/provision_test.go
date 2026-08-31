@@ -3,6 +3,8 @@ package control
 import (
 	"encoding/base64"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -115,5 +117,53 @@ func TestSecondCreateIsRefusedWhileTheHostIsBeingPrepared(t *testing.T) {
 	// Once the preparation finishes, the same request goes through.
 	if _, err := service.Create(testTunnelContext(), createRequest()); err != nil {
 		t.Fatalf("create was still refused after preparation ended: %v", err)
+	}
+}
+
+// runProvisionScript runs the shipped script on this machine against stubs, so
+// its own argument contract is exercised rather than described.
+func runProvisionScript(t *testing.T, arguments ...string) (string, error) {
+	t.Helper()
+	// No release lookup: an unreachable curl leaves the installed binary in place.
+	stubs := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stubs, "curl"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("/bin/sh", append([]string{"-s", "--"}, arguments...)...)
+	command.Stdin = strings.NewReader(provisionScript)
+	command.Env = append(os.Environ(), "PATH="+stubs+":"+os.Getenv("PATH"))
+	output, err := command.CombinedOutput()
+	return string(output), err
+}
+
+func TestProvisionScriptGuardsItsArgumentVector(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "uv"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkspan := filepath.Join(home, ".local", "bin", "linkspan")
+	if err := os.WriteFile(linkspan, []byte("#!/bin/sh\ncase \"$1\" in --version) echo v9.9.9;; --help) echo '  --tunnel-host-token string';; esac\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workflow := filepath.Join(home, ".cybershuttle", "runtimes", "rt-012345abcdef", "workflow.yaml")
+	document := base64.StdEncoding.EncodeToString([]byte("workflow: yes\n"))
+
+	output, err := runProvisionScript(t, "csctl-provision", home, linkspan, workflow, document)
+	if err != nil || !strings.Contains(output, "provision=complete") {
+		t.Fatalf("the vector provisionRuntime sends was refused: %v\n%s", err, output)
+	}
+
+	// The guard must refuse rather than record a failed test and carry on.
+	for _, wrong := range [][]string{
+		{"csctl-provision", home, linkspan, workflow},
+		{"not-csctl-provision", home, linkspan, workflow, document},
+	} {
+		output, err := runProvisionScript(t, wrong...)
+		if err == nil || provisionOutcome(output)["error"] != "arguments" {
+			t.Fatalf("wrong vector %v was not refused: %v\n%s", wrong, err, output)
+		}
 	}
 }

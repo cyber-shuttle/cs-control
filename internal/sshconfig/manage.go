@@ -294,5 +294,10 @@ func (c Config) rewrite(mutate func([]string) ([]string, error)) error {
 	if err != nil {
 		return err
 	}
+	// A dotfiles-managed config is commonly a symlink, and the atomic replace
+	// refuses one, so write through to the file the link names.
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
 	return safeio.ReplaceFile(path, []byte(strings.Join(updated, "\n")+"\n"), nil)
 }

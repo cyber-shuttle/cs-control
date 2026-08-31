@@ -76,3 +76,54 @@ func TestCredentialStoreRejectsPartialInvalidOrUnsafeRecords(t *testing.T) {
 		}
 	}
 }
+
+// A credential directory that is a symlink is one this daemon did not create,
+// so tokens must neither be written into nor read out of whatever it names.
+func TestCredentialStoreRefusesSymlinkedDirectory(t *testing.T) {
+	root := t.TempDir()
+	foreign := filepath.Join(root, "foreign")
+	if err := os.Mkdir(foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "credentials")
+	if err := os.Symlink(foreign, dir); err != nil {
+		t.Fatal(err)
+	}
+	store := CredentialStore{Dir: dir}
+	const runtimeID, generation = "rt-123456789abc", "g-0123456789abcdef"
+	if err := store.Put(runtimeID, generation, credential("connect-token", strings.Repeat("A", 43))); err == nil {
+		t.Fatal("Put wrote a credential into a symlinked directory")
+	}
+	if info, err := os.Stat(foreign); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("symlink target mode = %v, %v", info.Mode(), err)
+	}
+	if entries, err := os.ReadDir(foreign); err != nil || len(entries) != 0 {
+		t.Fatalf("entries in symlink target = %#v, %v", entries, err)
+	}
+	if _, err := store.Get(runtimeID, generation); err == nil {
+		t.Fatal("Get read a credential from a symlinked directory")
+	}
+}
+
+// A planted symlink must not make the daemon serve a credential it never wrote.
+func TestCredentialStoreGetRefusesSymlinkedRecord(t *testing.T) {
+	store := CredentialStore{Dir: filepath.Join(t.TempDir(), "credentials")}
+	const runtimeID, generation = "rt-123456789abc", "g-0123456789abcdef"
+	if err := store.Put(runtimeID, generation, credential("connect-token", strings.Repeat("A", 43))); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := store.path(runtimeID, generation)
+	foreign := filepath.Join(t.TempDir(), "foreign.token")
+	if err := os.WriteFile(foreign, []byte(`{"connectToken":"planted-token","jupyterToken":"`+strings.Repeat("A", 43)+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(foreign, path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.Get(runtimeID, generation); err == nil {
+		t.Fatalf("Get followed a symlink to a foreign credential: %#v", got)
+	}
+}

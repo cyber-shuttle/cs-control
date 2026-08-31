@@ -6,21 +6,31 @@
 package safeio
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
 )
 
-// EnsurePrivateDir creates dir with its parents and holds it at mode 0700.
-func EnsurePrivateDir(dir string) (os.FileInfo, error) {
+// EnsurePrivateDir creates dir with its parents, holds it at mode 0700, and
+// returns PrivateDir's verdict, so no caller can proceed on an unverified path.
+func EnsurePrivateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+		return err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return nil, err
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
 	}
-	return os.Lstat(dir)
+	// chmod follows symlinks, so a swapped path must never reach it.
+	if info.Mode().IsDir() && info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	return PrivateDir(dir)
 }
 
 // PrivateDir accepts path only as a real directory this user owns at mode 0700,
@@ -35,6 +45,26 @@ func PrivateDir(path string) error {
 		return fmt.Errorf("%s is not a private directory owned by this user", path)
 	}
 	return nil
+}
+
+// ReadPrivateFile reads a regular file this user owns at mode 0600 or tighter,
+// opened without following a final symlink and read no further than limit, so a
+// planted link can neither redirect the read nor make it unbounded.
+func ReadPrivateFile(path string, limit int64) ([]byte, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || int(stat.Uid) != os.Getuid() || info.Size() > limit {
+		return nil, fmt.Errorf("%s is not a private file owned by this user", path)
+	}
+	return io.ReadAll(io.LimitReader(file, limit))
 }
 
 // SyncDir flushes a directory entry so a completed rename survives a crash.
@@ -68,6 +98,13 @@ func WithFileLock(path string, fn func() error) error {
 // ReplaceFile atomically installs data at path with mode 0600. beforeCommit,
 // when set, runs after the payload is durable but before the rename.
 func ReplaceFile(path string, data []byte, beforeCommit func() error) error {
+	// Renaming over a symlink destroys the link and orphans its target, so a
+	// path that is not already a plain file is refused rather than converted.
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	dir := filepath.Dir(path)
 	temp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {

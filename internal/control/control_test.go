@@ -70,6 +70,7 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
   [ -z "${FAKE_STATUS_STARTED:-}" ] || : > "$FAKE_STATUS_STARTED"
   while [ -n "${FAKE_STATUS_RELEASE:-}" ] && [ ! -e "$FAKE_STATUS_RELEASE" ]; do sleep .02; done
   [ "${FAKE_STATUS_FAIL:-0}" = 0 ] || { printf 'scheduler unavailable\n' >&2; exit 1; }
+  [ -z "${FAKE_STATUS_BANNER:-}" ] || printf '%b\n' "$FAKE_STATUS_BANNER"
   printf '__CSCTL_SCANCEL__\n'
   [ -z "${FAKE_CANCEL_ERRORS:-}" ] || printf '%b\n' "$FAKE_CANCEL_ERRORS"
   if [ -n "${FAKE_STATUS_LINES+x}" ]; then

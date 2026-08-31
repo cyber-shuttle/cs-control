@@ -34,8 +34,7 @@ const provisionScript = `set -u
 LC_ALL=C
 LANG=C
 export LC_ALL LANG
-[ "$#" -eq 4 ]
-[ "$1" = csctl-provision ]
+[ "$#" -eq 5 ] && [ "$1" = csctl-provision ] || { printf '%s\n' 'error=arguments'; exit 70; }
 shift
 home=$1
 linkspan=$2

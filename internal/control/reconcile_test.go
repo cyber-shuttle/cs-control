@@ -61,7 +61,7 @@ func TestCancelledReconciliationPreservesLastGoodRuntime(t *testing.T) {
 	runtime.State = "READY"
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	got := service.reconcileSnapshots(ctx, []Runtime{runtime})
+	got, _ := service.reconcileSnapshots(ctx, []Runtime{runtime})
 	if !reflect.DeepEqual(got, []Runtime{runtime}) {
 		t.Fatalf("cancelled refresh changed persisted presentation state: %#v", got)
 	}
@@ -235,7 +235,7 @@ func TestSchedulerThatDoesNotKnowTheJobRetiresTheRuntime(t *testing.T) {
 	runtime.State = "READY"
 	t.Setenv("FAKE_STATUS_LINES", "")
 	putRuntimes(t, service, runtime)
-	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	got, _ := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	if got[0].State != "STOPPED" {
 		t.Fatalf("a runtime the scheduler has no record of stayed %s, want STOPPED", got[0].State)
 	}
@@ -251,7 +251,7 @@ func TestFreshlySubmittedRuntimeSurvivesTheSchedulerPropagationWindow(t *testing
 	runtime.CreatedAt, runtime.UpdatedAt = time.Now().Add(-6*time.Hour).UTC(), time.Now().UTC()
 	t.Setenv("FAKE_STATUS_LINES", "")
 	putRuntimes(t, service, runtime)
-	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	got, _ := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	if got[0].State != "QUEUED" {
 		t.Fatalf("a just-submitted runtime was retired as %s during the propagation window", got[0].State)
 	}
@@ -264,7 +264,7 @@ func TestUnreachableSchedulerRetiresAnAllocationPastItsWalltime(t *testing.T) {
 	runtime := runningRuntime("rt-111111111111", "alpha", "101", time.Now().Add(-4*time.Hour), 60)
 	putRuntimes(t, service, runtime)
 	t.Setenv("FAKE_STATUS_FAIL", "1")
-	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	got, _ := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	if got[0].State != "STOPPED" {
 		t.Fatalf("an allocation four hours past a one-hour walltime stayed %s, want STOPPED", got[0].State)
 	}
@@ -280,7 +280,7 @@ func TestUnreachableSchedulerKeepsAnAllocationInsideItsWalltime(t *testing.T) {
 	runtime := runningRuntime("rt-111111111111", "alpha", "101", time.Now().Add(-5*time.Minute), 60)
 	putRuntimes(t, service, runtime)
 	t.Setenv("FAKE_STATUS_FAIL", "1")
-	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	got, _ := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	if got[0].State != "READY" {
 		t.Fatalf("an allocation inside its walltime was retired as %s by an unreachable scheduler", got[0].State)
 	}
@@ -318,7 +318,7 @@ func TestStartedAtComesFromSlurmElapsedNotThePollTime(t *testing.T) {
 	// squeue rows carry four fields; the sacct row carries the elapsed seconds.
 	t.Setenv("FAKE_STATUS_LINES", "101|RUNNING|node1|"+runtime.JobName+"|7200")
 	putRuntimes(t, service, runtime)
-	got := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	got, _ := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
 	elapsed := time.Since(got[0].StartedAt)
 	if elapsed < 2*time.Hour-time.Minute || elapsed > 2*time.Hour+time.Minute {
 		t.Fatalf("a job Slurm says ran for two hours was anchored %s ago, not ~2h", elapsed)
@@ -376,5 +376,63 @@ func TestSchedulerLookbackIsRelativeBoundedAndReachesTheOldestRuntime(t *testing
 		if seconds < test.min || seconds > test.max {
 			t.Errorf("%s: lookback of %d seconds is outside [%d, %d]", name, seconds, test.min, test.max)
 		}
+	}
+}
+
+// A login shell that greets every non-interactive ssh command puts its banner
+// ahead of the first marker, which must not cost the whole host its round.
+func TestSchedulerRoundToleratesRemoteLoginBanner(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	t.Setenv("FAKE_STATUS_BANNER", "Welcome to Delta. Scheduled maintenance Friday.")
+	t.Setenv("FAKE_STATUS_LINES", "101|RUNNING|cn001|"+runtime.JobName)
+	putRuntimes(t, service, runtime)
+
+	listed, err := reconciledList(context.Background(), service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed[0].State == "QUEUED" || listed[0].Error != "" || listed[0].Node != "cn001" {
+		t.Fatalf("a banner ahead of the first marker discarded the round: %#v", listed[0])
+	}
+}
+
+// A round runs on a snapshot the owner can supersede while it is in flight.
+// Its narration belongs to the allocation it observed, so a runtime that has
+// since been stopped and started again must not read "Runtime stopped".
+func TestStaleReconciliationRoundDoesNotNarrateARelaunchedRuntime(t *testing.T) {
+	ssh, _, commandLog := fakeSSH(t)
+	dir := t.TempDir()
+	release := filepath.Join(dir, "release")
+	service := Service{
+		Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second},
+		Store:  Store{Dir: filepath.Join(dir, "state")},
+		Logs:   NewRuntimeLogs(),
+	}
+	configureTestTunnel(t, &service)
+	t.Setenv("FAKE_STATUS_RELEASE", release)
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	runtime.State = "READY"
+	t.Setenv("FAKE_STATUS_LINES", "101|COMPLETED|cn001|"+runtime.JobName)
+	putRuntimes(t, service, runtime)
+
+	done := make(chan error, 1)
+	go func() { done <- service.ReconcileAll(context.Background()) }()
+	waitForFile(t, commandLog)
+
+	// What Stop followed by Start leaves behind while the round is blocked.
+	service.Logs.Forget(runtime.ID)
+	relaunched := runtime
+	relaunched.State, relaunched.JobID, relaunched.UpdatedAt = "SUBMITTING", "", time.Now().UTC()
+	putRuntimes(t, service, relaunched)
+
+	if err := os.WriteFile(release, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if tail, ok := service.Logs.Tail(runtime.ID); ok {
+		t.Fatalf("a superseded round narrated the relaunched runtime: %#v", tail.Lines)
 	}
 }

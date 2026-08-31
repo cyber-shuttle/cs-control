@@ -103,6 +103,11 @@ func discoveryResult(alias, output string) (Resource, error) {
 // One fixed exec channel runs all discovery commands sequentially. The
 // ControlMaster established by OpenSSH remains reusable by later operations.
 func (s Service) Discover(ctx context.Context, alias string) (Resource, error) {
+	// Resolving the configuration and running the program each apply the
+	// runner's timeout, so the pair is bounded once here: a host that hangs at
+	// both must not hold the request for twice as long.
+	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
+	defer cancel()
 	stdout, stderr, runErr := s.Runner.RunOutput(ctx, alias, strings.NewReader(discoveryScript), "sh", "-s")
 	// A host that demanded credentials or never answered explains the failure
 	// better than the truncated output it produced on the way there.

@@ -123,10 +123,7 @@ func runServe(ctx context.Context, service control.Service, args []string, liste
 	}
 	// The state directory holds every credential this daemon persists, so it is
 	// proved private here once rather than re-checked on each file operation.
-	if _, err := safeio.EnsurePrivateDir(service.Store.Dir); err != nil {
-		return err
-	}
-	if err := safeio.PrivateDir(service.Store.Dir); err != nil {
+	if err := safeio.EnsurePrivateDir(service.Store.Dir); err != nil {
 		return err
 	}
 	components, err := newServeComponents(service, allowedOrigins, *oauthAuthority)

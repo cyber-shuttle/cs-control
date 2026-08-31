@@ -266,14 +266,16 @@ func (s Service) Stop(ctx context.Context, id string) (*Runtime, error) {
 	s.runtimeStatus(id, "Stopping runtime")
 	managementErr := s.releaseAllocationTunnel(auth, snapshot.ID, snapshot.Generation, snapshot.Tunnel)
 	candidate := snapshot
+	var narration []string
 	if reconcile(snapshot.State) {
 		s.runtimeStatus(id, "Requesting scheduler cancellation")
 		// Stop observes the scheduler through the same batched round the
 		// background refresher uses, so a stop and a refresh can never disagree
 		// about what the scheduler said.
 		stopCtx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
-		candidate = s.reconcileSnapshots(stopCtx, []Runtime{snapshot})[0]
+		candidates, lines := s.reconcileSnapshots(stopCtx, []Runtime{snapshot})
 		cancel()
+		candidate, narration = candidates[0], lines[0]
 		if candidate.Error != "" {
 			s.runtimeStatus(id, "Runtime stop is pending")
 		}
@@ -284,6 +286,7 @@ func (s Service) Stop(ctx context.Context, id string) (*Runtime, error) {
 		if runtime == nil {
 			return errRuntimeNotFound
 		}
+		s.narrateReconciled(runtime, &snapshot, narration)
 		changed := mergeReconciled(runtime, &snapshot, &candidate, s.now())
 		if managementErr == nil && runtime.Generation == snapshot.Generation && runtime.Tunnel.ID == snapshot.Tunnel.ID {
 			runtime.Tunnel = TunnelMetadata{}
@@ -423,7 +426,7 @@ func (s Service) ReconcileAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	candidates := s.reconcileSnapshots(ctx, snapshots)
+	candidates, narration := s.reconcileSnapshots(ctx, snapshots)
 	// A canceled refresh has no authoritative result. Do not even enter the
 	// merge lock: the persisted inventory must remain byte-for-byte unchanged.
 	if err := ctx.Err(); err != nil {
@@ -433,6 +436,7 @@ func (s Service) ReconcileAll(ctx context.Context) error {
 		changed := false
 		for i := range snapshots {
 			runtime := current.Runtimes[snapshots[i].ID]
+			s.narrateReconciled(runtime, &snapshots[i], narration[i])
 			if mergeReconciled(runtime, &snapshots[i], &candidates[i], s.now()) {
 				changed = true
 			}

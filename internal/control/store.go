@@ -14,7 +14,7 @@ func (s Store) withLock(fn func(Store, *state) error) error {
 	if s.Dir == "" {
 		return errors.New("state directory is required")
 	}
-	if _, err := safeio.EnsurePrivateDir(s.Dir); err != nil {
+	if err := safeio.EnsurePrivateDir(s.Dir); err != nil {
 		return err
 	}
 	return safeio.WithFileLock(filepath.Join(s.Dir, ".lock"), func() error {

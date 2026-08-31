@@ -17,6 +17,9 @@ import (
 
 var generationPattern = regexp.MustCompile(`^g-[a-f0-9]{16}$`)
 
+// A stored credential is two bounded tokens; anything larger was not written here.
+const maxCredentialSize = 64 << 10
+
 type GenerationCredential struct {
 	ConnectToken string `json:"connectToken"`
 	JupyterToken string `json:"jupyterToken"`
@@ -50,7 +53,7 @@ func (s CredentialStore) Put(runtimeID, generation string, credential Generation
 	if err != nil {
 		return errors.New("encode generation credential")
 	}
-	if _, err := safeio.EnsurePrivateDir(s.Dir); err != nil {
+	if err := safeio.EnsurePrivateDir(s.Dir); err != nil {
 		return err
 	}
 	return safeio.ReplaceFile(path, encoded, nil)
@@ -61,7 +64,10 @@ func (s CredentialStore) Get(runtimeID, generation string) (GenerationCredential
 	if err != nil {
 		return GenerationCredential{}, err
 	}
-	data, err := os.ReadFile(path)
+	if err := safeio.PrivateDir(s.Dir); err != nil {
+		return GenerationCredential{}, err
+	}
+	data, err := safeio.ReadPrivateFile(path, maxCredentialSize)
 	if err != nil {
 		return GenerationCredential{}, err
 	}

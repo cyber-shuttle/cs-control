@@ -102,7 +102,7 @@ func (l *RuntimeLogs) Append(runtimeID, text string) {
 	buffer := l.bufferLocked(runtimeID)
 	for _, line := range lines {
 		entry := RuntimeLogLine{Stream: "status", Text: line, At: l.now()}
-		if len(buffer.status) > 0 && buffer.status[len(buffer.status)-1] == entry {
+		if last := len(buffer.status) - 1; last >= 0 && buffer.status[last].Stream == entry.Stream && buffer.status[last].Text == entry.Text {
 			continue
 		}
 		buffer.status = append(buffer.status, entry)
@@ -131,15 +131,25 @@ func (l *RuntimeLogs) MergeRemote(runtimeID, stdout, stderr string) {
 			text = stderr
 		}
 		for _, line := range sanitizedRuntimeLogLines(text, sensitive) {
-			remote = append(remote, RuntimeLogLine{Stream: stream, Text: line, At: l.now()})
+			remote = append(remote, RuntimeLogLine{Stream: stream, Text: line})
 		}
 	}
 	if len(remote) > maxRuntimeLogLines {
 		remote = remote[len(remote)-maxRuntimeLogLines:]
 	}
+	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.bufferLocked(runtimeID).remote = remote
+	buffer := l.bufferLocked(runtimeID)
+	// A line that has not changed keeps the time it was first observed, so a
+	// re-read of the same tail serialises identically and the poll's ETag holds.
+	for i := range remote {
+		remote[i].At = now
+		if i < len(buffer.remote) && buffer.remote[i].Stream == remote[i].Stream && buffer.remote[i].Text == remote[i].Text {
+			remote[i].At = buffer.remote[i].At
+		}
+	}
+	buffer.remote = remote
 }
 
 func (l *RuntimeLogs) bufferLocked(runtimeID string) *runtimeLogBuffer {

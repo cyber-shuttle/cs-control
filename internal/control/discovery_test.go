@@ -1,9 +1,14 @@
 package control
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
 func discoveryOutput(lines ...string) string {
@@ -59,4 +64,25 @@ func TestDiscoveryRejectsUnsafeRemoteUsernames(t *testing.T) {
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
 	eventually(t, 3*time.Second, path, nonEmptyFile(path))
+}
+
+// Both ssh invocations discovery makes apply the runner's timeout, so a host
+// that hangs at each of them must still answer within one of them.
+func TestDiscoverBoundsBothSSHInvocationsTogether(t *testing.T) {
+	// A slow but answering `ssh -G` followed by an exec that never answers is
+	// what spends one timeout in each invocation.
+	ssh := filepath.Join(t.TempDir(), "ssh")
+	script := "#!/bin/sh\nif [ \"$1\" = -G ]; then sleep 0.6; printf 'host %s\\nuser tester\\n' \"$2\"; exit 0; fi\nwhile :; do sleep 1; done\n"
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const timeout = time.Second
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: timeout}}
+	started := time.Now()
+	if _, err := service.Discover(context.Background(), "delta"); err == nil {
+		t.Fatal("a hanging host was discovered")
+	}
+	if elapsed := time.Since(started); elapsed > timeout+300*time.Millisecond {
+		t.Fatalf("discovery took %s, which is both timeouts rather than one", elapsed)
+	}
 }
