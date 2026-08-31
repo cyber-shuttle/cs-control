@@ -40,37 +40,20 @@ type HostList struct {
 	Hosts []Host `json:"hosts"`
 }
 
-// Config names the two files a host lookup consults. Empty fields select the
-// standard OpenSSH locations.
+// Config names the two files a host lookup consults. The composition root
+// supplies both; an empty one is simply not read.
 type Config struct {
 	UserPath   string
 	SystemPath string
 }
 
-func (c Config) paths() (string, string, error) {
-	user := c.UserPath
-	if user == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", "", err
-		}
-		user = filepath.Join(home, ".ssh", "config")
-	}
-	system := c.SystemPath
-	if system == "" {
-		system = "/etc/ssh/ssh_config"
-	}
-	return user, system, nil
-}
-
 func (c Config) List() ([]Host, error) {
-	user, system, err := c.paths()
-	if err != nil {
-		return nil, err
-	}
 	hosts := map[string]Host{}
 	visited := map[string]bool{}
-	for _, path := range []string{system, user} {
+	for _, path := range []string{c.SystemPath, c.UserPath} {
+		if path == "" {
+			continue
+		}
 		parsed, err := parseFile(path, visited)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err

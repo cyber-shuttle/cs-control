@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cyber-shuttle/cs-control/internal/framed"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
@@ -22,15 +24,17 @@ type schedulerObservation struct {
 }
 
 type cancellationTarget struct {
-	key     string
-	flag    string
-	value   string
-	runtime string
+	key   string
+	flag  string
+	value string
 }
 
-const schedulerMarkerCancel = "__CSCTL_SCANCEL__"
-const schedulerMarkerQueue = "__CSCTL_SQUEUE__"
-const schedulerMarkerAccounting = "__CSCTL_SACCT__"
+const (
+	schedulerMarkerPrefix     = "__CSCTL_S"
+	schedulerMarkerCancel     = schedulerMarkerPrefix + "CANCEL__"
+	schedulerMarkerQueue      = schedulerMarkerPrefix + "QUEUE__"
+	schedulerMarkerAccounting = schedulerMarkerPrefix + "ACCT__"
+)
 
 // Slurm stops reporting a job eventually and a login node is not always
 // reachable, so an observation cannot be the only thing that retires a runtime.
@@ -76,8 +80,16 @@ func unknownToScheduler(runtime Runtime, now time.Time) bool {
 
 // reconcileSnapshots performs all scheduler and endpoint I/O without holding
 // the state lock. Scheduler calls are batched into one SSH execution per host.
-func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []Runtime {
+//
+// Narration is returned per snapshot rather than appended to the tail here: the
+// round runs on a snapshot that the owner may have superseded by stopping or
+// relaunching the runtime, and only the caller's merge lock can tell. Emitting
+// as we go is what let a stale round narrate "Runtime stopped" into the tail of
+// an allocation that had just been started again.
+func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) ([]Runtime, [][]string) {
 	results := append([]Runtime(nil), snapshots...)
+	narration := make([][]string, len(results))
+	status := func(index int, text string) { narration[index] = append(narration[index], text) }
 	byHost := map[string][]int{}
 	for i := range results {
 		if reconcile(results[i].State) {
@@ -86,7 +98,6 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 	}
 	var wg sync.WaitGroup
 	for host, indexes := range byHost {
-		host, indexes := host, indexes
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -102,9 +113,6 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					return
 				}
 				for _, index := range indexes {
-					if !s.reconciliationSnapshotCurrent(snapshots[index]) {
-						continue
-					}
 					// No answer is not the same as no allocation, so the last good
 					// state stands -- until the allocation's own --time has passed,
 					// after which Slurm has certainly reaped it and a host we cannot
@@ -112,18 +120,15 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					if outlivedAllocation(results[index], s.now()) {
 						results[index].State = "STOPPED"
 						results[index].Error = ""
-						s.runtimeStatus(results[index].ID, "Allocation reached its wall-time limit")
+						status(index, "Allocation reached its wall-time limit")
 						continue
 					}
 					results[index].Error = err.Error()
-					s.runtimeStatus(results[index].ID, "Runtime status check failed")
+					status(index, "Runtime status check failed")
 				}
 				return
 			}
 			for _, index := range indexes {
-				if !s.reconciliationSnapshotCurrent(snapshots[index]) {
-					continue
-				}
 				runtime := &results[index]
 				previousState, previousNode := runtime.State, runtime.Node
 				observation, ok := observations[runtime.ID]
@@ -140,7 +145,7 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 						if unknownToScheduler(*runtime, s.now()) {
 							runtime.State = "STOPPED"
 							runtime.Error = ""
-							s.runtimeStatus(runtime.ID, "Allocation is no longer known to the scheduler")
+							status(index, "Allocation is no longer known to the scheduler")
 						}
 						continue
 					}
@@ -149,15 +154,15 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 					} else {
 						runtime.Error = "scheduler returned no state"
 					}
-					s.runtimeStatus(runtime.ID, "Runtime status is temporarily unavailable")
+					status(index, "Runtime status is temporarily unavailable")
 					continue
 				}
 				if runtime.JobID == "" && observation.jobID != "" {
 					runtime.JobID = observation.jobID
 				}
-				_ = setRuntimeNode(runtime, observation.node)
+				setRuntimeNode(runtime, observation.node)
 				if runtime.Node != "" && runtime.Node != previousNode {
-					s.runtimeStatus(runtime.ID, "Compute node assigned: "+runtime.Node)
+					status(index, "Compute node assigned: "+runtime.Node)
 				}
 				class := classifySchedulerState(observation.state)
 				// A word this scheduler vocabulary does not cover says nothing about
@@ -178,33 +183,33 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 				wasStopping := runtime.State == "STOPPING"
 				next := nextState(runtime.State, class)
 				if next == "STOPPED" || next == "FAILED" {
-					s.runtimeStatus(runtime.ID, "Cleaning up runtime credentials")
+					status(index, "Cleaning up runtime credentials")
 					cleanupErr := s.Credentials.Delete(runtime.ID, runtime.Generation)
 					if cleanupErr != nil {
 						runtime.State = "STOPPING"
 						runtime.Error = "runtime cleanup pending: " + cleanupErr.Error()
-						s.runtimeStatus(runtime.ID, "Runtime cleanup is pending")
+						status(index, "Runtime cleanup is pending")
 						continue
 					}
-					s.runtimeStatus(runtime.ID, "Runtime credential cleanup complete")
+					status(index, "Runtime credential cleanup complete")
 				}
 				runtime.State = next
 				if next != previousState {
 					switch next {
 					case "QUEUED":
-						s.runtimeStatus(runtime.ID, "Runtime is queued")
+						status(index, "Runtime is queued")
 					case "STARTING":
-						s.runtimeStatus(runtime.ID, "Allocation is starting")
+						status(index, "Allocation is starting")
 					case "READY":
-						s.runtimeStatus(runtime.ID, "Allocation is running")
+						status(index, "Allocation is running")
 					case "STOPPED":
 						if class == schedulerExpired {
-							s.runtimeStatus(runtime.ID, "Runtime reached its walltime")
+							status(index, "Runtime reached its walltime")
 						} else {
-							s.runtimeStatus(runtime.ID, "Runtime stopped")
+							status(index, "Runtime stopped")
 						}
 					case "FAILED":
-						s.runtimeStatus(runtime.ID, "Runtime failed")
+						status(index, "Runtime failed")
 					}
 				}
 				if wasStopping && runtime.State == "STOPPING" {
@@ -217,7 +222,7 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 	}
 	wg.Wait()
 	if ctx.Err() != nil {
-		return snapshots
+		return snapshots, make([][]string, len(snapshots))
 	}
 
 	// Startup file collection shares the first running reconciliation round.
@@ -225,16 +230,16 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) []
 	// expose scheduler-confirmed readiness without consulting Linkspan.
 	collected := s.collectStartingRuntimeLogs(ctx, results)
 	if ctx.Err() != nil {
-		return snapshots
+		return snapshots, make([][]string, len(snapshots))
 	}
 	for index := range results {
 		if _, ok := collected[results[index].ID]; ok && results[index].State == "STARTING" {
 			results[index].State = "READY"
-			s.runtimeStatus(results[index].ID, "Allocation is running")
+			status(index, "Allocation is running")
 		}
 	}
 
-	return results
+	return results, narration
 }
 
 // schedulerClass is the family a raw Slurm state belongs to. The scheduler's
@@ -294,22 +299,15 @@ func nextState(current string, class schedulerClass) string {
 }
 
 func cancellationTargets(runtimes []Runtime) []cancellationTarget {
-	seen := map[string]bool{}
 	targets := make([]cancellationTarget, 0)
 	for _, runtime := range runtimes {
 		if runtime.State != "STOPPING" {
 			continue
 		}
-		target := cancellationTarget{runtime: runtime.ID}
-		if runtime.JobID != "" {
-			target.key, target.value = "id:"+runtime.JobID, runtime.JobID
-		} else {
-			target.key, target.flag, target.value = "name:"+runtime.JobName, "--name", runtime.JobName
+		target := cancellationTarget{key: "id:" + runtime.JobID, value: runtime.JobID}
+		if runtime.JobID == "" {
+			target = cancellationTarget{key: "name:" + runtime.JobName, flag: "--name", value: runtime.JobName}
 		}
-		if seen[target.key] {
-			continue
-		}
-		seen[target.key] = true
 		targets = append(targets, target)
 	}
 	slices.SortFunc(targets, func(a, b cancellationTarget) int { return strings.Compare(a.key, b.key) })
@@ -317,22 +315,14 @@ func cancellationTargets(runtimes []Runtime) []cancellationTarget {
 }
 
 func appendCancellation(script *strings.Builder, target cancellationTarget) {
+	flag := ""
+	if target.flag != "" {
+		flag = target.flag + "="
+	}
 	// scancel is deliberately outside `set -e`: an already-terminal job is a
 	// normal race and must never prevent the scheduler observations below.
-	script.WriteString("csctl_cancel_output=$(scancel ")
-	if target.flag != "" {
-		script.WriteString(target.flag)
-		script.WriteString("=")
-	}
-	script.WriteString(sshexec.ShellQuote(target.value))
-	script.WriteString(" 2>&1)\ncsctl_cancel_status=$?\n")
-	script.WriteString("if [ \"$csctl_cancel_status\" -ne 0 ]; then\n")
-	script.WriteString("  csctl_cancel_message=$(printf '%s' \"$csctl_cancel_output\" | tr '\\n|' '  ')\n")
-	script.WriteString("  printf '%s|%s|%s\\n' ")
-	script.WriteString(sshexec.ShellQuote(schedulerMarkerCancel))
-	script.WriteString(" ")
-	script.WriteString(sshexec.ShellQuote(target.key))
-	script.WriteString(" \"$csctl_cancel_message\"\nfi\n")
+	fmt.Fprintf(script, "csctl_cancel=$(scancel %s%s 2>&1) || printf '%%s|%%s\\n' %s \"$(printf '%%s' \"$csctl_cancel\" | tr '\\n|' '  ')\"\n",
+		flag, sshexec.ShellQuote(target.value), sshexec.ShellQuote(target.key))
 }
 
 func (s Service) schedulerObservations(ctx context.Context, host string, runtimes []Runtime) (map[string]schedulerObservation, map[string]string, error) {
@@ -341,10 +331,11 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 		names = append(names, runtime.JobName)
 	}
 	slices.Sort(names)
-	targets := cancellationTargets(runtimes)
 	var script strings.Builder
-	script.WriteString("set -u\n")
-	for _, target := range targets {
+	script.WriteString("set -u\nprintf '%s\\n' ")
+	script.WriteString(sshexec.ShellQuote(schedulerMarkerCancel))
+	script.WriteString("\n")
+	for _, target := range cancellationTargets(runtimes) {
 		appendCancellation(&script, target)
 	}
 	script.WriteString("printf '%s\\n' ")
@@ -365,41 +356,37 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 	if err != nil {
 		return nil, nil, err
 	}
-	byID, byName := map[string]schedulerObservation{}, map[string]schedulerObservation{}
+	sections, err := framed.SectionsAfterPreamble(output, schedulerMarkerPrefix, schedulerMarkerCancel, schedulerMarkerQueue, schedulerMarkerAccounting)
+	if err != nil {
+		return nil, nil, err
+	}
 	cancelByKey := map[string]string{}
-	section := ""
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, schedulerMarkerCancel+"|") {
-			parts := strings.SplitN(line, "|", 3)
-			if len(parts) == 3 {
-				cancelByKey[parts[1]] = strings.TrimSpace(parts[2])
+	for _, line := range strings.Split(sections[schedulerMarkerCancel], "\n") {
+		if key, message, ok := strings.Cut(line, "|"); ok {
+			cancelByKey[key] = strings.TrimSpace(message)
+		}
+	}
+	byID, byName := map[string]schedulerObservation{}, map[string]schedulerObservation{}
+	// The queue is what the scheduler is doing now, so it stands over an
+	// accounting row for the same job.
+	for _, section := range []struct {
+		marker string
+		queued bool
+	}{{schedulerMarkerAccounting, false}, {schedulerMarkerQueue, true}} {
+		for _, line := range strings.Split(sections[section.marker], "\n") {
+			parts := strings.Split(strings.TrimSpace(line), "|")
+			if len(parts) < 4 || !jobPattern.MatchString(strings.TrimSpace(parts[0])) {
+				continue
 			}
-			continue
-		}
-		switch line {
-		case schedulerMarkerQueue:
-			section = "queue"
-			continue
-		case schedulerMarkerAccounting:
-			section = "accounting"
-			continue
-		case "":
-			continue
-		}
-		parts := strings.Split(line, "|")
-		if len(parts) < 4 || !jobPattern.MatchString(strings.TrimSpace(parts[0])) {
-			continue
-		}
-		observation := schedulerObservation{jobID: strings.TrimSpace(parts[0]), state: strings.TrimSpace(parts[1]), node: strings.TrimSpace(parts[2])}
-		if len(parts) > 4 {
-			if seconds, err := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64); err == nil && seconds >= 0 {
-				observation.elapsedSeconds = seconds
+			observation := schedulerObservation{jobID: strings.TrimSpace(parts[0]), state: strings.TrimSpace(parts[1]), node: strings.TrimSpace(parts[2])}
+			if len(parts) > 4 {
+				if seconds, err := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64); err == nil && seconds >= 0 {
+					observation.elapsedSeconds = seconds
+				}
 			}
-		}
-		name := strings.TrimSpace(parts[3])
-		if section == "queue" || byID[observation.jobID].jobID == "" {
-			byID[observation.jobID], byName[name] = observation, observation
+			if name := strings.TrimSpace(parts[3]); section.queued || byID[observation.jobID].jobID == "" {
+				byID[observation.jobID], byName[name] = observation, observation
+			}
 		}
 	}
 	result := make(map[string]schedulerObservation, len(runtimes))
@@ -425,22 +412,31 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 	return result, cancelErrors, nil
 }
 
-func (s Service) reconciliationSnapshotCurrent(snapshot Runtime) bool {
-	current := false
-	_ = s.Store.withLock(func(_ Store, state *state) error {
-		runtime := state.Runtimes[snapshot.ID]
-		current = runtime != nil && runtime.UpdatedAt.Equal(snapshot.UpdatedAt) && runtime.State == snapshot.State && runtime.JobID == snapshot.JobID
-		return nil
-	})
-	return current
-}
-
 func changedReconciliation(before, after Runtime) bool {
 	return before.State != after.State || before.Error != after.Error || before.JobID != after.JobID || before.Node != after.Node || !before.StartedAt.Equal(after.StartedAt)
 }
 
+// reconciliationSnapshotCurrent reports that the persisted runtime is still the
+// one this round observed, so neither its result nor its narration belongs to a
+// runtime the owner has since stopped or relaunched.
+func reconciliationSnapshotCurrent(current, snapshot *Runtime) bool {
+	return current != nil && current.UpdatedAt.Equal(snapshot.UpdatedAt) && current.State == snapshot.State && current.JobID == snapshot.JobID
+}
+
+// narrateReconciled appends a completed round's narration to the runtime's tail,
+// under the merge lock and only while the snapshot it was written about is still
+// the persisted runtime.
+func (s Service) narrateReconciled(current, snapshot *Runtime, lines []string) {
+	if !reconciliationSnapshotCurrent(current, snapshot) {
+		return
+	}
+	for _, line := range lines {
+		s.runtimeStatus(snapshot.ID, line)
+	}
+}
+
 func mergeReconciled(current, snapshot, candidate *Runtime, now time.Time) bool {
-	if current == nil || !current.UpdatedAt.Equal(snapshot.UpdatedAt) || current.State != snapshot.State || current.JobID != snapshot.JobID {
+	if !reconciliationSnapshotCurrent(current, snapshot) {
 		return false
 	}
 	if !changedReconciliation(*snapshot, *candidate) {
@@ -476,12 +472,6 @@ func schedulerLookback(runtimes []Runtime, now time.Time) string {
 			oldest = runtime.CreatedAt
 		}
 	}
-	window := now.Sub(oldest) + schedulerLookbackSlack
-	if window < schedulerLookbackSlack {
-		window = schedulerLookbackSlack
-	}
-	if window > schedulerLookbackMax {
-		window = schedulerLookbackMax
-	}
+	window := min(now.Sub(oldest)+schedulerLookbackSlack, schedulerLookbackMax)
 	return "now-" + strconv.FormatInt(int64(window.Seconds()), 10) + "seconds"
 }

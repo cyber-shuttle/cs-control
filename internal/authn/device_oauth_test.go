@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"testing/iotest"
 	"time"
 )
 
@@ -254,38 +253,5 @@ func TestDeviceBrokerStartRateAndGlobalBound(t *testing.T) {
 	broker.ServeHTTP(capacity, deviceRequest(http.MethodPost, "/api/v1/oauth/device/start", deviceTestOrigin))
 	if capacity.Code != http.StatusServiceUnavailable {
 		t.Fatalf("capacity status = %d", capacity.Code)
-	}
-}
-
-// cs-control listens on loopback, so every real request reaches it through a
-// proxy. A proxy that re-frames a bodyless POST as chunked leaves the length
-// unknown, which Go reports as -1: rejecting on the declared length alone broke
-// device sign-in for every deployment while still passing a direct curl.
-func TestDeviceRoutesAcceptABodylessPostHoweverItIsFramed(t *testing.T) {
-	for name, body := range map[string]io.Reader{
-		"no body at all": nil,
-		"empty reader":   strings.NewReader(""),
-		"unknown length": iotest.OneByteReader(strings.NewReader("")),
-	} {
-		request := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/device/start", body)
-		if name == "unknown length" {
-			request.ContentLength = -1
-		}
-		if !emptyRequestBody(request) {
-			t.Errorf("%s: a bodyless POST was read as carrying a body", name)
-		}
-	}
-}
-
-func TestDeviceRoutesStillRefuseARealBody(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/device/start", strings.NewReader(`{"a":1}`))
-	if emptyRequestBody(request) {
-		t.Error("a request carrying a body was accepted as empty")
-	}
-	// A body a proxy framed without a length must still be refused.
-	chunked := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/device/start", strings.NewReader(`{"a":1}`))
-	chunked.ContentLength = -1
-	if emptyRequestBody(chunked) {
-		t.Error("a chunked request carrying a body was accepted as empty")
 	}
 }

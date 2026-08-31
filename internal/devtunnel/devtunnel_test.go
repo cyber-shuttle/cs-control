@@ -10,7 +10,18 @@ import (
 	"net/url"
 	"testing"
 	"time"
+
+	"github.com/cyber-shuttle/cs-control/internal/httpx"
 )
+
+func testClient(t *testing.T, baseURL string, client *http.Client) *Client {
+	t.Helper()
+	base, err := httpx.ParseBaseURL(baseURL, "Dev Tunnels base URL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newClientForBase(base, client)
+}
 
 func TestDevTunnelCreateRequestsScopedTokensAndAcceptsAdditiveFields(t *testing.T) {
 	const id = "rt-123456789abc-g-0123456789abcdef"
@@ -28,11 +39,7 @@ func TestDevTunnelCreateRequestsScopedTokensAndAcceptsAdditiveFields(t *testing.
 		_, _ = io.WriteString(w, realisticTunnelResponse(id, "host-secret", "connect-secret"))
 	}))
 	defer server.Close()
-	manager, err := newClient(server.URL, server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	record, err := manager.Create(context.Background(), CreateRequest{OAuthToken: "oauth", TunnelID: id, DurationSeconds: 3600})
+	record, err := testClient(t, server.URL, server.Client()).Create(context.Background(), CreateRequest{OAuthToken: "oauth", TunnelID: id, DurationSeconds: 3600})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,11 +63,7 @@ func TestDevTunnelRejectsMalformedUsedFields(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, response) }))
 			defer server.Close()
-			manager, err := newClient(server.URL, server.Client())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := manager.Get(context.Background(), GetRequest{AccessToken: "connect", TunnelID: "tunnel-123", ClusterID: "use"}); err == nil {
+			if _, err := testClient(t, server.URL, server.Client()).Get(context.Background(), GetRequest{AccessToken: "connect", TunnelID: "tunnel-123", ClusterID: "use"}); err == nil {
 				t.Fatal("malformed response accepted")
 			}
 		})

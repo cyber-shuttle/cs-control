@@ -5,16 +5,18 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"maps"
-	pathpkg "path"
 	"slices"
 	"strings"
 
+	"github.com/cyber-shuttle/cs-control/internal/framed"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 )
 
-const maxRuntimeLogCollections = 4
+const (
+	maxRuntimeLogCollections = 4
+	runtimeLogMarkerPrefix   = "__CSCTL_RUNTIME_LOG__"
+)
 
 const runtimeLogTailScript = `set -eu
 [ "$#" -ge 2 ]
@@ -35,7 +37,7 @@ for csctl_runtime_id in "$@"; do
       stderr) csctl_suffix=err ;;
     esac
     csctl_log_path=$HOME/.cybershuttle/logs/$csctl_runtime_id.$csctl_suffix
-    printf '__CSCTL_RUNTIME_LOG__|%s|%s|' "$csctl_runtime_id" "$csctl_stream"
+    printf '__CSCTL_RUNTIME_LOG__|%s|%s\n' "$csctl_runtime_id" "$csctl_stream"
     if [ -f "$csctl_log_path" ] && [ ! -L "$csctl_log_path" ]; then
       tail -n 100 -- "$csctl_log_path" | tail -c 65536 | od -An -v -tx1 | tr -d ' \n'
     fi
@@ -71,23 +73,21 @@ func (s Service) collectStartingRuntimeLogs(ctx context.Context, runtimes []Runt
 		s.Logs.SetRuntimeSensitive(runtime.ID, s.runtimeLogSensitiveValues(runtime)...)
 	}
 
-	// Each host batch uses one SSH command and contains at most four runtimes.
-	// Hosts are processed in stable order so the cap cannot starve a later host.
+	// One SSH command per batch, sized by what the remote script accepts.
 	for _, host := range slices.Sorted(maps.Keys(byHost)) {
-		if ctx.Err() != nil {
-			return completed
-		}
-		ids := s.Logs.nextRuntimeLogBatch(host, byHost[host], maxRuntimeLogCollections)
-		tails, err := s.readRemoteRuntimeTails(ctx, host, ids)
-		if err != nil || ctx.Err() != nil {
-			continue
-		}
-		for _, id := range ids {
-			tail := tails[id]
-			// Refresh exact values alongside each merge in case persisted runtime
-			// metadata changed between reconciliation snapshots.
-			s.Logs.SetRuntimeSensitive(id, s.runtimeLogSensitiveValues(byID[id])...)
-			if mergeErr := s.Logs.MergeRemote(id, tail.stdout, tail.stderr); mergeErr == nil {
+		for ids := range slices.Chunk(byHost[host], maxRuntimeLogCollections) {
+			if ctx.Err() != nil {
+				return completed
+			}
+			tails, err := s.readRemoteRuntimeTails(ctx, host, ids)
+			if err != nil || ctx.Err() != nil {
+				continue
+			}
+			for _, id := range ids {
+				// Refresh exact values alongside each merge in case persisted runtime
+				// metadata changed between reconciliation snapshots.
+				s.Logs.SetRuntimeSensitive(id, s.runtimeLogSensitiveValues(byID[id])...)
+				s.Logs.MergeRemote(id, tails[id].stdout, tails[id].stderr)
 				completed[id] = struct{}{}
 			}
 		}
@@ -96,15 +96,7 @@ func (s Service) collectStartingRuntimeLogs(ctx context.Context, runtimes []Runt
 }
 
 func (s Service) runtimeLogSensitiveValues(runtime Runtime) []string {
-	cfg := s.effectiveConfig()
-	socketName := runtime.JobName + ".sock"
-	return []string{
-		runtime.PrivateRoot,
-		runtime.WorkspaceRoot,
-		pathpkg.Join("/tmp", socketName),
-		socketName,
-		cfg.LinkspanPath,
-	}
+	return []string{runtime.PrivateRoot, runtime.WorkspaceRoot, s.effectiveConfig().LinkspanPath}
 }
 
 func (s Service) readRemoteRuntimeTails(ctx context.Context, host string, ids []string) (map[string]remoteRuntimeTail, error) {
@@ -124,34 +116,37 @@ func (s Service) readRemoteRuntimeTails(ctx context.Context, host string, ids []
 	if err != nil {
 		return nil, err
 	}
-	result := make(map[string]remoteRuntimeTail, len(ids))
-	seen := make(map[string]bool, len(ids)*2)
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) != 4 || parts[0] != "__CSCTL_RUNTIME_LOG__" || !requested[parts[1]] || (parts[2] != "stdout" && parts[2] != "stderr") {
-			return nil, errors.New("invalid runtime log tail response")
-		}
-		key := parts[1] + "\x00" + parts[2]
-		if seen[key] {
-			return nil, errors.New("duplicate runtime log tail response")
-		}
-		seen[key] = true
-		data, decodeErr := hex.DecodeString(parts[3])
-		if decodeErr != nil || len(data) > maxRuntimeLogBytes {
-			return nil, errors.New("invalid runtime log tail encoding")
-		}
-		tail := result[parts[1]]
-		if parts[2] == "stdout" {
-			tail.stdout = string(data)
-		} else {
-			tail.stderr = string(data)
-		}
-		result[parts[1]] = tail
+	names := make([]string, 0, 2*len(ids))
+	for _, id := range ids {
+		names = append(names, runtimeLogMarker(id, "stdout"), runtimeLogMarker(id, "stderr"))
 	}
-	for id := range requested {
-		if !seen[id+"\x00stdout"] || !seen[id+"\x00stderr"] {
-			return nil, fmt.Errorf("incomplete runtime log tail response for %s", id)
+	sections, err := framed.Sections(output, runtimeLogMarkerPrefix, names...)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]remoteRuntimeTail, len(ids))
+	for _, id := range ids {
+		stdout, err := decodeRuntimeLogTail(sections[runtimeLogMarker(id, "stdout")])
+		if err != nil {
+			return nil, err
 		}
+		stderr, err := decodeRuntimeLogTail(sections[runtimeLogMarker(id, "stderr")])
+		if err != nil {
+			return nil, err
+		}
+		result[id] = remoteRuntimeTail{stdout: stdout, stderr: stderr}
 	}
 	return result, nil
+}
+
+func runtimeLogMarker(runtimeID, stream string) string {
+	return runtimeLogMarkerPrefix + "|" + runtimeID + "|" + stream
+}
+
+func decodeRuntimeLogTail(section string) (string, error) {
+	data, err := hex.DecodeString(strings.TrimSpace(section))
+	if err != nil || len(data) > maxRuntimeLogBytes {
+		return "", errors.New("invalid runtime log tail encoding")
+	}
+	return string(data), nil
 }

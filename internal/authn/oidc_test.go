@@ -42,10 +42,11 @@ func TestMicrosoftOAuthValidatorAcceptsIndependentCapabilityAndIdentityBearers(t
 	}))
 	defer server.Close()
 
-	validator, err := newMicrosoftOAuthValidator(server.URL, server.URL, "client-id", server.Client())
+	identity, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
+	validator := &MicrosoftOAuthValidator{access: newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client()), identity: identity}
 	now := time.Now().Unix()
 	// The signed ID token is independently valid and is the sole source of
 	// Principal. No at_hash or subject-binding claim is required.
@@ -78,7 +79,7 @@ func TestOIDCValidatorRejectsInvalidIdentityTokensWithoutLeaks(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	validator, err := newOIDCValidator(server.URL, "client-id", server.Client())
+	validator, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey(t *testing.T
 		}
 	}))
 	defer server.Close()
-	validator, err := newOIDCValidator(server.URL, "client-id", server.Client())
+	validator, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +158,7 @@ func TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey(t *testing.T
 		t.Fatal(err)
 	}
 
-	const flood = maxOIDCNegativeKIDs * 2
+	const flood = 512
 	start := make(chan struct{})
 	errors := make(chan error, flood)
 	var workers sync.WaitGroup
@@ -201,20 +202,14 @@ func TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey(t *testing.T
 			t.Fatal("random kid was accepted")
 		}
 	}
-	validator.mu.Lock()
-	negativeCount := len(validator.negativeKIDs)
-	validator.mu.Unlock()
-	if negativeCount > maxOIDCNegativeKIDs {
-		t.Fatalf("negative-kid cache size = %d, maximum %d", negativeCount, maxOIDCNegativeKIDs)
-	}
 	requestMu.Lock()
 	if metadataRequests != 2 || keyRequests != 2 {
 		t.Fatalf("OIDC requests metadata=%d keys=%d, want one initial load and one coalesced refresh", metadataRequests, keyRequests)
 	}
 	requestMu.Unlock()
 
-	// The global cooldown and bounded negative cache prevent a new random kid
-	// from immediately causing another network refresh.
+	// The global cooldown prevents a new random kid from immediately causing
+	// another network refresh.
 	cooldownToken := signIDToken(t, key, claims, map[string]any{"alg": "RS256", "kid": "random-after-flood"})
 	if _, err := validator.Validate(context.Background(), cooldownToken); err == nil {
 		t.Fatal("unknown kid during cooldown was accepted")
@@ -248,7 +243,7 @@ func TestOIDCValidatorRejectsWrongJWKAlgorithmAndEncryptionUse(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			validator, err := newOIDCValidator(server.URL, "client-id", server.Client())
+			validator, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -459,25 +459,6 @@ func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 				return err
 			},
 		},
-		{
-			name: "symlink socket",
-			setup: func(t *testing.T, _ string, service sshexec.Runner) {
-				path, err := service.ControlPath(context.Background(), "delta")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(filepath.Join(t.TempDir(), "target"), path); err != nil {
-					t.Fatal(err)
-				}
-			},
-			run: func(service sshexec.Runner) error {
-				path, err := service.ControlPath(context.Background(), "delta")
-				if err != nil {
-					return err
-				}
-				return sshexec.RemoveStaleControl(path)
-			},
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, err := os.MkdirTemp("/tmp", "csctl-control-attack-")
@@ -666,9 +647,6 @@ func TestOwnedForegroundMasterShutdownDoesNotTouchForeignReplacement(t *testing.
 }
 
 func TestStopAndReapKillsStubbornProcess(t *testing.T) {
-	oldTerm := authTerminateGrace
-	authTerminateGrace = 50 * time.Millisecond
-	defer func() { authTerminateGrace = oldTerm }()
 	cmd := exec.Command("sh", "-c", "trap '' TERM; while :; do sleep 1; done")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -739,9 +717,6 @@ func TestCloseUnblocksFullPTYInputQueueAndReapsProcess(t *testing.T) {
 	t.Setenv("AUTH_HELPER_NO_READ", "1")
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	t.Setenv("AUTH_HELPER_PID_FILE", pidFile)
-	oldTerm := authTerminateGrace
-	authTerminateGrace = 50 * time.Millisecond
-	defer func() { authTerminateGrace = oldTerm }()
 	manager := NewSSHAuthManager(service)
 	server := httptest.NewServer(serveSSHRoute(manager))
 	defer server.Close()

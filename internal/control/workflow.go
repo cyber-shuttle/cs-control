@@ -1,14 +1,9 @@
 package control
 
 import (
-	"context"
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
 // The allocation runs Linkspan; Linkspan runs this. Everything an allocation is
@@ -20,10 +15,13 @@ import (
 // expands nothing, so every path is a validated remote path, every port is the
 // one this runtime was given, and the token Jupyter Server needs reaches it
 // through the environment Linkspan inherits from the job.
-func runtimeWorkflow(runtime Runtime) string {
-	uv := strings.TrimSuffix(runtime.HomeDir, "/") + "/.local/bin/uv"
-	env := jupyterEnvironment(runtime.HomeDir)
-	python := jupyterPython(runtime)
+func runtimeWorkflow(runtime Runtime, home string) string {
+	uv := strings.TrimSuffix(home, "/") + "/.local/bin/uv"
+	env := jupyterEnvironment(home)
+	// The interpreter is provisioned per account, beside the binary the job
+	// execs. One account, one environment: a workspace chooses what a server
+	// opens, not what runs it. The browser never computes paths.
+	python := env + "/bin/python"
 	port := strconv.Itoa(int(allocationPorts(runtime.ID, runtime.Generation).jupyter))
 	steps := []struct{ name, command string }{
 		{"Create the Python environment", strings.Join([]string{
@@ -58,45 +56,4 @@ func runtimeWorkflow(runtime Runtime) string {
 
 func runtimeWorkflowPath(runtime Runtime) string {
 	return strings.TrimSuffix(runtime.PrivateRoot, "/") + "/workflow.yaml"
-}
-
-// workflowInstallScript is intentionally constant. It travels as an argument
-// rather than on standard input, because standard input carries the document it
-// installs. The destination is its own argument, so nothing is interpolated
-// into the remote shell program.
-const workflowInstallScript = `set -eu
-[ "$#" -eq 1 ]
-path=$1
-case "$path" in /*) ;; *) exit 70 ;; esac
-umask 077
-install -d -m 700 "$(dirname "$path")"
-staged="$path.staged"
-cat > "$staged"
-[ -s "$staged" ] || { rm -f "$staged"; exit 71; }
-mv -f "$staged" "$path"
-`
-
-// installRuntimeWorkflow puts the workflow where the reviewed script says
-// Linkspan will look for it. It carries no secret, so it is a file rather than
-// an environment variable.
-func (s Service) installRuntimeWorkflow(ctx context.Context, alias string, runtime Runtime) error {
-	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
-	defer cancel()
-	// The script travels as an argument because standard input carries the
-	// document it installs.
-	remote := strings.Join([]string{
-		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-c"), sshexec.ShellQuote(workflowInstallScript),
-		sshexec.ShellQuote("csctl-runtime-workflow"), sshexec.ShellQuote(runtimeWorkflowPath(runtime)),
-	}, " ")
-	cmd, err := s.Runner.Command(ctx, alias, remote)
-	if err != nil {
-		return err
-	}
-	cmd.Stdin = strings.NewReader(runtimeWorkflow(runtime))
-	_, errText, runErr := sshexec.RunBounded(ctx, cmd)
-	if runErr != nil {
-		message := sshexec.FailureMessage(errText, runErr)
-		return apierr.New("runtime_provisioning_failed", "Installing the runtime workflow on "+alias+" failed: "+message, http.StatusBadGateway)
-	}
-	return nil
 }

@@ -6,8 +6,8 @@
 // Everything it needs from outside is a composed subsystem it never reaches
 // past: sshexec runs remote commands, sshconfig reads ~/.ssh/config, devtunnel
 // owns the Dev Tunnels API, authn owns identity, gateway serves the SSH
-// authentication socket, and safeio and httpx, proc and apierr hold the
-// primitives they share.
+// authentication socket, and safeio, httpx and apierr hold the primitives they
+// share.
 package control
 
 import (
@@ -114,23 +114,17 @@ type Runtime struct {
 	Node          string    `json:"node,omitempty"`
 	PrivateRoot   string    `json:"privateRoot"`
 	WorkspaceRoot string    `json:"workspaceRoot"`
-	// The account's own home on this host. The interpreter a runtime starts is
-	// a tool of the account, not of the workspace it opens.
-	HomeDir string `json:"homeDir"`
 }
 
 type RuntimeList struct {
-	Runtimes   []RuntimeResponse `json:"runtimes"`
-	Refreshing bool              `json:"refreshing"`
-	Logs       []RuntimeLogTail  `json:"logs"`
+	Runtimes []RuntimeResponse `json:"runtimes"`
+	Logs     []RuntimeLogTail  `json:"logs"`
 }
-
-func RuntimeResponseFrom(runtime Runtime) RuntimeResponse { return runtime.RuntimeResponse }
 
 func publicRuntimes(runtimes []Runtime) []RuntimeResponse {
 	result := make([]RuntimeResponse, len(runtimes))
 	for index := range runtimes {
-		result[index] = RuntimeResponseFrom(runtimes[index])
+		result[index] = runtimes[index].RuntimeResponse
 	}
 	return result
 }
@@ -147,13 +141,6 @@ type RuntimeJupyterAccess struct {
 	Token string `json:"token"`
 }
 
-// RuntimeScript is the candidate script alone. Validation returns the same text
-// with Slurm's answer; this is what the caller can read before that answer.
-type RuntimeScript struct {
-	RuntimeID string `json:"runtimeId"`
-	Script    string `json:"script"`
-}
-
 type ValidationResult struct {
 	RuntimeID string `json:"runtimeId"`
 	Script    string `json:"script"`
@@ -167,6 +154,9 @@ type preparedRuntime struct {
 	request CreateRequest
 	runtime Runtime
 	script  string
+	// The account's own home on this host. The interpreter a runtime starts is
+	// a tool of the account, not of the workspace it opens.
+	home string
 	// Where Linkspan belongs on this host, with any $HOME anchor already
 	// resolved, so provisioning and the script name the same file.
 	linkspan string
@@ -188,7 +178,7 @@ type state struct {
 const DefaultLinkspanPath = "$HOME/.cybershuttle/bin/linkspan"
 
 // defaultRuntimeBase is where a runtime's private state lives, relative to the
-// account's home. It is the only value the layout rules accept.
+// account's home.
 const defaultRuntimeBase = ".cybershuttle/runtimes"
 
 // The smallest allocation worth scheduling. cs-jupyter offers the same floor
@@ -200,7 +190,6 @@ const (
 
 type Config struct {
 	LinkspanPath string
-	RuntimeBase  string
 }
 
 type Store struct {
@@ -224,16 +213,12 @@ func (s Service) effectiveConfig() Config {
 	if !safeRemoteExecutable(cfg.LinkspanPath) {
 		cfg.LinkspanPath = DefaultLinkspanPath
 	}
-	if cfg.RuntimeBase == "" {
-		cfg.RuntimeBase = defaultRuntimeBase
-	}
 	return cfg
 }
 
 var (
 	errRuntimeNotFound  = apierr.New("runtime_not_found", "runtime not found", 404)
 	errOwnerMismatch    = apierr.New("runtime_owner_mismatch", "runtime is owned by another principal", 403)
-	errInvalidRuntimeID = apierr.New("invalid_runtime_id", "invalid runtime ID", 400)
 	errRuntimeRunning   = apierr.New("runtime_running", "runtime is still running; stop it before running it again", 409)
 	errRouteNotFound    = apierr.New("not_found", "route not found", 404)
 	errMethodNotAllowed = apierr.New("method_not_allowed", "method not allowed", 405)

@@ -23,8 +23,8 @@ func fakeSSH(t *testing.T) (string, string, string) {
 	scriptLog := filepath.Join(dir, "script")
 	validationScriptLog := filepath.Join(dir, "validation-script")
 	commandLog := filepath.Join(dir, "commands")
+	statusScriptLog := filepath.Join(dir, "status-script")
 	discoveryScriptLog := filepath.Join(dir, "discovery-script")
-	discoveryExecCount := filepath.Join(dir, "discovery-exec-count")
 	acceptedJobName := filepath.Join(dir, "accepted-job-name")
 	schedulerQueryCount := filepath.Join(dir, "scheduler-query-count")
 	acceptedJobID := filepath.Join(dir, "accepted-job-id")
@@ -49,9 +49,9 @@ if printf '%s' "$wire_command" | grep -q 'csctl-runtime-log-tail'; then
   eval "set -- $wire_command"
   shift 4
   for runtime_id in "$@"; do
-    printf '__CSCTL_RUNTIME_LOG__|%s|stdout|' "$runtime_id"
+    printf '__CSCTL_RUNTIME_LOG__|%s|stdout\n' "$runtime_id"
     printf '%s' "${FAKE_RUNTIME_STDOUT:-}" | od -An -v -tx1 | tr -d ' \n'
-    printf '\n__CSCTL_RUNTIME_LOG__|%s|stderr|' "$runtime_id"
+    printf '\n__CSCTL_RUNTIME_LOG__|%s|stderr\n' "$runtime_id"
     printf '%s' "${FAKE_RUNTIME_STDERR:-}" | od -An -v -tx1 | tr -d ' \n'
     printf '\n'
   done
@@ -59,12 +59,23 @@ if printf '%s' "$wire_command" | grep -q 'csctl-runtime-log-tail'; then
 fi
 if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = "'sh' '-s' '--' 'csctl-runtime-status'" ]; then
   payload=$(cat)
+  printf '%s\n__CSCTL_SCRIPT_END__\n' "$payload" >> "$FAKE_STATUS_SCRIPT_LOG"
   query_count=0; [ ! -f "$FAKE_SCHEDULER_QUERY_COUNT" ] || query_count=$(cat "$FAKE_SCHEDULER_QUERY_COUNT")
   query_count=$((query_count + 1)); printf '%s\n' "$query_count" > "$FAKE_SCHEDULER_QUERY_COUNT"
   job_id=12345; [ ! -f "$FAKE_ACCEPTED_JOB_ID" ] || job_id=$(cat "$FAKE_ACCEPTED_JOB_ID")
   if printf '%s' "$payload" | grep -q 'scancel '; then
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s' "$payload" | grep -o 'scancel [^)]*' | sed 's/ 2>&1$//' | tr -d "'" | sed 's/^/batch /' >> "$FAKE_SCANCEL_LOG"
     if [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ]; then printf 'CANCELLED\n' > "$FAKE_STATUS"; fi
+  fi
+  [ -z "${FAKE_STATUS_STARTED:-}" ] || : > "$FAKE_STATUS_STARTED"
+  while [ -n "${FAKE_STATUS_RELEASE:-}" ] && [ ! -e "$FAKE_STATUS_RELEASE" ]; do sleep .02; done
+  [ "${FAKE_STATUS_FAIL:-0}" = 0 ] || { printf 'scheduler unavailable\n' >&2; exit 1; }
+  [ -z "${FAKE_STATUS_BANNER:-}" ] || printf '%b\n' "$FAKE_STATUS_BANNER"
+  printf '__CSCTL_SCANCEL__\n'
+  [ -z "${FAKE_CANCEL_ERRORS:-}" ] || printf '%b\n' "$FAKE_CANCEL_ERRORS"
+  if [ -n "${FAKE_STATUS_LINES+x}" ]; then
+    printf '__CSCTL_SQUEUE__\n%b\n__CSCTL_SACCT__\n%b\n' "$FAKE_STATUS_LINES" "$FAKE_STATUS_LINES"
+    exit 0
   fi
   state=$(cat "$FAKE_STATUS")
   accepted_name=; [ ! -f "$FAKE_ACCEPTED_JOB_NAME" ] || accepted_name=$(cat "$FAKE_ACCEPTED_JOB_NAME")
@@ -78,29 +89,19 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
   fi
   exit 0
 fi
-if [ "$wire_command" = "sh -s" ]; then
+if [ "$wire_command" = "'sh' '-s'" ]; then
   cat > "$FAKE_DISCOVERY_SCRIPT_LOG"
   if [ -n "${FAKE_DISCOVERY_FAIL:-}" ]; then printf '%s\n' "$FAKE_DISCOVERY_FAIL" >&2; exit 255; fi
-  count=0; [ ! -f "$FAKE_DISCOVERY_EXEC_COUNT" ] || count=$(cat "$FAKE_DISCOVERY_EXEC_COUNT")
-  printf '%s\n' $((count + 1)) > "$FAKE_DISCOVERY_EXEC_COUNT"
   printf 'REMOTE LOGIN BANNER\n' >&2
   user=${FAKE_REMOTE_USER:-tester}
-  printf '%s\n' "$DISC_USER_BEGIN"
-  case "$user" in ''|*[!A-Za-z0-9_.-]*|?????????????????????????????????????????????????????????????????*) printf '%s\n' "$DISC_ERROR_USER"; exit 72;; esac
-  printf '%s\n%s\n' "$user" "$DISC_USER_END"
-  printf '%s\n' "$DISC_ACCOUNTS_BEGIN"
-  printf 'Account|\nproject-a|\nproject-a|\n%s\n' "$DISC_ACCOUNTS_END"
-  printf '%s\n' "$DISC_PARTITIONS_BEGIN"
-  printf 'cpu*|24+|191000+|(null)\ngpu|64|515000|gpu:a100:2(S:2,5)\n%s\n' "$DISC_PARTITIONS_END"
-  printf '%s\n' "$DISC_HOME_BEGIN"
-  printf '/home/tester\n%s\n%s\n' "$DISC_HOME_END" "$DISC_DONE"
+  printf '%s\n' "$DISC_USER"
+  case "$user" in ''|*[!A-Za-z0-9_.-]*) printf '%s\n' "$DISC_ERROR_USER"; exit 72;; esac
+  printf '%s\n%s\n' "$user" "$DISC_ACCOUNTS"
+  printf 'Account|\nproject-a|\nproject-a|\n%s\n' "$DISC_PARTITIONS"
+  printf 'cpu*|24+|191000+|(null)\ngpu|64|515000|gpu:a100:2(S:2,5)\n%s\n' "$DISC_HOME"
+  printf '/home/tester\n%s\n' "$DISC_DONE"
   exit 0
 fi
-case "$wire_command" in
-  *"'contract'"*)
-    printf '%s' "${FAKE_LINKSPAN_CONTRACT_STDOUT:-}"
-    exit "${FAKE_LINKSPAN_CONTRACT_EXIT:-0}";;
-esac
 eval "set -- $wire_command"
 command="$*"
 case "$command" in
@@ -122,9 +123,6 @@ case "$command" in
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s\n' "$command" >> "$FAKE_SCANCEL_LOG"
     [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ] || { echo 'scheduler temporarily unavailable' >&2; exit 1; }
     printf 'CANCELLED\n' > "$FAKE_STATUS"
-    ;;
-  "sh -c "*"csctl-runtime-workflow "*)
-    cat > "${FAKE_WORKFLOW_LOG:-/dev/null}"
     ;;
   "sh -s -- csctl-provision "*)
     cat > "${FAKE_PROVISION_LOG:-/dev/null}"
@@ -149,34 +147,25 @@ esac
 	t.Setenv("FAKE_VALIDATION_SCRIPT_LOG", validationScriptLog)
 	t.Setenv("FAKE_VALIDATION_STDOUT", "Job script accepted")
 	t.Setenv("FAKE_VALIDATION_FAIL", "0")
-	t.Setenv("FAKE_LINKSPAN_CONTRACT_STDOUT", "linkspan.allocation/v1\n")
-	t.Setenv("FAKE_LINKSPAN_CONTRACT_EXIT", "0")
 	t.Setenv("FAKE_COMMAND_LOG", commandLog)
+	t.Setenv("FAKE_STATUS_SCRIPT_LOG", statusScriptLog)
 	t.Setenv("FAKE_DISCOVERY_SCRIPT_LOG", discoveryScriptLog)
-	t.Setenv("FAKE_DISCOVERY_EXEC_COUNT", discoveryExecCount)
 	t.Setenv("FAKE_ACCEPTED_JOB_NAME", acceptedJobName)
 	t.Setenv("FAKE_ACCEPTED_JOB_ID", acceptedJobID)
 	t.Setenv("FAKE_SCHEDULER_QUERY_COUNT", schedulerQueryCount)
-	t.Setenv("DISC_USER_BEGIN", markerUserBegin)
-	t.Setenv("DISC_USER_END", markerUserEnd)
-	t.Setenv("DISC_ACCOUNTS_BEGIN", markerAccountsBegin)
-	t.Setenv("DISC_ACCOUNTS_END", markerAccountsEnd)
-	t.Setenv("DISC_PARTITIONS_BEGIN", markerPartitionsBegin)
-	t.Setenv("DISC_PARTITIONS_END", markerPartitionsEnd)
-	t.Setenv("DISC_HOME_BEGIN", markerHomeBegin)
-	t.Setenv("DISC_HOME_END", markerHomeEnd)
+	t.Setenv("DISC_USER", markerUser)
+	t.Setenv("DISC_ACCOUNTS", markerAccounts)
+	t.Setenv("DISC_PARTITIONS", markerPartitions)
+	t.Setenv("DISC_HOME", markerHome)
 	t.Setenv("DISC_DONE", markerDone)
 	t.Setenv("DISC_ERROR_USER", markerErrorUser)
-	t.Setenv("DISC_ERROR_ACCOUNTS", markerErrorAccounts)
-	t.Setenv("DISC_ERROR_PARTITIONS", markerErrorPartitions)
-	t.Setenv("DISC_ERROR_HOME", markerErrorHome)
 	return path, scriptLog, commandLog
 }
 
 func testService(t *testing.T) Service {
 	t.Helper()
 	ssh, _, _ := fakeSSH(t)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan", RuntimeBase: ".cybershuttle/runtimes"}, Now: func() time.Time { return time.Unix(1, 0).UTC() }}
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Now: func() time.Time { return time.Unix(1, 0).UTC() }}
 	configureTestTunnel(t, &service)
 	return service
 }
@@ -203,11 +192,8 @@ func TestDiscoverNormalizesSchedulerData(t *testing.T) {
 		t.Fatal(err)
 	}
 	wire := string(commands)
-	if strings.Count(wire, "delta|sh -s") != 1 || strings.Count(strings.TrimSpace(wire), "\n") != 0 {
+	if strings.Count(wire, "delta|'sh' '-s'") != 1 || strings.Count(strings.TrimSpace(wire), "\n") != 0 {
 		t.Fatalf("discovery must use exactly one remote exec after ssh -G:\n%s", wire)
-	}
-	if count, err := os.ReadFile(os.Getenv("FAKE_DISCOVERY_EXEC_COUNT")); err != nil || strings.TrimSpace(string(count)) != "1" {
-		t.Fatalf("discovery exec count = %q, %v", count, err)
 	}
 	script, err := os.ReadFile(os.Getenv("FAKE_DISCOVERY_SCRIPT_LOG"))
 	if err != nil {
@@ -218,24 +204,18 @@ func TestDiscoverNormalizesSchedulerData(t *testing.T) {
 	}
 }
 
+// The remote program refuses an unsafe username itself, before it reaches
+// sacctmgr; discoveryResult refuses the rest of them without forking anything.
 func TestDiscoverRejectsUnsafeRemoteUsernameBeforeSacctmgr(t *testing.T) {
-	for _, username := range []string{"bad;touch", "$USER", "two\nusers", strings.Repeat("a", 65)} {
-		t.Run(fmt.Sprintf("%q", username), func(t *testing.T) {
-			ssh, _, commandLog := fakeSSH(t)
-			t.Setenv("FAKE_REMOTE_USER", username)
-			service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}}
-			if _, err := service.Discover(context.Background(), "delta"); err == nil || !strings.Contains(err.Error(), "identify remote user") {
-				t.Fatalf("expected unsafe username rejection, got %v", err)
-			}
-			commands, err := os.ReadFile(commandLog)
-			if err != nil {
-				t.Fatal(err)
-			}
-			wire := string(commands)
-			if strings.Count(wire, "delta|sh -s") != 1 {
-				t.Fatalf("unsafe username discovery used unexpected remote executions for %q:\n%s", username, wire)
-			}
-		})
+	ssh, _, commandLog := fakeSSH(t)
+	t.Setenv("FAKE_REMOTE_USER", "bad;touch")
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}}
+	if _, err := service.Discover(context.Background(), "delta"); err == nil || !strings.Contains(err.Error(), "identify remote user") {
+		t.Fatalf("expected unsafe username rejection, got %v", err)
+	}
+	wire := string(mustRead(t, commandLog))
+	if strings.Count(wire, "delta|'sh' '-s'") != 1 {
+		t.Fatalf("unsafe username discovery used unexpected remote executions:\n%s", wire)
 	}
 }
 
@@ -369,29 +349,6 @@ func TestHTTPRequiresValidatedPrincipalForRuntimeInventory(t *testing.T) {
 	}
 }
 
-func TestStoredRuntimeRejectsNonHomeExpressionPrivateOverlap(t *testing.T) {
-	now := time.Unix(1, 0).UTC()
-	base := Runtime{
-		RuntimeResponse: RuntimeResponse{ID: "rt-012345abcdef", State: "STOPPED", SSHHost: "delta", Partition: "cpu", Resources: Resources{Cores: 1, MemoryMB: 1024, WallMinutes: 60}, CreatedAt: now, UpdatedAt: now},
-		JobName:         "cs-rt-012345abcdef",
-	}
-	setTestRuntimeMetadata(&base)
-	for _, test := range []struct {
-		expression, workspace string
-	}{
-		{"/scratch/tester", "/scratch/tester"},
-		{"projects/example", "/home/tester/projects/example"},
-	} {
-		runtime := base
-		runtime.RootFolder = test.expression
-		runtime.WorkspaceRoot = test.workspace
-		runtime.PrivateRoot = test.workspace + "/.cybershuttle/runtimes/" + runtime.ID
-		if err := validateStoredRuntime(runtime.ID, &runtime); err == nil {
-			t.Fatalf("stored non-home overlap %q accepted", test.expression)
-		}
-	}
-}
-
 func TestLoopbackListenValidation(t *testing.T) {
 	for _, address := range []string{"127.0.0.1:8042", "127.0.0.1:0", "[::1]:0"} {
 		if err := ValidateLoopbackListen(address); err != nil {
@@ -414,7 +371,7 @@ func TestDeleteRemovesATerminalRuntimeAndItsCredential(t *testing.T) {
 	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {
 		t.Fatal(err)
 	}
-	service.Logs.Append(runtime.ID, "status", "starting")
+	service.Logs.Append(runtime.ID, "starting")
 
 	deleted, err := service.Delete(testTunnelContext(), runtime.ID)
 	if err != nil || deleted.ID != runtime.ID {

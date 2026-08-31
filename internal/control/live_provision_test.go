@@ -25,7 +25,7 @@ func TestLiveProvisionPreparesABareHost(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	service := Service{
 		Runner: sshexec.Runner{
-			Hosts:      sshconfig.Config{UserPath: filepath.Join(home, ".ssh", "config")},
+			Hosts:      sshconfig.Config{UserPath: filepath.Join(home, ".ssh", "config"), SystemPath: "/etc/ssh/ssh_config"},
 			ControlDir: t.TempDir(),
 			Timeout:    30 * time.Second,
 		},
@@ -33,22 +33,17 @@ func TestLiveProvisionPreparesABareHost(t *testing.T) {
 	}
 	runtime := Runtime{
 		RuntimeResponse: RuntimeResponse{ID: "rt-0123456789ab", Generation: "g-0123456789abcdef"},
-		PrivateRoot:     root + "/private", WorkspaceRoot: root, HomeDir: root,
+		PrivateRoot:     root + "/private", WorkspaceRoot: root,
 	}
 	linkspan := root + "/bin/linkspan"
-	if err := service.provisionRuntime(context.Background(), alias, runtime, linkspan); err != nil {
+	if err := service.provisionRuntime(context.Background(), alias, runtime, root, linkspan); err != nil {
 		t.Fatalf("bare host was not prepared: %v", err)
 	}
 	// Again: what is already there is left alone rather than rebuilt.
-	if err := service.provisionRuntime(context.Background(), alias, runtime, linkspan); err != nil {
+	if err := service.provisionRuntime(context.Background(), alias, runtime, root, linkspan); err != nil {
 		t.Fatalf("prepared host was not left alone: %v", err)
 	}
-	tail, _ := service.Logs.Tail(runtime.ID)
-	said := []string{}
-	for _, line := range tail.Lines {
-		said = append(said, line.Text)
-	}
-	if strings.Count(strings.Join(said, "|"), "Runtime environment ready") != 2 {
+	if said := runtimeLogText(t, service.Logs, runtime.ID, false); strings.Count(said, "Runtime environment ready") != 2 {
 		t.Fatalf("status did not report readiness twice: %v", said)
 	}
 }

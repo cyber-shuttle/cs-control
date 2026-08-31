@@ -31,15 +31,7 @@ func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime R
 	// workflow that starts it names neither and nothing secret is written down.
 	export := fmt.Sprintf("--export=ALL,JUPYTER_TOKEN=%s,CS_TUNNEL_HOST_TOKEN=%s,JUPYTER_PORT=%d,CS_CONTROL_PORT=%d,CS_TUNNEL_ID=%s,CS_TUNNEL_CLUSTER=%s",
 		jupyterToken, hostToken, ports.jupyter, ports.control, runtime.Tunnel.ID, runtime.Tunnel.ClusterID)
-	remote := strings.Join([]string{sshexec.ShellQuote("sbatch"), sshexec.ShellQuote("--job-name=" + jobName), sshexec.ShellQuote(export), sshexec.ShellQuote("--parsable")}, " ")
-	commandCtx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
-	defer cancel()
-	cmd, err := s.Runner.Command(commandCtx, host, remote)
-	if err != nil {
-		return "", &submissionError{cause: fmt.Errorf("submit outcome pending reconciliation for %s: %w", jobName, err), ambiguous: true}
-	}
-	cmd.Stdin = strings.NewReader(script)
-	outText, errText, runErr := sshexec.RunBounded(commandCtx, cmd)
+	outText, errText, runErr := s.Runner.RunOutput(ctx, host, strings.NewReader(script), "sbatch", "--job-name="+jobName, export, "--parsable")
 	if runErr != nil {
 		message := sshexec.FailureMessage(errText, runErr)
 		for _, secret := range []string{jupyterToken, hostToken} {
@@ -47,13 +39,10 @@ func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime R
 				message = strings.ReplaceAll(message, secret, "[redacted]")
 			}
 		}
-		ambiguous := commandCtx.Err() != nil
+		// Anything but a refusal sbatch itself reported leaves the submission
+		// unresolved: the job may already be queued.
 		var exit *exec.ExitError
-		if errors.As(runErr, &exit) {
-			ambiguous = exit.ExitCode() == 255
-		} else if commandCtx.Err() == nil {
-			ambiguous = true
-		}
+		ambiguous := !errors.As(runErr, &exit) || exit.ExitCode() == 255
 		return "", &submissionError{cause: fmt.Errorf("submit %s failed: %s", jobName, message), ambiguous: ambiguous}
 	}
 	jobID := strings.SplitN(strings.TrimSpace(outText), ";", 2)[0]
@@ -64,30 +53,13 @@ func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime R
 }
 
 func (s Service) validateScript(ctx context.Context, alias, script string) (commandResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
-	defer cancel()
-	cmd, err := s.Runner.Command(ctx, alias, sshexec.ShellQuote("sbatch")+" "+sshexec.ShellQuote("--test-only"))
-	if err != nil {
-		return commandResult{}, err
-	}
-	cmd.Stdin = strings.NewReader(script)
-	outText, errText, err := sshexec.RunBounded(ctx, cmd)
-	result := commandResult{stdout: outText, stderr: errText, passed: err == nil}
-	if err == nil {
-		return result, nil
-	}
-	if ctx.Err() != nil {
-		return commandResult{}, fmt.Errorf("slurm validation timed out: %w", ctx.Err())
-	}
+	outText, errText, err := s.Runner.RunOutput(ctx, alias, strings.NewReader(script), "sbatch", "--test-only")
+	// Slurm rejecting the script is an answer; anything else is a failed call.
 	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() != 255 {
-		return result, nil
+	if err == nil || errors.As(err, &exit) && exit.ExitCode() != 255 {
+		return commandResult{stdout: outText, stderr: errText, passed: err == nil}, nil
 	}
-	message := strings.TrimSpace(errText)
-	if sshexec.AuthenticationFailure(message) {
-		return commandResult{}, sshexec.AuthenticationRequired(alias)
-	}
-	return commandResult{}, fmt.Errorf("validate Slurm script over SSH: %s", sshexec.FailureMessage(message, err))
+	return commandResult{}, sshexec.ClassifyFailure(alias, errText, err)
 }
 
 func validationResult(prepared *preparedRuntime, result commandResult) *ValidationResult {
@@ -137,13 +109,6 @@ func buildScript(runtime Runtime, linkspan string) string {
 	return strings.Join(lines, "\n")
 }
 
-// jupyterPython is the interpreter cs-control provisions per account, beside the
-// binary it also installs. One account, one environment: a workspace chooses
-// what a server opens, not what runs it. The browser never computes paths.
-func jupyterPython(runtime Runtime) string {
-	return jupyterEnvironment(runtime.HomeDir) + "/bin/python"
-}
-
 func jupyterEnvironment(home string) string {
 	return strings.TrimSuffix(home, "/") + "/.cybershuttle/jupyter-env"
 }
@@ -160,11 +125,6 @@ func minutesToWalltime(minutes int) string {
 // A card outlives its allocations, so the name carries the generation: without
 // it the finished run's accounting record reads as this submission's outcome.
 func jobName(id, generation string) string { return "cs-" + id + "-" + generation }
-
-func validRuntimeJobName(runtime *Runtime) bool {
-	// A live job cannot be renamed, so names written before this stay valid.
-	return runtime.JobName == jobName(runtime.ID, runtime.Generation) || runtime.JobName == "cs-"+runtime.ID
-}
 
 func (e *submissionError) Error() string { return e.cause.Error() }
 

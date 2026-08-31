@@ -71,7 +71,7 @@ func TestStartRefusesRuntimesItMayNotRun(t *testing.T) {
 	retire(t, service, created.ID)
 
 	stranger := authn.Principal{Subject: "other-owner", Tenant: "test-tenant"}
-	ctx := authn.WithTunnelAuthorization(authn.WithPrincipal(context.Background(), stranger), authn.TunnelAuthorization{OAuthToken: "other-token", Principal: stranger})
+	ctx := authn.WithTunnelAuthorization(context.Background(), authn.TunnelAuthorization{OAuthToken: "other-token", Principal: stranger})
 	if _, err := service.Start(ctx, created.ID); err == nil || apierr.For(err).Code != "runtime_owner_mismatch" {
 		t.Fatalf("another principal ran this card: %v", err)
 	}

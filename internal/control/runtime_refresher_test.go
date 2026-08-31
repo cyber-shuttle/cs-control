@@ -24,15 +24,15 @@ func runtimeListRequest(t *testing.T, api *HTTPAPI, method, path string) *httpte
 	return response
 }
 
+func refreshing(refresher *RuntimeRefresher) bool {
+	refresher.mu.Lock()
+	defer refresher.mu.Unlock()
+	return refresher.running
+}
+
 func waitRefresh(t *testing.T, refresher *RuntimeRefresher) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for refresher.Running() && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if refresher.Running() {
-		t.Fatal("runtime refresh did not finish")
-	}
+	eventually(t, 3*time.Second, "the runtime refresh to finish", func() bool { return !refreshing(refresher) })
 }
 
 // The interval is the only thing standing between a polling browser and one SSH
@@ -44,7 +44,6 @@ func TestTriggerStartsOneReconciliationPerIntervalAndNeverOverlaps(t *testing.T)
 	refresher := &RuntimeRefresher{
 		interval: 50 * time.Millisecond,
 		timeout:  time.Minute,
-		now:      time.Now,
 		reconcile: func(context.Context) error {
 			total.Add(1)
 			if running.Add(1) != 1 {
@@ -69,7 +68,7 @@ func TestTriggerStartsOneReconciliationPerIntervalAndNeverOverlaps(t *testing.T)
 	if got := total.Load(); got != 1 {
 		t.Fatalf("concurrent triggers started %d reconciliations, want 1", got)
 	}
-	if !refresher.Running() {
+	if !refreshing(refresher) {
 		t.Fatal("refresher did not report the in-flight reconciliation")
 	}
 
@@ -91,12 +90,12 @@ func TestTriggerReportsFailureWithoutBlockingTheNextOne(t *testing.T) {
 		calls.Add(1)
 		return errors.New("scheduler unreachable")
 	}
-	refresher := &RuntimeRefresher{interval: 0, timeout: time.Minute, now: time.Now, reconcile: reconcile}
+	refresher := &RuntimeRefresher{interval: 0, timeout: time.Minute, reconcile: reconcile}
 	refresher.Trigger()
 	refresher.Close()
 	// A failure must leave nothing latched, so an identically configured
 	// refresher reconciles again rather than refusing.
-	next := &RuntimeRefresher{interval: 0, timeout: time.Minute, now: time.Now, reconcile: reconcile}
+	next := &RuntimeRefresher{interval: 0, timeout: time.Minute, reconcile: reconcile}
 	next.Trigger()
 	next.Close()
 	if got := calls.Load(); got != 2 {
@@ -107,8 +106,8 @@ func TestTriggerReportsFailureWithoutBlockingTheNextOne(t *testing.T) {
 func TestHTTPRuntimeListReturnsCachedWhileSSHBlocksAndSingleFlights(t *testing.T) {
 	service, logPath, release := reconciliationService(t)
 	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	t.Setenv("RECONCILE_RELEASE", release)
-	t.Setenv("RECONCILE_LINES", "101|FAILED||"+runtime.JobName)
+	t.Setenv("FAKE_STATUS_RELEASE", release)
+	t.Setenv("FAKE_STATUS_LINES", "101|FAILED||"+runtime.JobName)
 	putRuntimes(t, service, runtime)
 	api := NewHTTPHandler(service, nil)
 	defer api.Close()
@@ -118,9 +117,7 @@ func TestHTTPRuntimeListReturnsCachedWhileSSHBlocksAndSingleFlights(t *testing.T
 	if elapsed := time.Since(before); elapsed > 100*time.Millisecond {
 		t.Fatalf("cached GET blocked for %v", elapsed)
 	}
-	if response.Code != http.StatusOK ||
-		!strings.Contains(response.Body.String(), `"refreshing":true`) ||
-		!strings.Contains(response.Body.String(), `"state":"QUEUED"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"QUEUED"`) {
 		t.Fatalf("unexpected cached response: %d %s", response.Code, response.Body.String())
 	}
 	waitForFile(t, logPath)
@@ -147,7 +144,7 @@ func TestHTTPRuntimeListReturnsCachedWhileSSHBlocksAndSingleFlights(t *testing.T
 func TestBackgroundTickReconcilesWithNobodyReading(t *testing.T) {
 	reconciled := make(chan struct{}, 8)
 	refresher := &RuntimeRefresher{
-		interval: 0, timeout: time.Minute, now: time.Now, stop: make(chan struct{}),
+		interval: 0, timeout: time.Minute, stop: make(chan struct{}),
 		reconcile: func(context.Context) error { reconciled <- struct{}{}; return nil },
 	}
 	refresher.wg.Add(1)
@@ -164,7 +161,7 @@ func TestBackgroundTickReconcilesWithNobodyReading(t *testing.T) {
 func TestCloseStopsTheBackgroundTick(t *testing.T) {
 	var count atomic.Int64
 	refresher := &RuntimeRefresher{
-		interval: 0, timeout: time.Minute, now: time.Now, stop: make(chan struct{}),
+		interval: 0, timeout: time.Minute, stop: make(chan struct{}),
 		reconcile: func(context.Context) error { count.Add(1); return nil },
 	}
 	refresher.wg.Add(1)

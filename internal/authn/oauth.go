@@ -59,19 +59,6 @@ type OAuthValidator interface {
 	Validate(context.Context, OAuthCredentials) (Principal, error)
 }
 
-type principalContextKey struct{}
-
-// WithPrincipal carries a validated identity on ctx. The OAuth boundary is the
-// only production caller; nothing downstream may mint a principal of its own.
-func WithPrincipal(ctx context.Context, principal Principal) context.Context {
-	return context.WithValue(ctx, principalContextKey{}, principal)
-}
-
-func PrincipalFromContext(ctx context.Context) (Principal, bool) {
-	principal, ok := ctx.Value(principalContextKey{}).(Principal)
-	return principal, ok
-}
-
 type oauthBoundary struct {
 	next      http.Handler
 	validator OAuthValidator
@@ -124,9 +111,15 @@ func validateControlOrigin(origin string) error {
 
 func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
-	if origin != "" && !allowOrigin(w, origin, b.originSet) {
-		http.Error(w, "origin is not allowed", http.StatusForbidden)
-		return
+	if origin != "" {
+		if !allowOrigin(w, origin, b.originSet) {
+			http.Error(w, "origin is not allowed", http.StatusForbidden)
+			return
+		}
+		// ETag is not a CORS-safelisted response header, so without this a
+		// cross-origin client cannot read it and the conditional runtime poll
+		// never sends If-None-Match.
+		w.Header().Set("Access-Control-Expose-Headers", "ETag")
 	}
 	if r.Method == http.MethodOptions && origin != "" && r.Header.Get("Access-Control-Request-Method") != "" {
 		if !validPreflight(r) {
@@ -134,7 +127,7 @@ func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+ControlIdentityHeader)
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match, "+ControlIdentityHeader)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -166,8 +159,7 @@ func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	ctx := WithPrincipal(request.Context(), principal)
-	ctx = WithTunnelAuthorization(ctx, TunnelAuthorization{OAuthToken: credentials.AccessToken, Principal: principal})
+	ctx := WithTunnelAuthorization(request.Context(), TunnelAuthorization{OAuthToken: credentials.AccessToken, Principal: principal})
 	b.next.ServeHTTP(w, request.WithContext(ctx))
 }
 
@@ -215,7 +207,7 @@ func validPreflight(r *http.Request) bool {
 	default:
 		return false
 	}
-	return preflightHeadersAllowed(r.Header.Get("Access-Control-Request-Headers"), "authorization", "content-type", ControlIdentityHeader)
+	return preflightHeadersAllowed(r.Header.Get("Access-Control-Request-Headers"), "authorization", "content-type", "if-none-match", ControlIdentityHeader)
 }
 
 func bearerToken(header string) (string, bool) {
@@ -332,14 +324,6 @@ func NewDevTunnelOAuthValidator(baseURL string, client *http.Client) (*DevTunnel
 	return newDevTunnelOAuthValidatorForBase(base, client), nil
 }
 
-func newDevTunnelOAuthValidator(baseURL string, client *http.Client) (*DevTunnelOAuthValidator, error) {
-	base, err := httpx.ParseBaseURL(baseURL, "Dev Tunnels base URL")
-	if err != nil {
-		return nil, err
-	}
-	return newDevTunnelOAuthValidatorForBase(base, client), nil
-}
-
 func newDevTunnelOAuthValidatorForBase(base *url.URL, client *http.Client) *DevTunnelOAuthValidator {
 	bounded := devtunnel.BoundedClient(client, defaultOAuthTimeout)
 	return &DevTunnelOAuthValidator{baseURL: base.String(), client: bounded}
@@ -408,6 +392,9 @@ type TunnelAuthorization struct {
 
 type tunnelAuthorizationContextKey struct{}
 
+// WithTunnelAuthorization carries a validated identity and the delegated token
+// it arrived with. The OAuth boundary is the only production caller; nothing
+// downstream may mint an authorization of its own.
 func WithTunnelAuthorization(ctx context.Context, auth TunnelAuthorization) context.Context {
 	return context.WithValue(ctx, tunnelAuthorizationContextKey{}, auth)
 }

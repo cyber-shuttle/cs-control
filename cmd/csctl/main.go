@@ -18,6 +18,7 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/control"
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-control/internal/gateway"
+	"github.com/cyber-shuttle/cs-control/internal/safeio"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
@@ -25,6 +26,7 @@ import (
 const (
 	defaultDevTunnelManagementURL = "https://global.rel.tunnels.api.visualstudio.com"
 	csctlVersion                  = "0.1.0"
+	sshTimeout                    = 20 * time.Second
 )
 
 func main() {
@@ -40,13 +42,7 @@ func run(ctx context.Context, args []string) error {
 	global := flag.NewFlagSet("csctl", flag.ContinueOnError)
 	global.SetOutput(os.Stderr)
 	global.Usage = printUsage
-	stateDir := global.String("state-dir", defaultStateDir(), "local non-secret state directory")
-	sshBin := global.String("ssh-bin", envOr("CSCTL_SSH_BIN", "ssh"), "ssh executable")
-	timeout := global.Duration("timeout", 20*time.Second, "timeout for each SSH command")
 	linkspan := global.String("linkspan", envOr("CSCTL_LINKSPAN", control.DefaultLinkspanPath), "remote Linkspan path, absolute or anchored at $HOME/; a missing one is installed there")
-	runtimeBase := global.String("runtime-base", envOr("CSCTL_RUNTIME_BASE", ".cybershuttle/runtimes"), "remote private runtime directory relative to HOME")
-	userSSH := global.String("user-ssh-config", envOr("CSCTL_USER_SSH_CONFIG", defaultUserSSHConfig()), "user SSH config")
-	systemSSH := global.String("system-ssh-config", envOr("CSCTL_SYSTEM_SSH_CONFIG", "/etc/ssh/ssh_config"), "system SSH config")
 	devTunnelManagementURL := global.String("devtunnel-management-url", envOr("CSCTL_DEVTUNNEL_MANAGEMENT_URL", defaultDevTunnelManagementURL), "recognized HTTPS Dev Tunnels management endpoint")
 	if err := global.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -62,15 +58,16 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	credentialDir, err := filepath.Abs(filepath.Join(*stateDir, "credentials"))
+	stateDir := defaultStateDir()
+	credentialDir, err := filepath.Abs(filepath.Join(stateDir, "credentials"))
 	if err != nil {
 		return fmt.Errorf("resolve credential directory: %w", err)
 	}
 	service := control.Service{
-		Runner: sshexec.Runner{SSHBin: *sshBin, Timeout: *timeout, ControlDir: filepath.Join(*stateDir, "ssh"),
-			Hosts: sshconfig.Config{UserPath: *userSSH, SystemPath: *systemSSH}},
-		Store:  control.Store{Dir: *stateDir},
-		Config: control.Config{LinkspanPath: *linkspan, RuntimeBase: *runtimeBase},
+		Runner: sshexec.Runner{Timeout: sshTimeout, ControlDir: filepath.Join(stateDir, "ssh"),
+			Hosts: sshconfig.Config{UserPath: defaultUserSSHConfig(), SystemPath: "/etc/ssh/ssh_config"}},
+		Store:  control.Store{Dir: stateDir},
+		Config: control.Config{LinkspanPath: *linkspan},
 		Logs:   control.NewRuntimeLogs(), Tunnels: tunnelManager,
 		Credentials: control.CredentialStore{Dir: credentialDir},
 	}
@@ -123,6 +120,11 @@ func runServe(ctx context.Context, service control.Service, args []string, liste
 	}
 	if strings.TrimSpace(*oauthAuthority) == "" {
 		return errors.New("--oauth-authority is required")
+	}
+	// The state directory holds every credential this daemon persists, so it is
+	// proved private here once rather than re-checked on each file operation.
+	if err := safeio.EnsurePrivateDir(service.Store.Dir); err != nil {
+		return err
 	}
 	components, err := newServeComponents(service, allowedOrigins, *oauthAuthority)
 	if err != nil {

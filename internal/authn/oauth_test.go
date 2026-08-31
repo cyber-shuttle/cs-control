@@ -7,11 +7,22 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
+	"github.com/cyber-shuttle/cs-control/internal/httpx"
 )
+
+func testBaseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	base, err := httpx.ParseBaseURL(raw, "test base URL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base
+}
 
 const testIdentityToken = "signed-test-identity-token"
 
@@ -52,12 +63,8 @@ func TestOAuthBoundaryExactOriginsBearerAndNative(t *testing.T) {
 		return Principal{Subject: "owner", Tenant: "tenant"}, nil
 	})
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		principal, ok := PrincipalFromContext(r.Context())
-		if !ok || principal.Subject != "owner" || principal.Tenant != "tenant" {
-			t.Fatalf("principal = %#v, %v", principal, ok)
-		}
 		auth, err := TunnelAuthorizationFromContext(r.Context())
-		if err != nil || auth.OAuthToken != token || auth.Principal != principal {
+		if err != nil || auth.OAuthToken != token || auth.Principal != (Principal{Subject: "owner", Tenant: "tenant"}) {
 			t.Fatalf("tunnel authorization = %#v, %v", auth, err)
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -178,10 +185,7 @@ func TestOAuthValidatorAcceptsEncryptedDevTunnelsAccessToken(t *testing.T) {
 		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer server.Close()
-	validator, err := newDevTunnelOAuthValidator(server.URL, server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
+	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client())
 	if err := validator.ValidateAccess(context.Background(), token); err != nil {
 		t.Fatal(err)
 	}
@@ -205,10 +209,7 @@ func TestOAuthValidatorDoesNotFollowBearerToUntrustedRedirect(t *testing.T) {
 		http.Redirect(w, r, hostile.URL, http.StatusTemporaryRedirect)
 	}))
 	defer origin.Close()
-	validator, err := newDevTunnelOAuthValidator(origin.URL, origin.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
+	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, origin.URL), origin.Client())
 	if err := validator.ValidateAccess(context.Background(), token); err == nil {
 		t.Fatal("redirect response accepted")
 	}
@@ -223,12 +224,48 @@ func TestOAuthValidatorRejectsUnvalidatedClaimsAndRedacts(t *testing.T) {
 		http.Error(w, "rejected "+r.Header.Get("Authorization"), http.StatusUnauthorized)
 	}))
 	defer server.Close()
-	validator, err := newDevTunnelOAuthValidator(server.URL, server.Client())
+	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client())
+	err := validator.ValidateAccess(context.Background(), secret)
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// The runtime poll's ETag is only usable cross-origin if the browser is allowed
+// to read the header and to send it back on the next request.
+func TestOAuthBoundaryConditionalPollHeaders(t *testing.T) {
+	const origin = "https://workspace.example.edu"
+	validator := oauthValidatorFunc(func(context.Context, string) (Principal, error) { return testPrincipal, nil })
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"abc"`)
+		w.WriteHeader(http.StatusNotModified)
+	})
+	handler, err := NewOAuthBoundary(next, validator, []string{origin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = validator.ValidateAccess(context.Background(), secret)
-	if err == nil || strings.Contains(err.Error(), secret) {
-		t.Fatalf("error = %v", err)
+
+	preflight := httptest.NewRequest(http.MethodOptions, "/api/v1/runtimes", nil)
+	preflight.Header.Set("Origin", origin)
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	preflight.Header.Set("Access-Control-Request-Headers", "authorization,if-none-match,"+strings.ToLower(ControlIdentityHeader))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, preflight)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("preflight code=%d body=%q", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(strings.ToLower(rr.Header().Get("Access-Control-Allow-Headers")), "if-none-match") {
+		t.Fatalf("Allow-Headers = %q", rr.Header().Get("Access-Control-Allow-Headers"))
+	}
+
+	actual := httptest.NewRequest(http.MethodGet, "/api/v1/runtimes", nil)
+	actual.Header.Set("Origin", origin)
+	actual.Header.Set("Authorization", "Bearer token-value")
+	actual.Header.Set(ControlIdentityHeader, testIdentityToken)
+	actual.Header.Set("If-None-Match", `"abc"`)
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, actual)
+	if rr.Code != http.StatusNotModified || rr.Header().Get("Access-Control-Expose-Headers") != "ETag" {
+		t.Fatalf("code=%d headers=%v", rr.Code, rr.Header())
 	}
 }

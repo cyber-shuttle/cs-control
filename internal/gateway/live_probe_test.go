@@ -22,7 +22,7 @@ func TestLiveRealOpenSSHReachesReady(t *testing.T) {
 	}
 	home, _ := os.UserHomeDir()
 	runner := sshexec.Runner{
-		Hosts:      sshconfig.Config{UserPath: home + "/.ssh/config"},
+		Hosts:      sshconfig.Config{UserPath: home + "/.ssh/config", SystemPath: "/etc/ssh/ssh_config"},
 		ControlDir: t.TempDir(),
 		Timeout:    30 * time.Second,
 	}

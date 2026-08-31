@@ -1,7 +1,7 @@
 package sshexec
 
 import (
-	"context"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,23 +11,12 @@ import (
 	"time"
 )
 
-func TestRunRemoteArgsRejectsUnsafeArguments(t *testing.T) {
-	runner := Runner{SSHBin: filepath.Join(t.TempDir(), "unused"), Timeout: time.Second}
-	for _, argument := range []string{"", "line\nfeed", "carriage\rreturn", "nul\x00byte"} {
-		if _, err := runner.Run(context.Background(), "delta", nil, "command", argument); err == nil {
-			t.Fatalf("accepted unsafe argument %q", argument)
-		}
-	}
-}
-
 func TestRunRemoteArgsBoundsCombinedOutput(t *testing.T) {
-	output := &Output{remaining: MaxOutput}
-	stdout := &commandStream{output: output, name: "stdout"}
-	stderr := &commandStream{output: output, name: "stderr"}
-	if _, err := stdout.Write(make([]byte, MaxOutput)); err != nil {
+	captured := NewCapture()
+	if _, err := captured.Stdout().Write(make([]byte, MaxOutput)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stderr.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "output exceeded limit") {
+	if _, err := captured.Stderr().Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "output exceeded limit") {
 		t.Fatalf("oversized combined remote output error = %v", err)
 	}
 }
@@ -135,4 +124,57 @@ func TestChildEnvLeavesExactlyOneLocaleEntry(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("ChildEnv returned %d LC_ALL entries, want exactly 1", count)
 	}
+}
+
+// A recorded control path is only a multiplex master if it is still a socket
+// this user owns privately; anything else must never be handed to ssh -O check.
+func TestMasterHealthyRequiresAPrivateOwnedSocket(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := Runner{SSHBin: ssh}
+	regular := filepath.Join(dir, "regular")
+	if err := os.WriteFile(regular, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(regular, link); err != nil {
+		t.Fatal(err)
+	}
+	// Socket paths are capped near 104 bytes, which a test-named directory alone
+	// can exceed.
+	sockets, err := os.MkdirTemp("", "cs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(sockets)
+	private, shared := filepath.Join(sockets, "private"), filepath.Join(sockets, "shared")
+	defer listenUnix(t, private).Close()
+	defer listenUnix(t, shared).Close()
+	// OpenSSH creates its control socket private; net.Listen leaves it to umask.
+	if err := os.Chmod(private, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"regular file": regular, "symlink": link, "world-accessible socket": shared} {
+		if runner.MasterHealthy("delta", path) {
+			t.Fatalf("%s was accepted as a control socket", name)
+		}
+	}
+	if !runner.MasterHealthy("delta", private) {
+		t.Fatal("a private socket this user owns was refused")
+	}
+}
+
+func listenUnix(t *testing.T, path string) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return listener
 }

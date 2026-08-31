@@ -10,27 +10,14 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/safeio"
 )
 
-func (s Store) dir() (string, error) {
-	if s.Dir != "" {
-		return s.Dir, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".cybershuttle", "control"), nil
-}
-
 func (s Store) withLock(fn func(Store, *state) error) error {
-	dir, err := s.dir()
-	if err != nil {
+	if s.Dir == "" {
+		return errors.New("state directory is required")
+	}
+	if err := safeio.EnsurePrivateDir(s.Dir); err != nil {
 		return err
 	}
-	s.Dir = dir
-	if _, err := safeio.EnsurePrivateDir(dir); err != nil {
-		return err
-	}
-	return safeio.WithFileLock(filepath.Join(dir, ".lock"), func() error {
+	return safeio.WithFileLock(filepath.Join(s.Dir, ".lock"), func() error {
 		current, err := s.load()
 		if err != nil {
 			return err
@@ -53,11 +40,6 @@ func (s Store) load() (*state, error) {
 	}
 	if current.Version != stateVersion || current.Runtimes == nil {
 		return nil, errors.New("unsupported state file")
-	}
-	for id, runtime := range current.Runtimes {
-		if err := validateStoredRuntime(id, runtime); err != nil {
-			return nil, fmt.Errorf("invalid stored runtime %q: %w", id, err)
-		}
 	}
 	return &current, nil
 }

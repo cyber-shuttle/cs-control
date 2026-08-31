@@ -1,29 +1,24 @@
 package control
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/cyber-shuttle/cs-control/internal/framed"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
 const (
 	discoveryMarkerPrefix = "__CSCTL_DSC_6f1c9a7e4b2d8053_"
-	markerUserBegin       = discoveryMarkerPrefix + "USER_BEGIN__"
-	markerUserEnd         = discoveryMarkerPrefix + "USER_END__"
-	markerAccountsBegin   = discoveryMarkerPrefix + "ACCOUNTS_BEGIN__"
-	markerAccountsEnd     = discoveryMarkerPrefix + "ACCOUNTS_END__"
-	markerPartitionsBegin = discoveryMarkerPrefix + "PARTITIONS_BEGIN__"
-	markerPartitionsEnd   = discoveryMarkerPrefix + "PARTITIONS_END__"
-	markerHomeBegin       = discoveryMarkerPrefix + "HOME_BEGIN__"
-	markerHomeEnd         = discoveryMarkerPrefix + "HOME_END__"
+	markerUser            = discoveryMarkerPrefix + "USER__"
+	markerAccounts        = discoveryMarkerPrefix + "ACCOUNTS__"
+	markerPartitions      = discoveryMarkerPrefix + "PARTITIONS__"
+	markerHome            = discoveryMarkerPrefix + "HOME__"
 	markerDone            = discoveryMarkerPrefix + "DONE__"
 	markerErrorUser       = discoveryMarkerPrefix + "ERROR_USER__"
 	markerErrorAccounts   = discoveryMarkerPrefix + "ERROR_ACCOUNTS__"
@@ -37,7 +32,7 @@ const discoveryScript = `set -u
 LC_ALL=C
 LANG=C
 export LC_ALL LANG
-printf '%s\n' '` + markerUserBegin + `'
+printf '%s\n' '` + markerUser + `'
 if csctl_user=$(id -un); then :; else
   printf '%s\n' '` + markerErrorUser + `'
   exit 71
@@ -47,217 +42,87 @@ case "$csctl_user" in
 esac
 [ "${#csctl_user}" -le 64 ] || { printf '%s\n' '` + markerErrorUser + `'; exit 72; }
 printf '%s\n' "$csctl_user"
-printf '%s\n' '` + markerUserEnd + `'
-printf '%s\n' '` + markerAccountsBegin + `'
-if sacctmgr show associations where "user=$csctl_user" format=Account -p; then
-  printf '%s\n' '` + markerAccountsEnd + `'
-else
+printf '%s\n' '` + markerAccounts + `'
+sacctmgr show associations where "user=$csctl_user" format=Account -p || {
   printf '%s\n' '` + markerErrorAccounts + `'
   exit 73
-fi
-printf '%s\n' '` + markerPartitionsBegin + `'
-if sinfo -h -o '%P|%c|%m|%G'; then
-  printf '%s\n' '` + markerPartitionsEnd + `'
-else
+}
+printf '%s\n' '` + markerPartitions + `'
+sinfo -h -o '%P|%c|%m|%G' || {
   printf '%s\n' '` + markerErrorPartitions + `'
   exit 74
-fi
-printf '%s\n' '` + markerHomeBegin + `'
-if printenv HOME; then
-  printf '%s\n' '` + markerHomeEnd + `'
-else
+}
+printf '%s\n' '` + markerHome + `'
+printenv HOME || {
   printf '%s\n' '` + markerErrorHome + `'
   exit 75
-fi
+}
 printf '%s\n' '` + markerDone + `'
 `
-
-type discoverySection int
-
-const (
-	discoveryExpectUser discoverySection = iota
-	discoveryUser
-	discoveryExpectAccounts
-	discoveryAccounts
-	discoveryExpectPartitions
-	discoveryPartitions
-	discoveryExpectHome
-	discoveryHome
-	discoveryExpectDone
-	discoveryComplete
-	discoveryFailed
-)
-
-type discoveryFramedOutput struct {
-	remaining  int
-	pending    []byte
-	state      discoverySection
-	username   bytes.Buffer
-	accounts   bytes.Buffer
-	partitions bytes.Buffer
-	home       bytes.Buffer
-	err        error
-}
 
 var (
 	leadingDigits = regexp.MustCompile(`[0-9]+`)
 	gresEntry     = regexp.MustCompile(`^(.+):([0-9]+)(?:\([^)]*\))?$`)
 )
 
-func newDiscoveryFramedOutput() *discoveryFramedOutput {
-	return &discoveryFramedOutput{remaining: sshexec.MaxOutput, state: discoveryExpectUser}
-}
-
-func (o *discoveryFramedOutput) Write(data []byte) (int, error) {
-	if len(data) > o.remaining {
-		return len(data), errors.New("command output exceeded limit")
-	}
-	o.remaining -= len(data)
-	o.pending = append(o.pending, data...)
-	for {
-		newline := bytes.IndexByte(o.pending, '\n')
-		if newline < 0 {
-			break
+// discoveryResult reads the remote program's framed output. Every value it
+// returns comes from a host this process does not trust, so an unsafe or
+// unparsable one is a refusal rather than a resource.
+func discoveryResult(alias, output string) (Resource, error) {
+	for _, failure := range []struct{ marker, operation string }{
+		{markerErrorUser, "identify remote user"},
+		{markerErrorAccounts, "query SLURM allocation accounts"},
+		{markerErrorPartitions, "query SLURM partitions"},
+		{markerErrorHome, "read remote home directory"},
+	} {
+		if strings.Contains(output, failure.marker+"\n") {
+			return Resource{}, fmt.Errorf("remote discovery failed to %s", failure.operation)
 		}
-		line := strings.TrimSuffix(string(o.pending[:newline]), "\r")
-		o.pending = o.pending[newline+1:]
-		o.consumeLine(line)
 	}
-	return len(data), nil
-}
-
-func (o *discoveryFramedOutput) consumeLine(line string) {
-	if o.err != nil || o.state == discoveryFailed {
-		return
+	sections, err := framed.Sections(output, discoveryMarkerPrefix, markerUser, markerAccounts, markerPartitions, markerHome, markerDone)
+	if err != nil {
+		return Resource{}, err
 	}
-	if strings.HasPrefix(line, discoveryMarkerPrefix) {
-		o.consumeMarker(line)
-		return
+	if strings.TrimSpace(sections[markerDone]) != "" {
+		return Resource{}, errors.New("discovery output continued past its final marker")
 	}
-	var target *bytes.Buffer
-	switch o.state {
-	case discoveryUser:
-		target = &o.username
-	case discoveryAccounts:
-		target = &o.accounts
-	case discoveryPartitions:
-		target = &o.partitions
-	case discoveryHome:
-		target = &o.home
-	default:
-		o.fail("unexpected discovery data outside a section")
-		return
-	}
-	target.WriteString(line)
-	target.WriteByte('\n')
-}
-
-func (o *discoveryFramedOutput) consumeMarker(marker string) {
-	expect := func(state discoverySection, expected string, next discoverySection) bool {
-		if o.state != state || marker != expected {
-			return false
-		}
-		o.state = next
-		return true
-	}
-	switch {
-	case expect(discoveryExpectUser, markerUserBegin, discoveryUser):
-	case expect(discoveryUser, markerUserEnd, discoveryExpectAccounts):
-	case expect(discoveryExpectAccounts, markerAccountsBegin, discoveryAccounts):
-	case expect(discoveryAccounts, markerAccountsEnd, discoveryExpectPartitions):
-	case expect(discoveryExpectPartitions, markerPartitionsBegin, discoveryPartitions):
-	case expect(discoveryPartitions, markerPartitionsEnd, discoveryExpectHome):
-	case expect(discoveryExpectHome, markerHomeBegin, discoveryHome):
-	case expect(discoveryHome, markerHomeEnd, discoveryExpectDone):
-	case expect(discoveryExpectDone, markerDone, discoveryComplete):
-	case marker == markerErrorUser && (o.state == discoveryUser || o.state == discoveryExpectUser):
-		o.failCommand("identify remote user")
-	case marker == markerErrorAccounts && o.state == discoveryAccounts:
-		o.failCommand("query SLURM allocation accounts")
-	case marker == markerErrorPartitions && o.state == discoveryPartitions:
-		o.failCommand("query SLURM partitions")
-	case marker == markerErrorHome && o.state == discoveryHome:
-		o.failCommand("read remote home directory")
-	default:
-		o.fail("malformed, duplicate, or out-of-order discovery marker")
-	}
-}
-
-func (o *discoveryFramedOutput) failCommand(operation string) {
-	o.state = discoveryFailed
-	o.err = fmt.Errorf("remote discovery failed to %s", operation)
-}
-
-func (o *discoveryFramedOutput) fail(message string) {
-	o.state = discoveryFailed
-	o.err = errors.New(message)
-}
-
-func (o *discoveryFramedOutput) result(alias string) (Resource, error) {
-	if o.err != nil {
-		return Resource{}, o.err
-	}
-	if len(o.pending) != 0 {
-		return Resource{}, errors.New("discovery output ended with an incomplete line")
-	}
-	if o.state != discoveryComplete {
-		return Resource{}, errors.New("discovery output ended before all sections completed")
-	}
-	username := strings.TrimSpace(o.username.String())
-	if !namePattern.MatchString(username) {
+	if username := strings.TrimSpace(sections[markerUser]); !namePattern.MatchString(username) {
 		return Resource{}, errors.New("remote username is unsafe")
 	}
-	home := strings.TrimSpace(o.home.String())
+	home := strings.TrimSpace(sections[markerHome])
 	if !safeRemotePath(home) {
 		return Resource{}, errors.New("remote HOME is unsafe")
 	}
-	partitions, err := parsePartitions(o.partitions.String())
+	partitions, err := parsePartitions(sections[markerPartitions])
 	if err != nil {
 		return Resource{}, err
 	}
-	return Resource{
-		Host:       alias,
-		Accounts:   parseAccounts(o.accounts.String()),
-		Partitions: partitions,
-		HomeDir:    home,
-	}, nil
+	return Resource{Host: alias, Accounts: parseAccounts(sections[markerAccounts]), Partitions: partitions, HomeDir: home}, nil
 }
 
+// One fixed exec channel runs all discovery commands sequentially. The
+// ControlMaster established by OpenSSH remains reusable by later operations.
 func (s Service) Discover(ctx context.Context, alias string) (Resource, error) {
+	// Resolving the configuration and running the program each apply the
+	// runner's timeout, so the pair is bounded once here: a host that hangs at
+	// both must not hold the request for twice as long.
 	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
 	defer cancel()
-	// One fixed exec channel runs all discovery commands sequentially. The
-	// ControlMaster established by OpenSSH remains reusable by later operations.
-	cmd, err := s.Runner.Command(ctx, alias, "sh -s")
-	if err != nil {
-		return Resource{}, err
+	stdout, stderr, runErr := s.Runner.RunOutput(ctx, alias, strings.NewReader(discoveryScript), "sh", "-s")
+	// A host that demanded credentials or never answered explains the failure
+	// better than the truncated output it produced on the way there.
+	if runErr != nil && (errors.Is(runErr, context.DeadlineExceeded) || sshexec.AuthenticationFailure(stderr)) {
+		return Resource{}, sshexec.ClassifyFailure(alias, stderr, runErr)
 	}
-	cmd.Stdin = strings.NewReader(discoveryScript)
-	stdout := newDiscoveryFramedOutput()
-	stderr := sshexec.NewBoundedCapture("stderr")
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	runErr := sshexec.RunCommand(ctx, cmd)
-	if ctx.Err() != nil {
-		return Resource{}, fmt.Errorf("ssh command timed out: %w", ctx.Err())
+	resource, err := discoveryResult(alias, stdout)
+	switch {
+	case runErr != nil && err != nil:
+		return Resource{}, fmt.Errorf("%w: %s", err, sshexec.FailureMessage(stderr, runErr))
+	case runErr != nil:
+		return Resource{}, sshexec.ClassifyFailure(alias, stderr, runErr)
 	}
-	if runErr != nil {
-		message := strings.TrimSpace(stderr.String())
-		if sshexec.AuthenticationFailure(message) {
-			return Resource{}, sshexec.AuthenticationRequired(alias)
-		}
-		if _, framedErr := stdout.result(alias); framedErr != nil {
-			if message != "" {
-				return Resource{}, fmt.Errorf("%w: %s", framedErr, message)
-			}
-			return Resource{}, framedErr
-		}
-		return Resource{}, fmt.Errorf("ssh command failed: %s", sshexec.FailureMessage(message, runErr))
-	}
-	return stdout.result(alias)
+	return resource, err
 }
-
-var _ io.Writer = (*discoveryFramedOutput)(nil)
 
 func parseAccounts(output string) []string {
 	seen := map[string]bool{}

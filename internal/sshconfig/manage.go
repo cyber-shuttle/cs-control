@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
+	"github.com/cyber-shuttle/cs-control/internal/safeio"
 )
 
 // Entries this package writes live between these two markers. Everything
@@ -274,9 +275,9 @@ func blockBounds(lines []string) (int, int) {
 // rewrite replaces the user's config in one atomic step, so a failed write
 // never leaves a half-written configuration behind.
 func (c Config) rewrite(mutate func([]string) ([]string, error)) error {
-	path, _, err := c.paths()
-	if err != nil {
-		return err
+	path := c.UserPath
+	if path == "" {
+		return errors.New("user SSH config path is required")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -293,21 +294,10 @@ func (c Config) rewrite(mutate func([]string) ([]string, error)) error {
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".cybershuttle-ssh-config-*")
-	if err != nil {
-		return err
+	// A dotfiles-managed config is commonly a symlink, and the atomic replace
+	// refuses one, so write through to the file the link names.
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
 	}
-	defer os.Remove(temporary.Name())
-	if _, err := temporary.WriteString(strings.Join(updated, "\n") + "\n"); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporary.Name(), path)
+	return safeio.ReplaceFile(path, []byte(strings.Join(updated, "\n")+"\n"), nil)
 }
