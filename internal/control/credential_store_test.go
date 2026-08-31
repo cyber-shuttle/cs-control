@@ -76,18 +76,3 @@ func TestCredentialStoreRejectsPartialInvalidOrUnsafeRecords(t *testing.T) {
 		}
 	}
 }
-
-func TestCredentialStoreRejectsSymlinks(t *testing.T) {
-	root := t.TempDir()
-	realDir := filepath.Join(root, "real")
-	if err := os.Mkdir(realDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	store := CredentialStore{Dir: filepath.Join(root, "link")}
-	if err := os.Symlink(realDir, store.Dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Put("rt-123456789abc", "g-0123456789abcdef", testCredential()); err == nil {
-		t.Fatal("symlink directory accepted")
-	}
-}

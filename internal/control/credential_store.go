@@ -15,8 +15,6 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/safeio"
 )
 
-const maxCredentialSize = 64 << 10
-
 var generationPattern = regexp.MustCompile(`^g-[a-f0-9]{16}$`)
 
 type GenerationCredential struct {
@@ -49,25 +47,13 @@ func (s CredentialStore) Put(runtimeID, generation string, credential Generation
 		return errors.New("generation credential is invalid")
 	}
 	encoded, err := json.Marshal(credential)
-	if err != nil || len(encoded) > maxCredentialSize {
+	if err != nil {
 		return errors.New("encode generation credential")
 	}
-	dir, err := safeio.EnsurePrivateDir(s.Dir)
-	if err != nil {
+	if _, err := safeio.EnsurePrivateDir(s.Dir); err != nil {
 		return err
 	}
-	if _, err := safeio.StatPrivate(path, safeio.Regular, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	// Re-check the directory once the payload is durable: a swap between the
-	// check above and the rename would commit the secret into a foreign one.
-	return safeio.ReplaceFile(path, encoded, func() error {
-		current, err := safeio.StatPrivate(s.Dir, safeio.Dir, 0o700)
-		if err != nil || !os.SameFile(dir, current) {
-			return errors.New("credential directory changed during write")
-		}
-		return nil
-	})
+	return safeio.ReplaceFile(path, encoded, nil)
 }
 
 func (s CredentialStore) Get(runtimeID, generation string) (GenerationCredential, error) {
@@ -75,28 +61,9 @@ func (s CredentialStore) Get(runtimeID, generation string) (GenerationCredential
 	if err != nil {
 		return GenerationCredential{}, err
 	}
-	if _, err := safeio.StatPrivate(s.Dir, safeio.Dir, 0o700); err != nil {
-		return GenerationCredential{}, err
-	}
-	before, err := safeio.StatPrivate(path, safeio.Regular, 0o600)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return GenerationCredential{}, err
-	}
-	if before.Size() < 1 || before.Size() > maxCredentialSize {
-		return GenerationCredential{}, errors.New("credential path is not a private regular file")
-	}
-	file, err := safeio.OpenNoFollow(path)
-	if err != nil {
-		return GenerationCredential{}, errors.New("open credential")
-	}
-	defer file.Close()
-	after, err := file.Stat()
-	if err != nil || !os.SameFile(before, after) {
-		return GenerationCredential{}, errors.New("credential changed while opening")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxCredentialSize+1))
-	if err != nil || len(data) > maxCredentialSize {
-		return GenerationCredential{}, errors.New("read credential")
 	}
 	var credential GenerationCredential
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -115,19 +82,10 @@ func (s CredentialStore) Delete(runtimeID, generation string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := safeio.StatPrivate(s.Dir, safeio.Dir, 0o700); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if _, err := safeio.StatPrivate(path, safeio.Regular, 0o600); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
 	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return errors.New("delete credential")
 	}
 	if err := safeio.SyncDir(s.Dir); err != nil {

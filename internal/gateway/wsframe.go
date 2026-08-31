@@ -2,25 +2,11 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"io"
-	"net/http"
-	"os/exec"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
-
-// Requests have already passed the exact-origin OAuth boundary, so CheckOrigin
-// adds nothing on top of it.
-func newUpgrader(subprotocols ...string) websocket.Upgrader {
-	return websocket.Upgrader{
-		ReadBufferSize:  4096,
-		WriteBufferSize: 4096,
-		Subprotocols:    subprotocols,
-		CheckOrigin:     func(*http.Request) bool { return true },
-	}
-}
 
 type clientFrame struct {
 	Type string `json:"type"`
@@ -36,19 +22,6 @@ type serverFrame struct {
 
 func exitFrame(code int, message string) serverFrame {
 	return serverFrame{Type: "exit", Code: &code, Message: message}
-}
-
-// Reports a fixed message rather than the process error, so no diagnostic from
-// the remote host reaches the browser.
-func exitDetails(err error) (int, string) {
-	if err == nil {
-		return 0, ""
-	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return exit.ExitCode(), "SSH authentication failed"
-	}
-	return 1, "SSH authentication failed"
 }
 
 func pumpPTY(ctx context.Context, master io.Reader, out chan<- []byte, size int) {

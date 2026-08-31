@@ -19,10 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/proc"
 	"github.com/cyber-shuttle/cs-control/internal/safeio"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 )
@@ -45,11 +43,6 @@ type Runner struct {
 	Timeout    time.Duration
 	ControlDir string
 	Hosts      sshconfig.Config
-}
-
-type limitBuffer struct {
-	buf bytes.Buffer
-	n   int
 }
 
 func (r Runner) Bin() string {
@@ -76,9 +69,6 @@ func (r Runner) sshBaseArgs(batchMode string) []string {
 }
 
 func (r Runner) sshArgs(alias string, interactive bool, identity string) ([]string, error) {
-	if !sshconfig.ValidAlias(alias) {
-		return nil, sshconfig.ErrInvalidAlias
-	}
 	batchMode, persist := "yes", "600"
 	if interactive {
 		// An interactive master is owned by the process that starts it, and
@@ -115,61 +105,122 @@ func RunCommand(ctx context.Context, cmd *exec.Cmd) error {
 		return waitErr
 	case <-ctx.Done():
 	}
-	proc.TerminateGroup(cmd, done, sshTerminateGrace)
+	KillGroup(cmd, done)
 	return ctx.Err()
 }
 
-// Every entry point lands here, so argument quoting, output bounding and
-// failure classification exist in exactly one place.
-func (r Runner) run(ctx context.Context, alias, identity string, stdin io.Reader, remoteArgs ...string) (string, error) {
+// KillGroup ends cmd's process group and returns once the caller's Wait has.
+// exited must be closed by that Wait: a closed channel is what keeps an already
+// reaped, reusable PID from being signalled.
+//
+// ponytail: SIGKILL the group outright -- OpenSSH forwards no signal to the
+// remote command, so a TERM-first grace buys nothing; revisit if a killed client
+// ever leaves remote state half-written.
+func KillGroup(cmd *exec.Cmd, exited <-chan struct{}) {
+	select {
+	case <-exited:
+		return
+	default:
+	}
+	if syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) != nil {
+		_ = cmd.Process.Kill()
+	}
+	<-exited
+}
+
+// Every entry point lands here, so argument quoting and output bounding exist in
+// exactly one place.
+func (r Runner) run(ctx context.Context, alias, identity string, stdin io.Reader, remoteArgs ...string) (string, string, error) {
 	if len(remoteArgs) == 0 {
-		return "", errors.New("remote command is required")
+		return "", "", errors.New("remote command is required")
 	}
 	quoted := make([]string, len(remoteArgs))
 	for i, argument := range remoteArgs {
-		if argument == "" || strings.ContainsAny(argument, "\x00\r\n") {
-			return "", errors.New("invalid remote command argument")
-		}
 		quoted[i] = ShellQuote(argument)
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.EffectiveTimeout())
 	defer cancel()
 	args, err := r.sshArgs(alias, false, identity)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	args = append(args, strings.Join(quoted, " "))
-	cmd := exec.Command(r.Bin(), args...)
+	cmd := exec.Command(r.Bin(), append(args, strings.Join(quoted, " "))...)
 	cmd.Env = ChildEnv()
 	cmd.Stdin = stdin
-	captured := &Output{remaining: MaxOutput}
-	cmd.Stdout = &commandStream{output: captured, name: "stdout"}
-	cmd.Stderr = &commandStream{output: captured, name: "stderr"}
+	captured := NewCapture()
+	cmd.Stdout, cmd.Stderr = captured.Stdout(), captured.Stderr()
 	runErr := RunCommand(ctx, cmd)
-	stdout := captured.stdout.String()
-	if runErr == nil {
-		return stdout, nil
+	if runErr != nil && ctx.Err() != nil {
+		runErr = ctx.Err()
 	}
-	if ctx.Err() != nil {
-		return stdout, fmt.Errorf("ssh command timed out: %w", ctx.Err())
-	}
-	message := FailureMessage(captured.stderr.String(), runErr)
-	if AuthenticationFailure(message) {
-		return stdout, AuthenticationRequired(alias)
-	}
-	return stdout, fmt.Errorf("ssh command failed: %s", message)
+	return captured.Stdout().String(), captured.Stderr().String(), runErr
 }
 
-type Output struct {
+// ClassifyFailure is the one reading every subsystem gives a failed ssh
+// invocation: a timeout, an authentication demand, or what the host said.
+func ClassifyFailure(alias, stderr string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("ssh command timed out: %w", err)
+	}
+	message := FailureMessage(stderr, err)
+	if AuthenticationFailure(message) {
+		return AuthenticationRequired(alias)
+	}
+	return fmt.Errorf("ssh command failed: %s", message)
+}
+
+// Capture bounds one command's output: its streams share a MaxOutput budget, so
+// no remote host can exhaust memory through either.
+type Capture struct {
 	mu        sync.Mutex
 	remaining int
-	stdout    bytes.Buffer
-	stderr    bytes.Buffer
+	stdout    CaptureStream
+	stderr    CaptureStream
 }
 
-type commandStream struct {
-	output *Output
-	name   string
+// CaptureStream is one stream of a Capture: the sink a command writes through
+// and what it accumulated.
+type CaptureStream struct {
+	capture *Capture
+	buf     bytes.Buffer
+}
+
+func NewCapture() *Capture {
+	capture := &Capture{remaining: MaxOutput}
+	capture.stdout.capture, capture.stderr.capture = capture, capture
+	return capture
+}
+
+func (c *Capture) Stdout() *CaptureStream { return &c.stdout }
+
+func (c *Capture) Stderr() *CaptureStream { return &c.stderr }
+
+func (s *CaptureStream) Write(data []byte) (int, error) {
+	s.capture.mu.Lock()
+	defer s.capture.mu.Unlock()
+	if len(data) > s.capture.remaining {
+		return len(data), errors.New("command output exceeded limit")
+	}
+	s.capture.remaining -= len(data)
+	return s.buf.Write(data)
+}
+
+func (s *CaptureStream) String() string {
+	s.capture.mu.Lock()
+	defer s.capture.mu.Unlock()
+	return s.buf.String()
+}
+
+// NewBoundedCapture buffers a single stream so a failure can be classified after
+// the fact without retaining unbounded remote output.
+func NewBoundedCapture(name string) *CaptureStream {
+	if name == "stderr" {
+		return NewCapture().Stderr()
+	}
+	return NewCapture().Stdout()
 }
 
 func (r Runner) controlPath(alias, identity string) (string, error) {
@@ -227,29 +278,13 @@ func ensurePrivateControlDirectory(path string) error {
 	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("create SSH control directory: %w", err)
 	}
-	if _, err := safeio.StatPrivate(path, safeio.Dir, 0o700); err != nil {
+	if err := safeio.PrivateDir(path); err != nil {
 		return fmt.Errorf("SSH control directory must be private: %w", err)
 	}
 	return nil
 }
 
-// validateControlArtifact accepts a control path that is absent, or present as
-// a private owned file or socket.
-func validateControlArtifact(path string, allowSocket bool) error {
-	kinds := safeio.Regular
-	if allowSocket {
-		kinds |= safeio.Socket
-	}
-	if _, err := safeio.StatPrivate(path, kinds, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return errors.New("SSH control artifact is not a private owned file or socket")
-	}
-	return nil
-}
-
 func RemoveStaleControl(path string) error {
-	if err := validateControlArtifact(path, true); err != nil {
-		return err
-	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -273,7 +308,9 @@ func AuthenticationFailure(message string) bool {
 }
 
 func (runner Runner) MasterHealthy(alias, path string) bool {
-	if _, err := safeio.StatPrivate(path, safeio.Socket, 0); err != nil {
+	// ServeWebSocket polls this every 50 ms while a user authenticates, so the
+	// stat keeps a missing socket from forking ssh on every tick.
+	if _, err := os.Lstat(path); err != nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -286,9 +323,6 @@ func (runner Runner) MasterHealthy(alias, path string) bool {
 
 func (runner Runner) AcquireControlLock(ctx context.Context, alias, path string) (*os.File, bool, error) {
 	lockPath := path + ".lock"
-	if err := validateControlArtifact(lockPath, false); err != nil {
-		return nil, false, err
-	}
 	fd, err := syscall.Open(lockPath, syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, false, err
@@ -297,10 +331,6 @@ func (runner Runner) AcquireControlLock(ctx context.Context, alias, path string)
 	if lock == nil {
 		_ = syscall.Close(fd)
 		return nil, false, errors.New("open SSH control lock")
-	}
-	if err := validateControlArtifact(lockPath, false); err != nil {
-		_ = lock.Close()
-		return nil, false, err
 	}
 	for {
 		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
@@ -331,58 +361,6 @@ func UnlockControl(lock *os.File) {
 	}
 }
 
-func (b *limitBuffer) Write(p []byte) (int, error) {
-	if b.buf.Len()+len(p) > b.n {
-		remain := b.n - b.buf.Len()
-		if remain > 0 {
-			_, _ = b.buf.Write(p[:remain])
-		}
-		return len(p), errors.New("command output exceeded limit")
-	}
-	return b.buf.Write(p)
-}
-
-func (b *limitBuffer) String() string { return b.buf.String() }
-
-func (s *commandStream) Write(data []byte) (int, error) {
-	s.output.mu.Lock()
-	if len(data) > s.output.remaining {
-		s.output.mu.Unlock()
-		return len(data), errors.New("command output exceeded limit")
-	}
-	s.output.remaining -= len(data)
-	buffer := &s.output.stdout
-	if s.name == "stderr" {
-		buffer = &s.output.stderr
-	}
-	_, _ = buffer.Write(data)
-	s.output.mu.Unlock()
-	return len(data), nil
-}
-
-// Buffers one stream so a failure can be classified after the fact without
-// retaining unbounded remote output.
-func NewBoundedCapture(name string) *BoundedCapture {
-	output := &Output{remaining: MaxOutput}
-	return &BoundedCapture{stream: &commandStream{output: output, name: name}, output: output}
-}
-
-type BoundedCapture struct {
-	stream *commandStream
-	output *Output
-}
-
-func (c *BoundedCapture) Write(data []byte) (int, error) { return c.stream.Write(data) }
-
-func (c *BoundedCapture) String() string {
-	c.output.mu.Lock()
-	defer c.output.mu.Unlock()
-	if c.stream.name == "stderr" {
-		return c.output.stderr.String()
-	}
-	return c.output.stdout.String()
-}
-
 var sshTerminateGrace = 500 * time.Millisecond
 
 func ShellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'" }
@@ -408,22 +386,21 @@ func (r Runner) Identity(ctx context.Context, alias string) (string, error) {
 	defer cancel()
 	cmd := exec.Command(r.Bin(), "-G", alias)
 	cmd.Env = ChildEnv()
-	output := &Output{remaining: MaxOutput}
+	captured := NewCapture()
 	// Effective configuration contains identity and socket paths. Buffer stdout
 	// for the connection fingerprint but expose only diagnostics from stderr.
-	cmd.Stdout = &commandStream{output: output, name: "stdout"}
-	cmd.Stderr = &commandStream{output: output, name: "stderr"}
+	cmd.Stdout, cmd.Stderr = captured.Stdout(), captured.Stderr()
 	if err := RunCommand(ctx, cmd); err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("resolve effective SSH configuration: %w", ctx.Err())
 		}
-		message := FailureMessage(output.stderr.String(), err)
+		message := FailureMessage(captured.Stderr().String(), err)
 		return "", fmt.Errorf("resolve effective SSH configuration: %s", message)
 	}
-	identity := strings.ReplaceAll(output.stdout.String(), "\r\n", "\n")
+	identity := strings.ReplaceAll(captured.Stdout().String(), "\r\n", "\n")
 	identity = strings.TrimRight(identity, "\n") + "\n"
-	if identity == "\n" || !utf8.ValidString(identity) || strings.ContainsRune(identity, '\x00') {
-		return "", errors.New("effective SSH configuration is empty or unsafe")
+	if identity == "\n" {
+		return "", errors.New("effective SSH configuration is empty")
 	}
 	return identity, nil
 }
@@ -446,9 +423,20 @@ func (r Runner) Args(ctx context.Context, alias string, interactive bool) ([]str
 
 // Arguments are passed as a fixed vector, never a shell string.
 func (r Runner) Run(ctx context.Context, alias string, stdin io.Reader, remoteArgs ...string) (string, error) {
+	stdout, stderr, err := r.RunOutput(ctx, alias, stdin, remoteArgs...)
+	if err == nil {
+		return stdout, nil
+	}
+	return stdout, ClassifyFailure(alias, stderr, err)
+}
+
+// RunOutput is Run for a caller that reads stderr or the exit status itself. It
+// returns the process error unclassified; ClassifyFailure turns it into the
+// refusal the browser sees.
+func (r Runner) RunOutput(ctx context.Context, alias string, stdin io.Reader, remoteArgs ...string) (string, string, error) {
 	identity, err := r.Identity(ctx, alias)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	return r.run(ctx, alias, identity, stdin, remoteArgs...)
 }
@@ -471,10 +459,10 @@ func (r Runner) Command(ctx context.Context, alias string, remote ...string) (*e
 
 // Bounded so no remote host can exhaust memory through its output.
 func RunBounded(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
-	stdout, stderr := &limitBuffer{n: MaxOutput}, &limitBuffer{n: MaxOutput}
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	captured := NewCapture()
+	cmd.Stdout, cmd.Stderr = captured.Stdout(), captured.Stderr()
 	err := RunCommand(ctx, cmd)
-	return stdout.String(), stderr.String(), err
+	return captured.Stdout().String(), captured.Stderr().String(), err
 }
 
 // utf8Locale is a request for UTF-8 character classification and no language,
