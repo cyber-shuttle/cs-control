@@ -119,8 +119,8 @@ func writeDeviceError(w http.ResponseWriter, status int, code, message string) {
 	httpx.WriteError(w, apierr.New(code, message, status))
 }
 
-// ponytail: a body on a bodyless route is ignored, not refused; revisit only if
-// a body ever gains meaning here.
+// Trade-off: a body on a bodyless route is ignored rather than refused; revisit
+// only if a body ever gains meaning here.
 func (b *DeviceCodeBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -345,8 +345,8 @@ func newDeviceHandle() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
-// ponytail: a failed loopback response write loses the tokens and the user signs
-// in again; revisit (store-and-redeliver) if that is ever observed.
+// Trade-off: a failed loopback response write loses the tokens and the user
+// signs in again; add store-and-redeliver if that is ever observed.
 func (b *DeviceCodeBroker) deliverTokens(w http.ResponseWriter, handle, accessToken, idToken string, expiresIn int64) {
 	httpx.WriteJSON(w, http.StatusOK, devicePollResponse{Status: "complete", AccessToken: accessToken, IDToken: idToken, ExpiresInSeconds: expiresIn})
 	b.finishPoll(handle, true, 0)

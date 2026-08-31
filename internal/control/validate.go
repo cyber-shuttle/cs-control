@@ -25,7 +25,7 @@ func validatePartitionResources(values []Partition, name string, resources Resou
 		}
 	}
 	if len(matches) == 0 {
-		return apierr.New("invalid_partition", "SLURM partition was not discovered for this host", 400)
+		return apierr.New("invalid_partition", "Slurm partition was not discovered for this host", 400)
 	}
 
 	gpuRequested := resources.GPUCount != 0 || resources.GPUType != ""

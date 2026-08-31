@@ -103,9 +103,9 @@ func RunCommand(ctx context.Context, cmd *exec.Cmd) error {
 // exited must be closed by that Wait: a closed channel is what keeps an already
 // reaped, reusable PID from being signalled.
 //
-// ponytail: SIGKILL the group outright -- OpenSSH forwards no signal to the
-// remote command, so a TERM-first grace buys nothing; revisit if a killed client
-// ever leaves remote state half-written.
+// Trade-off: SIGKILL the group outright. OpenSSH forwards no signal to the
+// remote command, so a TERM-first grace achieves nothing; revisit if a killed
+// client is ever seen to leave remote state half-written.
 func KillGroup(cmd *exec.Cmd, exited <-chan struct{}) {
 	select {
 	case <-exited:

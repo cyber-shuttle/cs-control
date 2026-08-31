@@ -71,8 +71,8 @@ var (
 func discoveryResult(alias, output string) (Resource, error) {
 	for _, failure := range []struct{ marker, operation string }{
 		{markerErrorUser, "identify remote user"},
-		{markerErrorAccounts, "query SLURM allocation accounts"},
-		{markerErrorPartitions, "query SLURM partitions"},
+		{markerErrorAccounts, "query Slurm allocation accounts"},
+		{markerErrorPartitions, "query Slurm partitions"},
 		{markerErrorHome, "read remote home directory"},
 	} {
 		if strings.Contains(output, failure.marker+"\n") {

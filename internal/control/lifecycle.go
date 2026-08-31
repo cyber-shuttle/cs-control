@@ -397,7 +397,7 @@ func (s Service) prepareRuntime(ctx context.Context, request CreateRequest) (_ *
 		return nil, fmt.Errorf("discover runtime resource: %w", err)
 	}
 	if request.Account != "" && !slices.Contains(resource.Accounts, request.Account) {
-		return nil, apierr.New("invalid_account", "SLURM account was not discovered for this host", 400)
+		return nil, apierr.New("invalid_account", "Slurm account was not discovered for this host", 400)
 	}
 	if err := validatePartitionResources(resource.Partitions, request.Partition, request.Resources); err != nil {
 		return nil, err

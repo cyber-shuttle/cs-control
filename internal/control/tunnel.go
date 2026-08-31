@@ -131,8 +131,8 @@ type portPair struct{ control, jupyter uint16 }
 
 // allocationPorts derives both listening ports from the generation, so they can be
 // declared on the tunnel before the job starts and bound exactly as declared.
-// ponytail: two random high ports; a collision on a shared compute node fails the allocation
-// visibly — probe free ports from inside the job if that ever bites.
+// Trade-off: two derived high ports. A collision on a shared compute node fails
+// the allocation visibly; probe for free ports inside the job if that occurs.
 func allocationPorts(runtimeID, generation string) portPair {
 	sum := sha256.Sum256([]byte(runtimeID + "/" + generation))
 	base := 20000 + int(binary.BigEndian.Uint16(sum[:2]))%20000
