@@ -1,77 +1,148 @@
 # CyberShuttle Control
 
-`csctl` is the per-user SSH/Slurm enactment control plane for CyberShuttle allocations. It stores non-secret scheduler, allocation, and tunnel metadata. Dev Tunnel connect credentials are kept separately in private local credential files and are never returned by the API; the per-generation Jupyter token stored beside them is returned only by the owner-authenticated access endpoint.
+[![CI](https://github.com/cyber-shuttle/cs-control/actions/workflows/ci.yml/badge.svg)](https://github.com/cyber-shuttle/cs-control/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/github/go-mod/go-version/cyber-shuttle/cs-control)](go.mod)
+[![License](https://img.shields.io/github/license/cyber-shuttle/cs-control?color=blue)](LICENSE)
 
-## Enactment API
+CyberShuttle is the ARTISAN group's toolset for running interactive work — a Jupyter server today — on the
+compute nodes of an HPC (high-performance computing) cluster, reachable from a browser or editor on your own
+machine. `csctl` is the local daemon that does that work: it submits the [Slurm](https://slurm.schedmd.com/)
+job, prepares the login node, and creates a tunnel the compute node hosts outbound, so a session is reachable
+without the cluster opening an inbound port.
 
-Run the API on an explicit loopback address and allow each browser origin exactly:
+A runtime is the record a client creates and polls; the allocation is the Slurm job that serves it, and one
+runtime can outlive several. Everything happens as you: your `~/.ssh/config`, your SSH credentials, your Slurm
+allocation. `csctl` binds to loopback only and never proxies session traffic — once an allocation is running,
+the browser reaches it directly over the tunnel.
+
+## Status
+
+Pre-release. There are no tagged versions and no published binaries; `csctl version` prints a constant string
+that corresponds to no release. The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records
+what has changed on `main`.
+
+## Requirements
+
+- **macOS or Linux**, with an OpenSSH client on `PATH`. CI covers Linux only.
+- **Go 1.23 or newer.** Building from source is the only install path.
+- **A Microsoft Entra tenant.** `--oauth-authority` accepts only `https://login.microsoftonline.com/<tenant>/`
+  with no port; the multi-tenant aliases `common`, `consumers` and `organizations` are rejected.
+- **A Microsoft account entitled to
+  [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview).** Sign-in uses the
+  Dev Tunnels first-party client, and each allocation creates a tunnel against that account.
+- **An SSH-reachable Linux Slurm cluster** whose login node provides `sacctmgr`, `sinfo`, `sbatch`, `squeue`,
+  `sacct`, `scancel`, `curl` and `tar`, and whose nodes run Linux `x86_64` or `arm64`.
+- **[Linkspan](https://github.com/cyber-shuttle/linkspan) 0.16.0 or newer**, the release that added
+  `--tunnel-host-token`; `csctl` installs the latest release on a host that has none.
+- **Outbound internet.** From the login node to `astral.sh` and `github.com`; from the compute node to
+  `tunnelsassetsprod.blob.core.windows.net`, which Linkspan fetches Microsoft's `devtunnel` CLI from before it
+  hosts the tunnel; and from your own machine to `login.microsoftonline.com`,
+  `*.rel.tunnels.api.visualstudio.com` and `*.devtunnels.ms`. See
+  [what it runs on the cluster](#what-it-runs-on-the-cluster).
+
+## Install
+
+```bash
+go install github.com/cyber-shuttle/cs-control/cmd/csctl@latest
+```
+
+There are no tags, so `@latest` resolves to the current `main` commit. From a clone:
+
+```bash
+git clone https://github.com/cyber-shuttle/cs-control.git
+cd cs-control
+go build ./cmd/csctl
+```
+
+## Quick start
 
 ```bash
 csctl serve \
   --listen 127.0.0.1:8045 \
   --oauth-authority https://login.microsoftonline.com/<tenant>/ \
-  --allowed-origin https://workspace.example.edu \
-  --allowed-origin http://127.0.0.1:8000
+  --allowed-origin https://workspace.example.edu
 ```
 
-`--allowed-origin` is repeatable and at least one origin is required. HTTPS origins and loopback HTTP origins are accepted; wildcards are rejected. Browser requests from any other `Origin` are rejected. `--oauth-authority` is required and accepts only a tenant-specific `https://login.microsoftonline.com/<tenant>/` authority with the default HTTPS port. The Dev Tunnels native public client ID and scope are fixed by cs-control; no SPA registration is configured. Native clients may omit `Origin` on the authenticated enactment API, but the pre-authentication device routes require an exact allowed browser origin.
+`--oauth-authority` is required. `--allowed-origin` is repeatable and at least one is required; HTTPS origins
+and loopback HTTP origins are accepted, wildcards are not. `--listen` defaults to `127.0.0.1:8045` and must be
+an explicit loopback address.
 
-Every production HTTP request requires both `Authorization: Bearer <Dev-Tunnels-access-token>` and `X-CyberShuttle-Identity: <Microsoft-ID-token>`. On the one SSH WebSocket route (`auth`), every client offers exactly three subprotocols: `cybershuttle.v1`, `bearer.<base64url-utf8-access-token>`, and `identity.<base64url-utf8-ID-token>`. Upgrade-shaped requests to runtime, ordinary SSH, unsafe-alias, or other routes do not accept subprotocol authentication.
+There are no CLI commands for hosts or runtimes — a client drives the daemon over the API. Confirm it is
+listening and that the authentication boundary is in front of it:
 
-The only pre-authentication routes are `POST /api/v1/oauth/device/start` and `POST /api/v1/oauth/device/poll/{opaqueHandle}`. They broker pinned Microsoft device-code requests for exact allowed browser origins, retain the device code only in bounded process memory, enforce polling intervals, and discard refresh tokens and terminal state.
-
-Tunnel creation uses `https://global.rel.tunnels.api.visualstudio.com` by default.
-When the global cluster quota is exhausted, select a recognized cluster endpoint
-with the global `--devtunnel-management-url` flag or
-`CSCTL_DEVTUNNEL_MANAGEMENT_URL`, for example:
-
-```bash
-export CSCTL_DEVTUNNEL_MANAGEMENT_URL=https://usw3.rel.tunnels.api.visualstudio.com
+```console
+$ curl -si http://127.0.0.1:8045/api/v1/runtimes | head -1
+HTTP/1.1 401 Unauthorized
 ```
 
-Only the global endpoint or a single valid cluster label under
-`*.rel.tunnels.api.visualstudio.com` is accepted, over HTTPS with no alternate
-port. This setting changes tunnel management only; delegated OAuth capability
-validation remains on the global endpoint.
+`csctl help` prints the commands and the global flags; `csctl serve -h` prints the serve flags.
 
-The loopback API exposes:
+## Configuration
 
-```text
-POST     /api/v1/oauth/device/start
-POST     /api/v1/oauth/device/poll/{opaqueHandle}
-GET      /api/v1/ssh
-POST     /api/v1/ssh
-DELETE   /api/v1/ssh/{alias}
-WS       /api/v1/ssh/{alias}/auth
-GET      /api/v1/ssh/{alias}/slurm
-POST     /api/v1/ssh/{alias}/test
-GET      /api/v1/runtimes
-POST     /api/v1/runtimes
-POST     /api/v1/runtimes/validate
-GET      /api/v1/runtimes/{id}
-DELETE   /api/v1/runtimes/{id}
-POST     /api/v1/runtimes/{id}/start
-POST     /api/v1/runtimes/{id}/stop
-GET      /api/v1/runtimes/{id}/access
-```
+| Flag | Environment | Default |
+| --- | --- | --- |
+| `serve --listen` | — | `127.0.0.1:8045` |
+| `serve --oauth-authority` | — | required |
+| `serve --allowed-origin` (repeatable) | — | required |
+| `--linkspan` | `CSCTL_LINKSPAN` | `$HOME/.cybershuttle/bin/linkspan` |
+| `--devtunnel-management-url` | `CSCTL_DEVTUNNEL_MANAGEMENT_URL` | `https://global.rel.tunnels.api.visualstudio.com` |
 
-The one WebSocket is interactive SSH authentication, whose prompts are untyped
-bytes. It never forwards runtime data.
+Global flags precede the command. `--linkspan` is a remote path, absolute or anchored at `$HOME/`, resolved per
+host. Set `--devtunnel-management-url` to a regional `*.rel.tunnels.api.visualstudio.com` endpoint when the
+global cluster's tunnel quota is exhausted; it changes tunnel management only.
 
-## Runtime lifecycle
+## What it runs on the cluster
 
-Before submission cs-control performs SSH discovery and `sbatch --test-only`,
-provisions uv and Linkspan, installs the workflow the allocation runs, creates a
-principal-owned Dev Tunnel, durably records the allocation generation and connect
-credential, and submits.
+Creating a runtime prepares the login node over SSH before it submits anything. In one connection, as your
+account, it:
 
-`GET /api/v1/runtimes` is the read a browser polls: it answers from persisted
-state, starts a reconciliation for the next poll to collect, and carries the
-caller's runtimes and their startup tails. It carries a strong `ETag`, so a poll
-whose `If-None-Match` still matches is answered `304 Not Modified` with no body.
+- installs [uv](https://docs.astral.sh/uv/) into `$HOME/.local/bin` by piping `https://astral.sh/uv/install.sh`
+  into `sh`, unless a `uv` is already present;
+- downloads a [Linkspan](https://github.com/cyber-shuttle/linkspan) release tarball from GitHub into
+  `$HOME/.cybershuttle/bin`, unless the installed one is current, and refuses the host if that Linkspan does
+  not accept `--tunnel-host-token`;
+- writes the workflow document the job will run, under `$HOME/.cybershuttle/runtimes/<runtime id>`.
 
-Scheduler state remains SSH/Slurm authoritative. The owner-authenticated `/access` endpoint returns the allocation's Jupyter URI and its token. cs-control does not proxy Jupyter, VS Code, or other runtime data.
+Linkspan is the CyberShuttle agent that runs as the batch job's main process: it hosts the tunnel, builds the
+Python environment and starts Jupyter Server on the compute node. Nothing runs as root and nothing is installed
+outside `$HOME/.cybershuttle` and `$HOME/.local/bin`. `csctl` keeps a multiplexed OpenSSH connection to the
+login node open between operations and starts no other long-lived process there; the allocation itself runs on
+a compute node. The flags and outputs `csctl` depends on are listed in
+[Linkspan's compatibility document](https://github.com/cyber-shuttle/linkspan/blob/main/docs/COMPATIBILITY.md).
 
-The runtime states are `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, and `FAILED`. There is one state field: a Slurm word this vocabulary does not cover is treated as no observation rather than a state of its own. Runtime list responses, and the log tails that travel with them, are filtered to the validated owner principal; item and access reads reject a different principal.
+## Local state
 
-Invariants and trust boundaries: see CLAUDE.md.
+`~/.cybershuttle/control`, created and verified at mode `0700`:
+
+- `state.json` — non-secret scheduler, allocation and tunnel metadata
+- `credentials/` — the per-allocation Dev Tunnel connect token and Jupyter token, mode `0600`
+- `ssh/` — OpenSSH `ControlMaster` sockets
+
+The API adds SSH host entries to `~/.ssh/config` inside its own managed block, and reads but never rewrites
+anything outside it.
+
+## Documentation
+
+- [docs/API.md](docs/API.md) — the loopback HTTP and WebSocket API a client drives
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — package layering, allocation lifecycle, trust boundaries
+
+## Related projects
+
+- **[cs-jupyter](https://github.com/cyber-shuttle/cs-jupyter)** — the browser client that drives this API: it
+  signs in, creates and polls runtimes, and connects to a `READY` one.
+- **[linkspan](https://github.com/cyber-shuttle/linkspan)** — the compute-node agent `csctl` installs and
+  submits as the job's main process.
+
+## Getting help
+
+Bug reports and feature requests go to [GitHub Issues](https://github.com/cyber-shuttle/cs-control/issues).
+Report a vulnerability privately instead — see [SECURITY.md](SECURITY.md).
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the development setup, the commands CI runs, and the pull-request
+workflow. Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
