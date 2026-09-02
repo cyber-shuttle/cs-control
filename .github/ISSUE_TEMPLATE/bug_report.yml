@@ -1,0 +1,76 @@
+name: Bug report
+description: Something csctl does not do, or does wrong
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Include the exact error message or HTTP status if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. csctl serve --oauth-authority ... --allowed-origin ...
+        2. POST /api/v1/runtimes with ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: There are no releases yet, so name the commit you built from (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: Output of `go version`.
+  - type: textarea
+    id: invocation
+    attributes:
+      label: How you started csctl
+      description: The `csctl serve` command line, with the tenant ID replaced.
+      render: shell
+  - type: textarea
+    id: cluster
+    attributes:
+      label: Cluster
+      description: >
+        For anything involving SSH, Slurm or an allocation: what scheduler and version the login node runs,
+        whether the login node has outbound internet to astral.sh and github.com, and whether the host had
+        been prepared before.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >
+        csctl output and any runtime log tail. Remove OAuth access and ID tokens, Dev Tunnel connect and host
+        tokens, and Jupyter tokens before pasting.
+      render: shell
+  - type: markdown
+    attributes:
+      value: >
+        If this is a security vulnerability, close this form and report it privately instead — see
+        [SECURITY.md](https://github.com/cyber-shuttle/cs-control/blob/main/SECURITY.md).

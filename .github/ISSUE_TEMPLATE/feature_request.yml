@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a change to what csctl does
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and where csctl stops you.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: >
+        If it affects the API, name the routes, fields or error codes involved — a client depends on those.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including what a client could do instead without a change here.
