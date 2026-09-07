@@ -10,8 +10,7 @@ through it.
 
 ## Packages
 
-Each subsystem is a package and depends only downward. New code goes in the lowest layer that can hold it, and
-no package imports upward.
+Each subsystem is a package. New code goes in the lowest layer that can hold it.
 
 ```
 apierr  safeio       error shape, private files

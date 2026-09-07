@@ -20,12 +20,10 @@ type Envelope struct {
 	Error *APIError `json:"error"`
 }
 
-// For unwraps err to the APIError a subsystem reported, or reports an opaque
-// internal error so no subsystem can leak an unclassified message as a 200.
 func For(err error) *APIError {
 	var result *APIError
 	if errors.As(err, &result) {
 		return result
 	}
-	return &APIError{Code: "internal_error", Message: err.Error(), Status: 500}
+	return &APIError{Code: "internal_error", Message: "internal error", Status: 500}
 }

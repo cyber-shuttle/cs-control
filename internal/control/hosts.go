@@ -2,10 +2,11 @@ package control
 
 import (
 	"context"
+	"errors"
 	"strings"
 
+	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
-	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
 // AddHostRequest carries the ssh command a user already knows works. The server
@@ -51,14 +52,14 @@ func (s Service) TestHost(ctx context.Context, alias string) (HostTest, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
 	defer cancel()
 	if _, err := s.Runner.Run(ctx, alias, nil, "true"); err != nil {
-		message := strings.TrimSpace(err.Error())
-		if sshexec.AuthenticationFailure(message) {
+		var classified *apierr.APIError
+		if errors.As(err, &classified) && classified.Code == "ssh_authentication_required" {
 			return HostTest{Host: alias, Message: "The host answered but wants an interactive login. Add a runtime on it to sign in."}, nil
 		}
 		if ctx.Err() != nil {
 			return HostTest{Host: alias, Message: "The host did not answer in time."}, nil
 		}
-		return HostTest{Host: alias, Message: message}, nil
+		return HostTest{Host: alias, Message: strings.TrimSpace(err.Error())}, nil
 	}
 	return HostTest{Host: alias, OK: true, Message: "Connected."}, nil
 }
