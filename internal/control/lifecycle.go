@@ -265,7 +265,13 @@ func (s Service) Start(ctx context.Context, id string) (*Runtime, error) {
 			return nil, err
 		}
 	}
+	// Create replaces the record in place, so what the previous generation did
+	// is kept here or nowhere.
+	if err := s.RecordRun(runtime); err != nil {
+		return nil, err
+	}
 	s.Logs.Forget(id)
+	s.Metrics.Forget(id)
 	return s.Create(ctx, CreateRequest{
 		ID: id, relaunch: true, SSHHost: runtime.SSHHost, Account: runtime.Account,
 		Partition: runtime.Partition, RootFolder: runtime.RootFolder, Resources: runtime.Resources,
@@ -368,12 +374,14 @@ func (s Service) Delete(ctx context.Context, id string) (*Runtime, error) {
 			return apierr.New("runtime_not_stopped", "runtime is no longer stopped", http.StatusConflict)
 		}
 		deleted = detached(runtime)
+		recordRun(current, s.runOf(runtime))
 		delete(current.Runtimes, id)
 		return store.save(current)
 	}); err != nil {
 		return nil, err
 	}
 	s.Logs.Forget(id)
+	s.Metrics.Forget(id)
 	return deleted, s.Credentials.Delete(id, deleted.Generation)
 }
 
@@ -469,8 +477,14 @@ func (s Service) ReconcileAll(ctx context.Context) error {
 		for i := range snapshots {
 			runtime := current.Runtimes[snapshots[i].ID]
 			s.narrateReconciled(runtime, &snapshots[i], narration[i])
-			if mergeReconciled(runtime, &snapshots[i], &candidates[i], s.now()) {
-				changed = true
+			if !mergeReconciled(runtime, &snapshots[i], &candidates[i], s.now()) {
+				continue
+			}
+			changed = true
+			// The first observation of a terminal state is the last moment the
+			// allocation's own sample window still describes it.
+			if terminalRuntime(runtime.State) && recordRun(current, s.runOf(runtime)) {
+				s.Metrics.Forget(runtime.ID)
 			}
 		}
 		if changed {

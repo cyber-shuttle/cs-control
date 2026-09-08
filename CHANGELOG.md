@@ -5,6 +5,24 @@ Notable changes to CyberShuttle Control. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `PUT /api/v1/ssh/{alias}`: replace a managed host with what a pasted `ssh` command now says, so a login whose
+  host, port, user or jump changed is corrected in place instead of being removed and re-added.
+- `startedAt` on the runtime record: when Slurm was first seen running the allocation, absent until it starts.
+  With `resources.wallMinutes` it is the deadline a client counts down to.
+- `GET /api/v1/runtimes/{id}/metrics`: the last twenty CPU, memory and GPU samples, read from Linkspan over the
+  control port of the allocation's own tunnel every five seconds.
+- `GET /api/v1/runtimes/history`: what this caller's finished allocations did. A run is frozen when the
+  allocation ends, named by the generation that ran it, and outlives both the relaunch and the delete of the
+  card it belonged to. Slurm's accounting — peak RSS, CPU and memory efficiency — is filled in as it flushes.
+
+### Fixed
+
+- The wall-time anchor was reset to the poll on every observation of a running job: `squeue` is asked for four
+  fields and reports no elapsed time, but its row wins over the accounting row that does. A countdown built on
+  `startedAt` would have restarted from the full walltime on every round.
+
 ## [0.1.0] - 2026-09-07
 
 ### Added

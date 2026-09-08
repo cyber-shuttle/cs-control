@@ -115,6 +115,26 @@ startup log tails — filtered to the same owned set, because a tail is as priva
 it. The strong `ETag` is taken over that filtered body, so it cannot match across principals, and a poll whose
 `If-None-Match` still matches is answered `304 Not Modified` with no body.
 
+### Samples and run records
+
+Two things about a running allocation are not scheduler state and are not reconciled with it.
+
+Resource samples are read from the Linkspan the allocation is running, over the control port already declared
+on its own tunnel, once every five seconds. They are process-local and bounded to the last twenty, held beside
+the log tail rather than in `state.json`: a window on a running allocation is not a fact about it, and
+rewriting persisted state every five seconds to hold one would be the wrong store. They are served on their
+own route for the same reason the poll is cheap — samples change on every tick, so folding them into
+`GET /api/v1/runtimes` would defeat its `ETag` for exactly the runtimes that have any. A missed sample is a
+gap in a window, not a fault.
+
+A run record is the opposite: it is the one durable trace an allocation leaves. Ending forgets everything else
+— relaunch replaces the runtime record in place and delete drops it — so the reconciliation that first sees a
+terminal state freezes what the allocation did, carrying its final sample window with it, under the same lock
+that would otherwise lose it. A run is named by the generation that ran it, so a card accumulates runs rather
+than overwriting them, and its history outlives the card. Slurm's own accounting is read separately and later:
+`slurmdbd` flushes step usage a beat after a job ends, so the record is completed on the sampling tick for ten
+minutes and then left as it is.
+
 ## Dev Tunnels
 
 One creator-owned tunnel per allocation generation, declaring both allocation ports at creation. Tunnel-wide
@@ -128,7 +148,10 @@ authority before the error is returned. Tunnel expiry is the final cleanup backs
 job failure.
 
 Create and delete use the delegated OAuth bearer. The management read behind `/access` uses
-`Authorization: tunnel <connect token>`.
+`Authorization: tunnel <connect token>`, and the metrics read reaches Linkspan on the control port with the
+same connect token in `X-Tunnel-Authorization`, which is how Dev Tunnels authorizes a non-anonymous port. The
+edge answers `200` with an interstitial page once the host is gone, so a body that parses is the liveness
+signal rather than the status.
 
 ## SSH configuration
 
@@ -150,7 +173,7 @@ authentication WebSocket is what establishes that master.
 
 | Path | Contents |
 | --- | --- |
-| `state.json` | non-secret scheduler, allocation and tunnel metadata |
+| `state.json` | non-secret scheduler, allocation and tunnel metadata, and the bounded record of what finished allocations did |
 | `credentials/` | per-generation Dev Tunnel connect token and Jupyter token, mode `0600` under a `0700` directory |
 | `ssh/` | OpenSSH `ControlMaster` sockets |
 

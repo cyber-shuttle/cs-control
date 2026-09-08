@@ -36,6 +36,7 @@ type HTTPAPI struct {
 	Service   Service
 	Auth      SSHAuthRoute
 	Refresher *RuntimeRefresher
+	Sampler   *RuntimeSampler
 	routes    *http.ServeMux
 }
 
@@ -69,6 +70,9 @@ func requireUpgrade(message string, serve http.HandlerFunc) http.HandlerFunc {
 
 func NewHTTPHandler(service Service, auth SSHAuthRoute) *HTTPAPI {
 	api := &HTTPAPI{Service: service, Auth: auth, Refresher: NewRuntimeRefresher(service)}
+	if service.Metrics != nil {
+		api.Sampler = NewRuntimeSampler(service, service.Metrics)
+	}
 	api.routes = api.mux()
 	return api
 }
@@ -78,17 +82,19 @@ func NewHTTPHandler(service Service, auth SSHAuthRoute) *HTTPAPI {
 func (a *HTTPAPI) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, handlers := range map[string]map[string]http.HandlerFunc{
-		"/api/v1/ssh":                  {http.MethodGet: answer(http.StatusOK, a.listHosts), http.MethodPost: answer(http.StatusCreated, a.addHost)},
-		"/api/v1/ssh/{alias}":          {http.MethodPut: answer(http.StatusOK, a.updateHost), http.MethodDelete: answer(http.StatusOK, a.removeHost)},
-		"/api/v1/ssh/{alias}/auth":     {http.MethodGet: requireUpgrade("SSH authentication requires a WebSocket", a.sshAuth)},
-		"/api/v1/ssh/{alias}/slurm":    {http.MethodGet: answer(http.StatusOK, a.discoverSlurm)},
-		"/api/v1/ssh/{alias}/test":     {http.MethodPost: answer(http.StatusOK, a.testHost)},
-		"/api/v1/runtimes":             {http.MethodGet: a.listRuntimes, http.MethodPost: answer(http.StatusCreated, a.createRuntime)},
-		"/api/v1/runtimes/validate":    {http.MethodPost: answer(http.StatusOK, a.validateRuntime)},
-		"/api/v1/runtimes/{id}":        {http.MethodGet: answer(http.StatusOK, a.getRuntime), http.MethodDelete: answer(http.StatusOK, a.deleteRuntime)},
-		"/api/v1/runtimes/{id}/start":  {http.MethodPost: answer(http.StatusOK, a.startRuntime)},
-		"/api/v1/runtimes/{id}/stop":   {http.MethodPost: answer(http.StatusOK, a.stopRuntime)},
-		"/api/v1/runtimes/{id}/access": {http.MethodGet: answer(http.StatusOK, a.runtimeAccess)},
+		"/api/v1/ssh":                   {http.MethodGet: answer(http.StatusOK, a.listHosts), http.MethodPost: answer(http.StatusCreated, a.addHost)},
+		"/api/v1/ssh/{alias}":           {http.MethodPut: answer(http.StatusOK, a.updateHost), http.MethodDelete: answer(http.StatusOK, a.removeHost)},
+		"/api/v1/ssh/{alias}/auth":      {http.MethodGet: requireUpgrade("SSH authentication requires a WebSocket", a.sshAuth)},
+		"/api/v1/ssh/{alias}/slurm":     {http.MethodGet: answer(http.StatusOK, a.discoverSlurm)},
+		"/api/v1/ssh/{alias}/test":      {http.MethodPost: answer(http.StatusOK, a.testHost)},
+		"/api/v1/runtimes":              {http.MethodGet: a.listRuntimes, http.MethodPost: answer(http.StatusCreated, a.createRuntime)},
+		"/api/v1/runtimes/validate":     {http.MethodPost: answer(http.StatusOK, a.validateRuntime)},
+		"/api/v1/runtimes/history":      {http.MethodGet: answer(http.StatusOK, a.listRuns)},
+		"/api/v1/runtimes/{id}":         {http.MethodGet: answer(http.StatusOK, a.getRuntime), http.MethodDelete: answer(http.StatusOK, a.deleteRuntime)},
+		"/api/v1/runtimes/{id}/start":   {http.MethodPost: answer(http.StatusOK, a.startRuntime)},
+		"/api/v1/runtimes/{id}/stop":    {http.MethodPost: answer(http.StatusOK, a.stopRuntime)},
+		"/api/v1/runtimes/{id}/access":  {http.MethodGet: answer(http.StatusOK, a.runtimeAccess)},
+		"/api/v1/runtimes/{id}/metrics": {http.MethodGet: answer(http.StatusOK, a.runtimeMetrics)},
 	} {
 		mux.Handle(pattern, route(handlers))
 	}
@@ -102,7 +108,12 @@ func (a *HTTPAPI) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	a.routes.ServeHTTP(writer, request)
 }
 
-func (a *HTTPAPI) Close() { a.Refresher.Close() }
+func (a *HTTPAPI) Close() {
+	a.Refresher.Close()
+	if a.Sampler != nil {
+		a.Sampler.Close()
+	}
+}
 
 // answer adapts a route producing a value or a refusal, so writing one or the
 // other exists once rather than in every handler.
@@ -264,6 +275,31 @@ func (a *HTTPAPI) runtimeAction(request *http.Request, act func(context.Context,
 		return RuntimeResponse{}, err
 	}
 	return runtime.RuntimeResponse, nil
+}
+
+// The history outlives the runtimes in it, so it is its own collection rather
+// than a view of one: a run whose card was deleted is still the caller's.
+func (a *HTTPAPI) listRuns(request *http.Request) (RunList, error) {
+	principal, err := requestPrincipal(request)
+	if err != nil {
+		return RunList{}, err
+	}
+	runs, err := a.Service.ListRuns(principal)
+	if err != nil {
+		return RunList{}, err
+	}
+	return RunList{Runs: publicRuns(runs)}, nil
+}
+
+// Samples live on their own route rather than in the list: they change on every
+// tick, and folding them into the poll would defeat its 304 for exactly the
+// runtimes that have any.
+func (a *HTTPAPI) runtimeMetrics(request *http.Request) (RuntimeSeries, error) {
+	runtime, err := a.ownedRuntimeFromRoute(request)
+	if err != nil {
+		return RuntimeSeries{}, err
+	}
+	return RuntimeSeries{RuntimeID: runtime.ID, Samples: a.Service.Metrics.Series(runtime.ID)}, nil
 }
 
 func (a *HTTPAPI) runtimeAccess(request *http.Request) (*RuntimeAccessResponse, error) {

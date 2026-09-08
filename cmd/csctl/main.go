@@ -68,7 +68,7 @@ func run(ctx context.Context, args []string) error {
 			Hosts: sshconfig.Config{UserPath: defaultUserSSHConfig(), SystemPath: "/etc/ssh/ssh_config"}},
 		Store:  control.Store{Dir: stateDir},
 		Config: control.Config{LinkspanPath: *linkspan},
-		Logs:   control.NewRuntimeLogs(), Tunnels: tunnelManager,
+		Logs:   control.NewRuntimeLogs(), Metrics: control.NewRuntimeMetrics(), Tunnels: tunnelManager,
 		Credentials: control.CredentialStore{Dir: credentialDir},
 	}
 	switch args[0] {

@@ -170,6 +170,9 @@ type commandResult struct {
 type state struct {
 	Version  int                 `json:"version"`
 	Runtimes map[string]*Runtime `json:"runtimes"`
+	// What finished allocations did, newest first. Absent in a file written
+	// before runs were kept, which is a history of none rather than a fault.
+	Runs []RunRecord `json:"runs,omitempty"`
 }
 
 // DefaultLinkspanPath is where a runtime installs Linkspan when a host has none.
@@ -198,6 +201,7 @@ type Service struct {
 	Store       Store
 	Config      Config
 	Logs        *RuntimeLogs
+	Metrics     *RuntimeMetrics
 	Tunnels     devtunnel.Manager
 	Credentials CredentialStore
 	Now         func() time.Time

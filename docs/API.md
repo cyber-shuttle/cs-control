@@ -318,6 +318,68 @@ tunnel expiration, not the value recorded at creation.
 A runtime that is not `READY`, has no stored credential, or whose tunnel cannot be reached or has expired is
 `runtime_access_unavailable` with the reason in the message.
 
+### `GET /api/v1/runtimes/{id}/metrics` → 200
+
+What the allocation is using now, as Linkspan on the compute node reports it over the control port of the
+allocation's own tunnel. Samples are bounded, process-local and five seconds apart; the window holds the last
+twenty. They are deliberately not part of the poll above: they change every tick, and folding them in would
+defeat its `ETag` for exactly the runtimes that have any.
+
+```json
+{
+  "runtimeId": "rt-012345abcdef",
+  "samples": [
+    {
+      "at": "2030-01-01T00:05:00Z",
+      "memBytes": 2147483648,
+      "cpuUsageUsec": 295339339,
+      "gpus": [{ "index": 0, "utilPct": 40, "memUsedMiB": 1024, "memTotalMiB": 40960 }]
+    }
+  ]
+}
+```
+
+Every figure is optional: a host with no GPUs reports none, and a cgroup file that cannot be read is absent
+rather than zero, which for a cumulative counter is a different claim. `at` is when the sample was observed
+here, so consecutive samples differentiate `cpuUsageUsec` into a rate. A runtime that is not running answers
+with an empty window rather than an error.
+
+### `GET /api/v1/runtimes/history` → 200
+
+What this caller's finished allocations did, newest first and bounded. A run is named by the generation that
+ran it, so relaunching a card leaves the previous run behind rather than overwriting it, and deleting the card
+does not remove the runs it accumulated.
+
+```json
+{
+  "runs": [
+    {
+      "runtimeId": "rt-012345abcdef",
+      "generation": "g-0123456789abcdef",
+      "sshHost": "delta",
+      "partition": "cpu",
+      "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60 },
+      "finalState": "STOPPED",
+      "startedAt": "2030-01-01T00:00:30Z",
+      "endedAt": "2030-01-01T01:00:30Z",
+      "stats": {
+        "cores": 2,
+        "requestedMemory": "4.0 GB",
+        "elapsedSeconds": 3600,
+        "maxRss": "2.0 GB",
+        "cpuEfficiencyPct": 50,
+        "memoryEfficiencyPct": 50
+      },
+      "samples": []
+    }
+  ]
+}
+```
+
+The record is frozen when the allocation ends, carrying its final sample window with it. `stats` comes from
+Slurm's own accounting and is absent until it lands: `slurmdbd` flushes step usage a beat after a job ends, so
+it is read again on the sampling tick for ten minutes and then left as it is.
+
 ## Device-code sign-in
 
 The only two routes in front of the authentication boundary. They broker pinned Microsoft device-code requests
