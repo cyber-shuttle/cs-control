@@ -22,6 +22,7 @@ type RunResponse struct {
 	SSHHost    string         `json:"sshHost"`
 	Account    string         `json:"account,omitempty"`
 	Partition  string         `json:"partition"`
+	RootFolder string         `json:"rootFolder"`
 	Resources  Resources      `json:"resources"`
 	FinalState string         `json:"finalState"`
 	Error      string         `json:"error,omitempty"`
@@ -57,7 +58,8 @@ func (s Service) runOf(runtime *Runtime) RunRecord {
 	return RunRecord{
 		RunResponse: RunResponse{
 			RuntimeID: runtime.ID, Generation: runtime.Generation, SSHHost: runtime.SSHHost,
-			Account: runtime.Account, Partition: runtime.Partition, Resources: runtime.Resources,
+			Account: runtime.Account, Partition: runtime.Partition, RootFolder: runtime.RootFolder,
+			Resources:  runtime.Resources,
 			FinalState: runtime.State, Error: runtime.Error, StartedAt: runtime.StartedAt,
 			EndedAt: s.now(), Samples: s.Metrics.Series(runtime.ID),
 		},
@@ -120,9 +122,9 @@ func (s Service) completeRunStats(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	for host, jobs := range pending {
+	for scope, jobs := range pending {
 		for _, job := range jobs {
-			stats, err := s.readRunStats(ctx, host, job.jobName)
+			stats, err := s.forPrincipal(scope.owner).readRunStats(ctx, scope.host, job.jobName)
 			if err != nil || !stats.Complete() {
 				continue
 			}
@@ -137,16 +139,17 @@ type pendingRun struct {
 	jobName    string
 }
 
-// pendingRunStats groups by host, since that is what an SSH round costs.
-func (s Service) pendingRunStats() (map[string][]pendingRun, error) {
-	pending := map[string][]pendingRun{}
+// pendingRunStats groups by owner and host, since that is what an SSH round is.
+func (s Service) pendingRunStats() (map[schedulerScope][]pendingRun, error) {
+	pending := map[schedulerScope][]pendingRun{}
 	cutoff := s.now().Add(-runStatsWindow)
 	err := s.Store.withLock(func(_ Store, current *state) error {
 		for _, run := range current.Runs {
 			if run.Stats != nil || run.EndedAt.Before(cutoff) {
 				continue
 			}
-			pending[run.SSHHost] = append(pending[run.SSHHost], pendingRun{
+			scope := schedulerScope{owner: run.Owner, host: run.SSHHost}
+			pending[scope] = append(pending[scope], pendingRun{
 				runtimeID: run.RuntimeID, generation: run.Generation,
 				jobName: jobName(run.RuntimeID, run.Generation),
 			})

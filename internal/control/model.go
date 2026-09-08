@@ -11,6 +11,9 @@
 package control
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"path/filepath"
 	"regexp"
 	"time"
 
@@ -190,6 +193,9 @@ const (
 
 type Config struct {
 	LinkspanPath string
+	// Where each principal's own SSH host configuration lives. One directory per
+	// caller, so an alias one of them adds is invisible to the rest.
+	HostsDir string
 }
 
 type Store struct {
@@ -208,6 +214,32 @@ type Service struct {
 }
 
 func (s Service) SSHConfig() sshconfig.Config { return s.Runner.Hosts }
+
+// hostConfigDirName is a stable, filesystem-safe name for a principal. The
+// subject is an identifier from another system and never becomes a path.
+func hostConfigDirName(principal authn.Principal) string {
+	sum := sha256.Sum256([]byte(principal.Subject + "\x00" + principal.Tenant))
+	return hex.EncodeToString(sum[:16])
+}
+
+// forPrincipal binds every SSH operation to one caller's own host configuration.
+// Composed rather than threaded: the service is copied with its runner pointed at
+// that caller's file, so each existing call site keeps naming s.Runner and reaches
+// only what the caller configured.
+func (s Service) forPrincipal(principal authn.Principal) Service {
+	scoped := s
+	// SystemPath is deliberately dropped with it: /etc/ssh/ssh_config is this
+	// machine's, and nothing on this machine is any caller's by default.
+	scoped.Runner.Hosts = sshconfig.Config{UserPath: s.hostConfigPath(principal)}
+	return scoped
+}
+
+func (s Service) hostConfigPath(principal authn.Principal) string {
+	if s.Config.HostsDir == "" {
+		return ""
+	}
+	return filepath.Join(s.Config.HostsDir, hostConfigDirName(principal), "config")
+}
 
 func (s Service) effectiveConfig() Config {
 	cfg := s.Config

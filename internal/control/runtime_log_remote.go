@@ -65,21 +65,26 @@ func (s Service) collectStartingRuntimeLogs(ctx context.Context, runtimes []Runt
 	slices.SortFunc(starting, func(a, b Runtime) int {
 		return cmp.Or(strings.Compare(a.SSHHost, b.SSHHost), strings.Compare(a.ID, b.ID))
 	})
-	byHost := make(map[string][]string)
+	byScope := make(map[schedulerScope][]string)
 	byID := make(map[string]Runtime, len(starting))
 	for _, runtime := range starting {
-		byHost[runtime.SSHHost] = append(byHost[runtime.SSHHost], runtime.ID)
+		scope := schedulerScope{owner: runtime.Owner, host: runtime.SSHHost}
+		byScope[scope] = append(byScope[scope], runtime.ID)
 		byID[runtime.ID] = runtime
 		s.Logs.SetRuntimeSensitive(runtime.ID, s.runtimeLogSensitiveValues(runtime)...)
 	}
 
-	// One SSH command per batch, sized by what the remote script accepts.
-	for _, host := range slices.Sorted(maps.Keys(byHost)) {
-		for ids := range slices.Chunk(byHost[host], maxRuntimeLogCollections) {
+	// One SSH command per batch, sized by what the remote script accepts, and read
+	// as the owner: the log lives in that account's home on that account's host.
+	scopes := slices.SortedFunc(maps.Keys(byScope), func(a, b schedulerScope) int {
+		return cmp.Or(strings.Compare(a.host, b.host), strings.Compare(a.owner.Subject, b.owner.Subject))
+	})
+	for _, scope := range scopes {
+		for ids := range slices.Chunk(byScope[scope], maxRuntimeLogCollections) {
 			if ctx.Err() != nil {
 				return completed
 			}
-			tails, err := s.readRemoteRuntimeTails(ctx, host, ids)
+			tails, err := s.forPrincipal(scope.owner).readRemoteRuntimeTails(ctx, scope.host, ids)
 			if err != nil || ctx.Err() != nil {
 				continue
 			}

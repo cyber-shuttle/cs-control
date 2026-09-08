@@ -15,6 +15,7 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/httpx"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
+	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 	"github.com/gorilla/websocket"
 )
 
@@ -43,7 +44,7 @@ type HTTPAPI struct {
 // SSHAuthRoute serves the interactive SSH authentication WebSocket. The router
 // names the shape it needs, so the runtime domain never imports the gateway.
 type SSHAuthRoute interface {
-	ServeWebSocket(writer http.ResponseWriter, request *http.Request, alias string)
+	ServeWebSocket(writer http.ResponseWriter, request *http.Request, alias string, runner sshexec.Runner)
 }
 
 // The only place a control route refuses a method, so 405 is produced once.
@@ -128,33 +129,66 @@ func answer[T any](status int, produce func(*http.Request) (T, error)) http.Hand
 	}
 }
 
-func (a *HTTPAPI) listHosts(*http.Request) (sshconfig.HostList, error) {
-	hosts, err := a.Service.SSHConfig().List()
+// callerService binds the request to its own SSH host configuration, so an
+// alias names what this caller configured and nothing another caller did.
+func (a *HTTPAPI) callerService(request *http.Request) (Service, error) {
+	principal, err := requestPrincipal(request)
+	if err != nil {
+		return Service{}, err
+	}
+	return a.Service.forPrincipal(principal), nil
+}
+
+func (a *HTTPAPI) listHosts(request *http.Request) (sshconfig.HostList, error) {
+	service, err := a.callerService(request)
+	if err != nil {
+		return sshconfig.HostList{}, err
+	}
+	hosts, err := service.SSHConfig().List()
+	if hosts == nil {
+		hosts = []sshconfig.Host{}
+	}
 	return sshconfig.HostList{Hosts: hosts}, err
 }
 
 func (a *HTTPAPI) addHost(request *http.Request) (sshconfig.Host, error) {
+	service, err := a.callerService(request)
+	if err != nil {
+		return sshconfig.Host{}, err
+	}
 	var add AddHostRequest
 	if err := decodeJSON(request, &add); err != nil {
 		return sshconfig.Host{}, err
 	}
-	return a.Service.AddHost(add)
+	return service.AddHost(add)
 }
 
 func (a *HTTPAPI) updateHost(request *http.Request) (sshconfig.Host, error) {
+	service, err := a.callerService(request)
+	if err != nil {
+		return sshconfig.Host{}, err
+	}
 	var update UpdateHostRequest
 	if err := decodeJSON(request, &update); err != nil {
 		return sshconfig.Host{}, err
 	}
-	return a.Service.UpdateHost(request.PathValue("alias"), update)
+	return service.UpdateHost(request.PathValue("alias"), update)
 }
 
 func (a *HTTPAPI) removeHost(request *http.Request) (sshconfig.Host, error) {
-	return a.Service.RemoveHost(request.PathValue("alias"))
+	service, err := a.callerService(request)
+	if err != nil {
+		return sshconfig.Host{}, err
+	}
+	return service.RemoveHost(request.PathValue("alias"))
 }
 
 func (a *HTTPAPI) testHost(request *http.Request) (HostTest, error) {
-	return a.Service.TestHost(request.Context(), request.PathValue("alias"))
+	service, err := a.callerService(request)
+	if err != nil {
+		return HostTest{}, err
+	}
+	return service.TestHost(request.Context(), request.PathValue("alias"))
 }
 
 func (a *HTTPAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
@@ -162,20 +196,33 @@ func (a *HTTPAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
 		httpx.WriteError(writer, apierr.New("ssh_authentication_unavailable", "SSH authentication is unavailable", http.StatusServiceUnavailable))
 		return
 	}
-	a.Auth.ServeWebSocket(writer, request, request.PathValue("alias"))
+	service, err := a.callerService(request)
+	if err != nil {
+		httpx.WriteError(writer, err)
+		return
+	}
+	a.Auth.ServeWebSocket(writer, request, request.PathValue("alias"), service.Runner)
 }
 
 // Abandoning the request cancels this context and so the remote process group.
 func (a *HTTPAPI) discoverSlurm(request *http.Request) (Resource, error) {
-	return a.Service.Discover(request.Context(), request.PathValue("alias"))
+	service, err := a.callerService(request)
+	if err != nil {
+		return Resource{}, err
+	}
+	return service.Discover(request.Context(), request.PathValue("alias"))
 }
 
 func (a *HTTPAPI) validateRuntime(request *http.Request) (*ValidationResult, error) {
+	service, err := a.callerService(request)
+	if err != nil {
+		return nil, err
+	}
 	var create CreateRequest
 	if err := decodeJSON(request, &create); err != nil {
 		return nil, err
 	}
-	return a.Service.Validate(request.Context(), create)
+	return service.Validate(request.Context(), create)
 }
 
 // listRuntimes answers from persisted state and starts a reconciliation for the
@@ -216,11 +263,15 @@ func (a *HTTPAPI) ownedRuntimeList(request *http.Request) ([]byte, error) {
 }
 
 func (a *HTTPAPI) createRuntime(request *http.Request) (RuntimeResponse, error) {
+	service, err := a.callerService(request)
+	if err != nil {
+		return RuntimeResponse{}, err
+	}
 	var create CreateRequest
 	if err := decodeJSON(request, &create); err != nil {
 		return RuntimeResponse{}, err
 	}
-	runtime, err := a.Service.Create(request.Context(), create)
+	runtime, err := service.Create(request.Context(), create)
 	if err != nil {
 		return RuntimeResponse{}, err
 	}
@@ -253,24 +304,29 @@ func (a *HTTPAPI) getRuntime(request *http.Request) (RuntimeResponse, error) {
 }
 
 func (a *HTTPAPI) startRuntime(request *http.Request) (RuntimeResponse, error) {
-	return a.runtimeAction(request, a.Service.Start)
+	return a.runtimeAction(request, Service.Start)
 }
 
 func (a *HTTPAPI) stopRuntime(request *http.Request) (RuntimeResponse, error) {
-	return a.runtimeAction(request, a.Service.Stop)
+	return a.runtimeAction(request, Service.Stop)
 }
 
 func (a *HTTPAPI) deleteRuntime(request *http.Request) (RuntimeResponse, error) {
-	return a.runtimeAction(request, a.Service.Delete)
+	return a.runtimeAction(request, Service.Delete)
 }
 
-// Start, stop and delete share one shape: name a runtime, act, answer.
-func (a *HTTPAPI) runtimeAction(request *http.Request, act func(context.Context, string) (*Runtime, error)) (RuntimeResponse, error) {
+// Start, stop and delete share one shape: name a runtime, act as its owner,
+// answer.
+func (a *HTTPAPI) runtimeAction(request *http.Request, act func(Service, context.Context, string) (*Runtime, error)) (RuntimeResponse, error) {
+	service, err := a.callerService(request)
+	if err != nil {
+		return RuntimeResponse{}, err
+	}
 	id, err := routedRuntimeID(request)
 	if err != nil {
 		return RuntimeResponse{}, err
 	}
-	runtime, err := act(request.Context(), id)
+	runtime, err := act(service, request.Context(), id)
 	if err != nil {
 		return RuntimeResponse{}, err
 	}

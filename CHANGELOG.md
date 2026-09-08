@@ -17,6 +17,19 @@ Notable changes to CyberShuttle Control. The format follows
   allocation ends, named by the generation that ran it, and outlives both the relaunch and the delete of the
   card it belonged to. Slurm's accounting — peak RSS, CPU and memory efficiency — is filled in as it flushes.
 
+### Changed
+
+- **SSH hosts are per caller.** Each principal now has a private host configuration under
+  `<state>/hosts/<principal>/config`, and `ssh` is invoked with `-F` naming it, so an alias resolves through
+  the configuration of whoever added it. The account `csctl` runs as no longer has standing in the API: its
+  `~/.ssh/config` is neither read nor written. The control master is keyed by configuration as well as alias,
+  so one caller authenticating a host cannot hand another an authenticated session, and reconciliation, log
+  tailing and accounting run as each runtime's own owner.
+
+  **Breaking.** Hosts previously visible from the daemon account's `~/.ssh/config` are no longer listed;
+  re-add the ones you want by pasting their `ssh` command. An `IdentityFile` may still name any path the
+  daemon account can read — isolation is of configuration and connections, not of the filesystem.
+
 ### Fixed
 
 - The wall-time anchor was reset to the poll on every observation of a running job: `squeue` is asked for four

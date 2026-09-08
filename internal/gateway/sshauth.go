@@ -51,7 +51,10 @@ type authInputOp struct {
 }
 
 type authSession struct {
-	alias       string
+	alias string
+	// The caller's own runner: an alias resolves through their configuration, and
+	// the master it authenticates is theirs alone.
+	runner      sshexec.Runner
 	controlPath string
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -90,7 +93,7 @@ func NewSSHAuthManager(runner sshexec.Runner) *SSHAuthManager {
 	return &SSHAuthManager{runner: runner, ctx: ctx, cancel: cancel, active: map[string]*authSession{}, owned: map[string]*ownedMaster{}}
 }
 
-func (m *SSHAuthManager) admit(alias string) (*authSession, error) {
+func (m *SSHAuthManager) admit(alias string, runner sshexec.Runner) (*authSession, error) {
 	// Reject a duplicate alias before resolving `ssh -G`, which may invoke helpers
 	// and take seconds: a second WebSocket would otherwise wait for teardown and
 	// then become a new authentication.
@@ -100,14 +103,16 @@ func (m *SSHAuthManager) admit(alias string) (*authSession, error) {
 		return nil, apierr.New("service_stopping", "SSH authentication service is stopping", 503)
 	}
 	for _, active := range m.active {
-		if active.alias == alias {
+		// Same name, same configuration: two callers naming the same alias are
+		// authenticating different hosts and must not block each other.
+		if active.alias == alias && active.runner.Hosts.UserPath == runner.Hosts.UserPath {
 			m.mu.Unlock()
 			return nil, apierr.New("ssh_authentication_in_progress", "SSH authentication is already in progress for "+alias, 409)
 		}
 	}
 	m.mu.Unlock()
 
-	path, err := m.runner.ControlPath(m.ctx, alias)
+	path, err := runner.ControlPath(m.ctx, alias)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +128,7 @@ func (m *SSHAuthManager) admit(alias string) (*authSession, error) {
 		}
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
-	session := &authSession{alias: alias, controlPath: path, ctx: ctx, cancel: cancel}
+	session := &authSession{alias: alias, runner: runner, controlPath: path, ctx: ctx, cancel: cancel}
 	m.active[path] = session
 	m.wg.Add(1)
 	return session, nil
@@ -162,10 +167,10 @@ func (m *SSHAuthManager) command(session *authSession) (*exec.Cmd, bool, error) 
 	// A manager keeps the lifecycle flock for masters it created, so an expired
 	// ControlPersist process leaves a lock that outlives its socket and would make
 	// the next authentication wait forever on itself.
-	if healthy, err := m.reclaimExpiredOwned(session.alias, session.controlPath); err != nil || healthy {
+	if healthy, err := m.reclaimExpiredOwned(session.runner, session.alias, session.controlPath); err != nil || healthy {
 		return nil, healthy, err
 	}
-	lock, healthy, err := m.runner.AcquireControlLock(session.ctx, session.alias, session.controlPath)
+	lock, healthy, err := session.runner.AcquireControlLock(session.ctx, session.alias, session.controlPath)
 	if err != nil {
 		return nil, false, err
 	}
@@ -176,7 +181,7 @@ func (m *SSHAuthManager) command(session *authSession) (*exec.Cmd, bool, error) 
 	if err := sshexec.RemoveStaleControl(session.controlPath); err != nil {
 		return nil, false, err
 	}
-	args, err := m.runner.Args(session.ctx, session.alias, true)
+	args, err := session.runner.Args(session.ctx, session.alias, true)
 	if err != nil {
 		return nil, false, err
 	}
@@ -185,7 +190,7 @@ func (m *SSHAuthManager) command(session *authSession) (*exec.Cmd, bool, error) 
 	host := args[len(args)-1]
 	options := []string{"-q", "-T", "-N", "-o", "LogLevel=ERROR"}
 	args = append(args[:len(args)-1], append(options, host)...)
-	cmd := exec.Command(m.runner.Bin(), args...)
+	cmd := exec.Command(session.runner.Bin(), args...)
 	cmd.Env = sshexec.ChildEnv()
 	return cmd, false, nil
 }
@@ -246,7 +251,7 @@ func closeMaster(master *ownedMaster) {
 // alive and answering. A dead one is reaped and its lock released before startup
 // retries, leaving the stale socket for locked startup cleanup; a foreign healthy
 // socket is reused later but never claimed or terminated here.
-func (m *SSHAuthManager) reclaimExpiredOwned(alias, path string) (bool, error) {
+func (m *SSHAuthManager) reclaimExpiredOwned(runner sshexec.Runner, alias, path string) (bool, error) {
 	m.mu.Lock()
 	master := m.owned[path]
 	if master == nil {
@@ -268,7 +273,7 @@ func (m *SSHAuthManager) reclaimExpiredOwned(alias, path string) (bool, error) {
 		return false, nil
 	default:
 	}
-	if m.runner.MasterHealthy(alias, path) {
+	if runner.MasterHealthy(alias, path) {
 		m.mu.Unlock()
 		return true, nil
 	}
@@ -380,8 +385,8 @@ func writeClientInput(session *authSession, master *os.File, input <-chan authIn
 	return done
 }
 
-func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *http.Request, alias string) {
-	session, err := m.admit(alias)
+func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *http.Request, alias string, runner sshexec.Runner) {
+	session, err := m.admit(alias, runner)
 	if err != nil {
 		httpx.WriteError(writer, err)
 		return
@@ -449,7 +454,7 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 				return
 			}
 		case <-readiness.C:
-			if !m.runner.MasterHealthy(alias, session.controlPath) {
+			if !session.runner.MasterHealthy(alias, session.controlPath) {
 				continue
 			}
 			finished = true

@@ -155,9 +155,20 @@ signal rather than the status.
 
 ## SSH configuration
 
-Host entries the API creates live between `# >>> cybershuttle managed >>>` and `# <<< cybershuttle managed <<<`
-in `~/.ssh/config`, written atomically at mode `0600`. Everything outside those markers is read and never
-rewritten, and only a managed alias may be removed.
+Every caller has their own host configuration, and nothing else. A principal's entries live in
+`<state>/hosts/<principal>/config`, named by a hash of the subject and tenant so an identifier from another
+system never becomes a path, and written atomically at mode `0600` between
+`# >>> cybershuttle managed >>>` and `# <<< cybershuttle managed <<<`.
+
+This is a boundary, not a filing convention. `ssh` is invoked with `-F` naming that file, so an alias resolves
+through the configuration of the caller who added it and through no other. The account `csctl` runs as has no
+standing in the API: its `~/.ssh/config` is neither read nor written, and its aliases are invisible. Two
+callers may use the same alias name for different hosts. The control master is keyed by the configuration as
+well as the alias, so one caller authenticating a host never hands another an authenticated session, and
+scheduler reconciliation, log tailing and accounting each run as the runtime's own owner.
+
+What this does not do: an `IdentityFile` may still name any path the daemon account can read, and there is no
+way to upload a key. Isolation is of configuration and of connections, not of the filesystem underneath them.
 
 A pasted `ssh` command is parsed server-side into host, user, port, identity file and an allowlisted set of
 `-o` options — only how a connection authenticates or keeps itself alive. Anything that can run a local program
@@ -174,6 +185,7 @@ authentication WebSocket is what establishes that master.
 | Path | Contents |
 | --- | --- |
 | `state.json` | non-secret scheduler, allocation and tunnel metadata, and the bounded record of what finished allocations did |
+| `hosts/` | one SSH host configuration per principal, mode `0600` under a `0700` directory |
 | `credentials/` | per-generation Dev Tunnel connect token and Jupyter token, mode `0600` under a `0700` directory |
 | `ssh/` | OpenSSH `ControlMaster` sockets |
 

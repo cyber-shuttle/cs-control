@@ -73,8 +73,9 @@ Request bodies are JSON, at most 64 KiB. Unknown fields and trailing data are re
 
 ### `GET /api/v1/ssh` → 200
 
-Every host `~/.ssh/config` and `/etc/ssh/ssh_config` resolve to. `managed` marks the entries this API wrote,
-which are the only ones it may remove.
+The caller's own hosts, and only those. Each principal has a private configuration this API writes; the
+account the daemon runs as has none of its own standing here, and one caller's aliases are invisible to
+another. `managed` marks the entries this API wrote, which are the only ones it may change.
 
 ```json
 {
@@ -103,7 +104,8 @@ configuration text. `name` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`.
 { "name": "delta", "command": "ssh -i ~/.ssh/id_ed25519 -J bastion alice@login.delta.example.edu" }
 ```
 
-`-p`, `-i`, `-l`, `-J`, `-o` and one `[user@]host` target are understood. `-o` is limited to an allowlist
+The alias is the caller's own, so a name another principal already uses is free. `-p`, `-i`, `-l`, `-J`, `-o`
+and one `[user@]host` target are understood. `-o` is limited to an allowlist
 covering how a connection authenticates or keeps itself alive; every other option, every other flag, and a
 trailing remote command are refused with `invalid_ssh_command`. The response is the resulting host, and an
 alias that already exists is `ssh_host_exists`.
@@ -358,6 +360,7 @@ does not remove the runs it accumulated.
       "generation": "g-0123456789abcdef",
       "sshHost": "delta",
       "partition": "cpu",
+      "rootFolder": "$HOME/project",
       "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60 },
       "finalState": "STOPPED",
       "startedAt": "2030-01-01T00:00:30Z",
