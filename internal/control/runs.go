@@ -63,6 +63,7 @@ func publicRuns(runs []RunRecord) []RunResponse {
 // the reconciliation that retires a runtime stamps it, and a relaunch or a
 // delete days later must not restamp that run as having just finished.
 func (s Service) runOf(runtime *Runtime) RunRecord {
+	logTail, _ := s.Logs.Tail(runtime.ID)
 	return RunRecord{
 		RunResponse: RunResponse{
 			RuntimeID: runtime.ID, Generation: runtime.Generation, SSHHost: runtime.SSHHost,
@@ -70,7 +71,7 @@ func (s Service) runOf(runtime *Runtime) RunRecord {
 			Resources:  runtime.Resources,
 			FinalState: runtime.State, Error: runtime.Error, StartedAt: runtime.StartedAt,
 			EndedAt: runtime.UpdatedAt, Samples: s.Metrics.Series(runtime.ID),
-			Logs: s.runtimeLogLines(runtime.ID),
+			Logs: logTail.Lines,
 		},
 		Owner: runtime.Owner,
 	}
@@ -133,7 +134,7 @@ func (s Service) completeRunStats(ctx context.Context) {
 	}
 	for scope, jobs := range pending {
 		for _, job := range jobs {
-			stats, err := s.forPrincipal(scope.owner).readRunStats(ctx, scope.host, job.jobName)
+			stats, err := s.forPrincipal(scope.owner).readRunStats(ctx, scope.host, jobName(job.runtimeID, job.generation))
 			if err != nil || !stats.Complete() {
 				continue
 			}
@@ -145,7 +146,6 @@ func (s Service) completeRunStats(ctx context.Context) {
 type pendingRun struct {
 	runtimeID  string
 	generation string
-	jobName    string
 }
 
 // pendingRunStats groups by owner and host, since that is what an SSH round is.
@@ -158,10 +158,7 @@ func (s Service) pendingRunStats() (map[schedulerScope][]pendingRun, error) {
 				continue
 			}
 			scope := schedulerScope{owner: run.Owner, host: run.SSHHost}
-			pending[scope] = append(pending[scope], pendingRun{
-				runtimeID: run.RuntimeID, generation: run.Generation,
-				jobName: jobName(run.RuntimeID, run.Generation),
-			})
+			pending[scope] = append(pending[scope], pendingRun{runtimeID: run.RuntimeID, generation: run.Generation})
 		}
 		return nil
 	})
@@ -188,13 +185,4 @@ func (s Service) attachRunStats(runtimeID, generation string, stats RunStats) er
 		}
 		return nil
 	})
-}
-
-// runtimeLogLines is the runtime's current tail, or nothing when it never spoke.
-func (s Service) runtimeLogLines(runtimeID string) []RuntimeLogLine {
-	tail, ok := s.Logs.Tail(runtimeID)
-	if !ok {
-		return nil
-	}
-	return tail.Lines
 }
