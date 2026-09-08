@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -105,9 +106,10 @@ func WriteJSON(writer http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(writer).Encode(value)
 }
 
-// WriteError renders err as the classified envelope clients parse, so an
-// unclassified error surfaces as an opaque 500 rather than its own text.
 func WriteError(writer http.ResponseWriter, err error) {
 	api := apierr.For(err)
+	if api.Message != err.Error() {
+		log.Printf("unclassified error: %v", err)
+	}
 	WriteJSON(writer, api.Status, apierr.Envelope{Error: api})
 }

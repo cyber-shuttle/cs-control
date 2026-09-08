@@ -16,8 +16,7 @@ the build, test and pull-request workflow. Read those first; do not restate them
 
 ## Invariants to preserve
 
-Read docs/ARCHITECTURE.md as constraint, not description: the package layering, the allocation lifecycle and
-the trust boundaries are invariants — do not weaken one to make a change fit. Beyond what it states:
+Read docs/ARCHITECTURE.md as constraint, not description: the allocation lifecycle and the trust boundaries
+are invariants — do not weaken one to make a change fit. Beyond what it states:
 
-- Keep the CLI at `serve`, `help` and `version`. Runtime and SSH operations go through the OAuth-authenticated
-  API; do not add delegated-token argv flags. Global flags precede commands.
+- Runtime and SSH operations go through the OAuth-authenticated API; do not add delegated-token argv flags.

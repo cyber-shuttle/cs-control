@@ -122,8 +122,6 @@ func (s Service) applyObservation(runtime *Runtime, observation schedulerObserva
 	if runtime.Node != "" && runtime.Node != previousNode {
 		lines = append(lines, "Compute node assigned: "+runtime.Node)
 	}
-	// A word outside the scheduler vocabulary says nothing about the allocation,
-	// so it is not an observation: the last good state stands.
 	class := classifySchedulerState(observation.state)
 	if class == schedulerUnknown {
 		return lines

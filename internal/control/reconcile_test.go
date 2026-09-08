@@ -436,3 +436,13 @@ func TestStaleReconciliationRoundDoesNotNarrateARelaunchedRuntime(t *testing.T) 
 		t.Fatalf("a superseded round narrated the relaunched runtime: %#v", tail.Lines)
 	}
 }
+
+func TestSchedulerWordOutsideTheVocabularyLeavesTheStateUnchanged(t *testing.T) {
+	runtime := Runtime{RuntimeResponse: RuntimeResponse{ID: "rt-000000000001", State: "READY"}, JobID: "42"}
+
+	Service{}.applyObservation(&runtime, schedulerObservation{jobID: "42", state: "BOGUS_STATE"}, "")
+
+	if runtime.State != "READY" {
+		t.Errorf("an unrecognised scheduler word moved the runtime to %s; it says nothing about the allocation", runtime.State)
+	}
+}

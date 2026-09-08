@@ -23,7 +23,8 @@ func TestServeValidatesOriginsBeforeListening(t *testing.T) {
 			listened = true
 			return nil, errors.New("unexpected listen")
 		}
-		if err := runServe(context.Background(), control.Service{}, args, listen); err == nil {
+		service := control.Service{Store: control.Store{Dir: t.TempDir()}}
+		if err := runServe(context.Background(), service, args, listen); err == nil {
 			t.Fatalf("invalid serve configuration accepted: %q", args)
 		}
 		if listened {
@@ -61,5 +62,27 @@ func TestServeComponentsAlwaysApplyOAuthBoundary(t *testing.T) {
 	components.handler.ServeHTTP(hostileResponse, hostile)
 	if hostileResponse.Code != http.StatusForbidden {
 		t.Fatalf("production handler hostile origin = %d", hostileResponse.Code)
+	}
+}
+
+func TestCLIAcceptsOnlyServeHelpAndVersion(t *testing.T) {
+	for _, command := range []string{"version", "help", "-h", "--help"} {
+		if err := run(context.Background(), []string{command}); err != nil {
+			t.Errorf("%q is part of the CLI but was refused: %v", command, err)
+		}
+	}
+	for _, command := range []string{"status", "runtime", "login", "ssh"} {
+		if err := run(context.Background(), []string{command}); err == nil {
+			t.Errorf("%q was accepted; runtime and SSH operations go through the API, not argv", command)
+		}
+	}
+}
+
+func TestGlobalFlagsMustPrecedeTheCommand(t *testing.T) {
+	if err := run(context.Background(), []string{"-linkspan", "/opt/linkspan", "version"}); err != nil {
+		t.Errorf("a global flag before the command was refused: %v", err)
+	}
+	if err := run(context.Background(), []string{"version", "-linkspan", "/opt/linkspan"}); err == nil {
+		t.Error("a global flag after the command was accepted")
 	}
 }
