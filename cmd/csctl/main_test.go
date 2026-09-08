@@ -23,7 +23,8 @@ func TestServeValidatesOriginsBeforeListening(t *testing.T) {
 			listened = true
 			return nil, errors.New("unexpected listen")
 		}
-		if err := runServe(context.Background(), control.Service{}, args, listen); err == nil {
+		service := control.Service{Store: control.Store{Dir: t.TempDir()}}
+		if err := runServe(context.Background(), service, args, listen); err == nil {
 			t.Fatalf("invalid serve configuration accepted: %q", args)
 		}
 		if listened {

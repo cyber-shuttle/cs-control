@@ -1,6 +1,7 @@
 package control
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
@@ -53,5 +55,30 @@ func TestHTTPRouteSurfaceRetainsOnlyRequiredControlOperations(t *testing.T) {
 				t.Fatalf("route %s %s emitted cookies: %q", test.method, test.path, cookies)
 			}
 		})
+	}
+}
+
+func TestRequestBodiesRefuseUnknownFieldsTrailingDataAndOversizeBodies(t *testing.T) {
+	type payload struct {
+		Name string `json:"name"`
+	}
+	refused := map[string]string{
+		"an unknown field": `{"name":"a","surprise":1}`,
+		"trailing data":    `{"name":"a"}{}`,
+		"over 64 KiB":      `{"name":"` + strings.Repeat("a", maxRequestBody) + `"}`,
+	}
+	for what, body := range refused {
+		var target payload
+		err := decodeJSON(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)), &target)
+
+		var api *apierr.APIError
+		if !errors.As(err, &api) || api.Code != "invalid_json" || api.Status != 400 {
+			t.Errorf("%s was accepted; got %v, want 400 invalid_json", what, err)
+		}
+	}
+
+	var target payload
+	if err := decodeJSON(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"a"}`)), &target); err != nil || target.Name != "a" {
+		t.Errorf("a well-formed body was refused: %v", err)
 	}
 }
