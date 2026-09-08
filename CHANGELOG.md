@@ -3,11 +3,9 @@
 Notable changes to CyberShuttle Control. The format follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).
 
-No version has been released: the repository has no tags and no published binaries, and `csctl version` prints
-a constant `0.1.0` that names no release. Everything below has landed on `main`, which is what building from
-source gives you.
-
 ## [Unreleased]
+
+## [0.1.0] - 2026-09-07
 
 ### Added
 
@@ -30,6 +28,9 @@ source gives you.
 - Reconciliation that retires a runtime the scheduler has stopped answering for, and ends one that reaches its
   walltime as stopped rather than failed.
 - Local state under `~/.cybershuttle/control` at mode `0700`, with per-allocation credentials at `0600`.
+- An Apache-2.0 `LICENSE`, contribution and security policies, and reference documentation for the routes
+  (`docs/API.md`) and for the package layering, allocation lifecycle and trust boundaries
+  (`docs/ARCHITECTURE.md`).
 
 ### Changed
 
@@ -40,10 +41,17 @@ source gives you.
 - `--oauth-authority` accepts one tenant only: `common`, `consumers` and `organizations` are refused
   everywhere.
 - The smallest allocation a request may ask for is 2 cores and 4096 MB.
+- `POST /api/v1/runtimes` requires an `idempotencyKey`, which the runtime ID is derived from; a request without
+  one is refused rather than given a generated ID.
 
 ### Removed
 
 - `POST /api/v1/runtimes/script`, whose candidate script `POST /api/v1/runtimes/validate` already returns.
+- `refreshing` from the `GET /api/v1/runtimes` body; the read still starts the reconciliation it reported.
+- The `--state-dir`, `--ssh-bin`, `--timeout`, `--runtime-base`, `--user-ssh-config` and `--system-ssh-config`
+  global flags, and the `CSCTL_SSH_BIN`, `CSCTL_RUNTIME_BASE`, `CSCTL_USER_SSH_CONFIG` and
+  `CSCTL_SYSTEM_SSH_CONFIG` environment variables that set them. `--linkspan` and `--devtunnel-management-url`
+  are the global flags that remain, and each SSH command times out after a fixed 20 seconds.
 
 ### Fixed
 
@@ -59,3 +67,8 @@ source gives you.
 - Interactive SSH prompts and banners render non-ASCII as sent — a login QR code arrived as octal escapes —
   because an `ssh` child that inherits no UTF-8 locale is given one, as an `LC_ALL` that replaces any existing
   entry rather than following it.
+- A failure the API did not classify answers `500 internal_error` with a fixed message: the underlying text is
+  logged by the server rather than returned to the caller.
+
+[Unreleased]: https://github.com/cyber-shuttle/cs-control/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/cyber-shuttle/cs-control/releases/tag/v0.1.0
