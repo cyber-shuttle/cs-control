@@ -30,6 +30,12 @@ Notable changes to CyberShuttle Control. The format follows
   re-add the ones you want by pasting their `ssh` command. An `IdentityFile` may still name any path the
   daemon account can read — isolation is of configuration and connections, not of the filesystem.
 
+### Changed
+
+- A run record now carries the runtime's narration, and the live tail is dropped when the run is frozen. A
+  runtime that is no longer running therefore has no log tail in `GET /api/v1/runtimes`: what an allocation
+  said belongs to the run that said it, and a card outlives its runs.
+
 ### Fixed
 
 - A run was stamped as ending when it was recorded, not when it ended. A card that stopped days ago and was

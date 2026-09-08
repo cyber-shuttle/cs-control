@@ -482,9 +482,12 @@ func (s Service) ReconcileAll(ctx context.Context) error {
 			}
 			changed = true
 			// The first observation of a terminal state is the last moment the
-			// allocation's own sample window still describes it.
+			// allocation's own window and narration still describe it. Both move
+			// into the run and are dropped here: what a runtime that is no longer
+			// running said belongs to its run, not to its card.
 			if terminalRuntime(runtime.State) && recordRun(current, s.runOf(runtime)) {
 				s.Metrics.Forget(runtime.ID)
+				s.Logs.Forget(runtime.ID)
 			}
 		}
 		if changed {

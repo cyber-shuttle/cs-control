@@ -132,6 +132,43 @@ func TestARunKeepsTheTimeItActuallyEnded(t *testing.T) {
 	}
 }
 
+// What a runtime said belongs to the run that said it: the live tail is
+// process-local and dropped the moment the run ends, so a card that is no
+// longer running has no log and its run carries the whole of it.
+func TestARunKeepsTheNarrationAndTheCardLosesIt(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	service.Metrics = NewRuntimeMetrics()
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	runtime.State = "READY"
+	putRuntimes(t, service, runtime)
+	service.Logs.Append(runtime.ID, "Allocation is running")
+
+	t.Setenv("FAKE_STATUS_LINES", "101|COMPLETED|node1|"+runtime.JobName+"|3600")
+	if err := service.ReconcileAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runs := runsIn(t, service)
+	if len(runs) != 1 {
+		t.Fatalf("expected one run, got %d", len(runs))
+	}
+	if len(runs[0].Logs) == 0 {
+		t.Fatal("the run kept none of what the allocation said")
+	}
+	var found bool
+	for _, line := range runs[0].Logs {
+		if line.Text == "Allocation is running" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the run lost the narration: %+v", runs[0].Logs)
+	}
+	// The card is over, so nothing live remains to show beside its run.
+	if _, ok := service.Logs.Tail(runtime.ID); ok {
+		t.Fatal("a finished runtime kept its live tail")
+	}
+}
+
 func TestRunHistoryIsBounded(t *testing.T) {
 	current := &state{Version: stateVersion, Runtimes: map[string]*Runtime{}}
 	for index := 0; index < maxRunRecords+10; index++ {

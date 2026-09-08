@@ -373,13 +373,19 @@ does not remove the runs it accumulated.
         "cpuEfficiencyPct": 50,
         "memoryEfficiencyPct": 50
       },
-      "samples": []
+      "samples": [],
+      "logs": [
+        { "stream": "status", "text": "Allocation is running", "at": "2030-01-01T00:00:05Z" }
+      ]
     }
   ]
 }
 ```
 
-The record is frozen when the allocation ends, carrying its final sample window with it. `stats` comes from
+The record is frozen when the allocation ends, carrying its final sample window and its narration with it.
+Both are process-local and dropped at that moment, so the run is the only place either survives: a runtime
+that is no longer running carries no log tail in `GET /api/v1/runtimes`, because what it said belongs to the
+run that said it. `logs` has the same shape as the tails on that route and is absent when it said nothing. `stats` comes from
 Slurm's own accounting and is absent until it lands: `slurmdbd` flushes step usage a beat after a job ends, so
 it is read again on the sampling tick for ten minutes and then left as it is.
 

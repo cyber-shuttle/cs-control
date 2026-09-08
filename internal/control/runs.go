@@ -30,6 +30,9 @@ type RunResponse struct {
 	EndedAt    time.Time      `json:"endedAt"`
 	Stats      *RunStats      `json:"stats,omitempty"`
 	Samples    []MetricSample `json:"samples,omitempty"`
+	// What the allocation said while it ran. The live tail is process-local and
+	// dropped when the run ends, so this is the only place it survives.
+	Logs []RuntimeLogLine `json:"logs,omitempty"`
 }
 
 // RunRecord is the persisted run. Owner is held for filtering and, like the
@@ -51,9 +54,10 @@ func publicRuns(runs []RunRecord) []RunResponse {
 	return result
 }
 
-// runOf freezes what an allocation did, taking the sample window with it: the
-// window is process-local and about to be dropped, and it is most of what makes
-// the report readable when Slurm's accounting has nothing to add.
+// runOf freezes what an allocation did, taking its sample window and its
+// narration with it: both are process-local and about to be dropped, and
+// together they are most of what makes the report readable when Slurm's
+// accounting has nothing to add.
 //
 // It ended when it reached its terminal state, which is what UpdatedAt holds:
 // the reconciliation that retires a runtime stamps it, and a relaunch or a
@@ -66,6 +70,7 @@ func (s Service) runOf(runtime *Runtime) RunRecord {
 			Resources:  runtime.Resources,
 			FinalState: runtime.State, Error: runtime.Error, StartedAt: runtime.StartedAt,
 			EndedAt: runtime.UpdatedAt, Samples: s.Metrics.Series(runtime.ID),
+			Logs: s.runtimeLogLines(runtime.ID),
 		},
 		Owner: runtime.Owner,
 	}
@@ -183,4 +188,13 @@ func (s Service) attachRunStats(runtimeID, generation string, stats RunStats) er
 		}
 		return nil
 	})
+}
+
+// runtimeLogLines is the runtime's current tail, or nothing when it never spoke.
+func (s Service) runtimeLogLines(runtimeID string) []RuntimeLogLine {
+	tail, ok := s.Logs.Tail(runtimeID)
+	if !ok {
+		return nil
+	}
+	return tail.Lines
 }
