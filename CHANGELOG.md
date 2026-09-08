@@ -32,6 +32,11 @@ Notable changes to CyberShuttle Control. The format follows
 
 ### Fixed
 
+- A run was stamped as ending when it was recorded, not when it ended. A card that stopped days ago and was
+  then run again or deleted had its previous run frozen with `endedAt` set to that moment, so a long-finished
+  run read as one that had just stopped — and, beside a card that was running again, as the live session
+  itself. The terminal transition's own time is used instead.
+
 - The wall-time anchor was reset to the poll on every observation of a running job: `squeue` is asked for four
   fields and reports no elapsed time, but its row wins over the accounting row that does. A countdown built on
   `startedAt` would have restarted from the full walltime on every round.

@@ -54,6 +54,10 @@ func publicRuns(runs []RunRecord) []RunResponse {
 // runOf freezes what an allocation did, taking the sample window with it: the
 // window is process-local and about to be dropped, and it is most of what makes
 // the report readable when Slurm's accounting has nothing to add.
+//
+// It ended when it reached its terminal state, which is what UpdatedAt holds:
+// the reconciliation that retires a runtime stamps it, and a relaunch or a
+// delete days later must not restamp that run as having just finished.
 func (s Service) runOf(runtime *Runtime) RunRecord {
 	return RunRecord{
 		RunResponse: RunResponse{
@@ -61,7 +65,7 @@ func (s Service) runOf(runtime *Runtime) RunRecord {
 			Account: runtime.Account, Partition: runtime.Partition, RootFolder: runtime.RootFolder,
 			Resources:  runtime.Resources,
 			FinalState: runtime.State, Error: runtime.Error, StartedAt: runtime.StartedAt,
-			EndedAt: s.now(), Samples: s.Metrics.Series(runtime.ID),
+			EndedAt: runtime.UpdatedAt, Samples: s.Metrics.Series(runtime.ID),
 		},
 		Owner: runtime.Owner,
 	}

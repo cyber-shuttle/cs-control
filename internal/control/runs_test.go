@@ -108,6 +108,30 @@ func TestRunHistoryIsFilteredToItsOwner(t *testing.T) {
 
 // A card outlives its allocations and a machine accumulates cards, so the
 // history is bounded rather than growing with use.
+// A card that stopped days ago and is run again today did not finish today. The
+// relaunch used to restamp the previous run as having just ended, which made a
+// long-finished run read as the live one.
+func TestARunKeepsTheTimeItActuallyEnded(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	service.Metrics = NewRuntimeMetrics()
+	stopped := pendingRuntime("rt-111111111111", "alpha", "101")
+	stopped.State = "STOPPED"
+	ended := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	stopped.UpdatedAt = ended
+	setTestRuntimeMetadata(&stopped)
+
+	if err := service.RecordRun(&stopped); err != nil {
+		t.Fatal(err)
+	}
+	runs := runsIn(t, service)
+	if len(runs) != 1 {
+		t.Fatalf("expected one run, got %d", len(runs))
+	}
+	if !runs[0].EndedAt.Equal(ended) {
+		t.Fatalf("run ended at %s, want the terminal transition at %s", runs[0].EndedAt, ended)
+	}
+}
+
 func TestRunHistoryIsBounded(t *testing.T) {
 	current := &state{Version: stateVersion, Runtimes: map[string]*Runtime{}}
 	for index := 0; index < maxRunRecords+10; index++ {
