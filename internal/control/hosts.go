@@ -36,6 +36,26 @@ func (s Service) AddHost(request AddHostRequest) (sshconfig.Host, error) {
 	return host, nil
 }
 
+// UpdateHostRequest carries the ssh command that should now describe an alias.
+// The alias comes from the route, so an edit cannot rename what it edits.
+type UpdateHostRequest struct {
+	Command string `json:"command"`
+}
+
+// UpdateHost re-parses a pasted command over an entry this API wrote, so a
+// login that changed is corrected in place rather than removed and re-added.
+func (s Service) UpdateHost(alias string, request UpdateHostRequest) (sshconfig.Host, error) {
+	host, err := sshconfig.ParseCommand(alias, request.Command)
+	if err != nil {
+		return sshconfig.Host{}, err
+	}
+	if err := s.SSHConfig().Update(host); err != nil {
+		return sshconfig.Host{}, err
+	}
+	host.Managed = true
+	return host, nil
+}
+
 func (s Service) RemoveHost(alias string) (sshconfig.Host, error) {
 	if err := s.SSHConfig().Remove(alias); err != nil {
 		return sshconfig.Host{}, err

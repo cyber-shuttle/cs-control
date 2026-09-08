@@ -74,7 +74,7 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
   printf '__CSCTL_SCANCEL__\n'
   [ -z "${FAKE_CANCEL_ERRORS:-}" ] || printf '%b\n' "$FAKE_CANCEL_ERRORS"
   if [ -n "${FAKE_STATUS_LINES+x}" ]; then
-    printf '__CSCTL_SQUEUE__\n%b\n__CSCTL_SACCT__\n%b\n' "$FAKE_STATUS_LINES" "$FAKE_STATUS_LINES"
+    printf '__CSCTL_SQUEUE__\n%b\n__CSCTL_SACCT__\n%b\n' "${FAKE_QUEUE_LINES-$FAKE_STATUS_LINES}" "$FAKE_STATUS_LINES"
     exit 0
   fi
   state=$(cat "$FAKE_STATUS")

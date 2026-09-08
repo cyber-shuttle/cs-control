@@ -354,6 +354,12 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 				}
 			}
 			if name := strings.TrimSpace(parts[3]); queue || byID[observation.jobID].jobID == "" {
+				// The queue stands over accounting for state and node, but squeue is
+				// not asked for elapsed time; without this the anchor a countdown
+				// needs would be reset to this poll on every round.
+				if observation.elapsedSeconds == 0 {
+					observation.elapsedSeconds = byID[observation.jobID].elapsedSeconds
+				}
 				byID[observation.jobID], byName[name] = observation, observation
 			}
 		}

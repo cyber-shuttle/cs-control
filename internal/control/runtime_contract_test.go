@@ -17,7 +17,7 @@ func runtimeContractValue() Runtime {
 			ID: "rt-012345abcdef", Generation: "g-0123456789abcdef",
 			State: "READY", SSHHost: "delta", Account: "project-a", Partition: "cpu",
 			RootFolder: "$HOME/project", Resources: Resources{Cores: 2, MemoryMB: 2048, WallMinutes: 60},
-			CreatedAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), UpdatedAt: time.Date(2030, 1, 1, 0, 1, 0, 0, time.UTC),
+			CreatedAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), StartedAt: time.Date(2030, 1, 1, 0, 0, 30, 0, time.UTC), UpdatedAt: time.Date(2030, 1, 1, 0, 1, 0, 0, time.UTC),
 		},
 		Owner:  authn.Principal{Subject: "owner-subject", Tenant: "owner-tenant"},
 		Tunnel: TunnelMetadata{ID: "rt-012345abcdef-g-0123456789abcdef", ClusterID: "use", ExpiresAt: time.Date(2030, 1, 1, 1, 0, 0, 0, time.UTC)},

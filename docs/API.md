@@ -108,6 +108,18 @@ covering how a connection authenticates or keeps itself alive; every other optio
 trailing remote command are refused with `invalid_ssh_command`. The response is the resulting host, and an
 alias that already exists is `ssh_host_exists`.
 
+### `PUT /api/v1/ssh/{alias}` → 200
+
+Replaces a managed entry with what the command now says, so a login whose host, port, user or jump
+changed is corrected without losing its alias. The body is the same pasted command `POST` takes, and it
+is parsed by the same rules; the alias comes from the path, so an edit cannot rename what it edits.
+
+```json
+{ "command": "ssh -p 2222 -i ~/.ssh/id_ed25519 -J bastion alice@login2.delta.example.edu" }
+```
+
+The response is the resulting host. An alias outside the managed block is `ssh_host_not_managed`.
+
 ### `DELETE /api/v1/ssh/{alias}` → 200
 
 Removes a managed entry. An alias outside the managed block is `ssh_host_not_managed`.
@@ -230,12 +242,15 @@ The response is one runtime record, which is also the item shape everywhere else
   "rootFolder": "$HOME/project",
   "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60 },
   "createdAt": "2030-01-01T00:00:00Z",
+  "startedAt": "2030-01-01T00:00:30Z",
   "updatedAt": "2030-01-01T00:01:00Z"
 }
 ```
 
 `state` is one of `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, `FAILED`. `account` and
-`error` are omitted when empty. Owner, tunnel, job ID, job name, node and remote paths are held but never
+`error` are omitted when empty. `startedAt` is when Slurm was first seen running the allocation, taken from
+the scheduler's own elapsed figure rather than from a poll, and is absent until it starts: with
+`resources.wallMinutes` it is the deadline a client counts down to, so a queue wait is never mistaken for one. Owner, tunnel, job ID, job name, node and remote paths are held but never
 returned.
 
 ### `GET /api/v1/runtimes` → 200 or 304

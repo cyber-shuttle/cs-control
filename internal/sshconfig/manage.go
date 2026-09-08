@@ -199,28 +199,43 @@ func (c Config) Add(host Host) error {
 
 // Remove deletes an entry this package wrote. A host the user declares
 // elsewhere in their configuration is reported rather than rewritten.
-func (c Config) Remove(alias string) error {
+func (c Config) Remove(alias string) error { return c.replaceStanza(alias, nil) }
+
+// Update rewrites a managed entry to what the pasted command now says. The
+// alias is the entry being edited, so it keeps both its name and its place in
+// the block.
+func (c Config) Update(host Host) error { return c.replaceStanza(host.Name, stanza(host)) }
+
+func (c Config) replaceStanza(alias string, replacement []string) error {
 	if !ValidAlias(alias) {
 		return ErrInvalidAlias
 	}
 	return c.rewrite(func(lines []string) ([]string, error) {
-		begin, end := blockBounds(lines)
-		if begin < 0 {
+		start, stop, ok := managedStanza(lines, alias)
+		if !ok {
 			return nil, errUnmanaged(alias)
 		}
-		for index := begin + 1; index < end; index++ {
-			fields := strings.Fields(lines[index])
-			if len(fields) != 2 || !strings.EqualFold(fields[0], "Host") || fields[1] != alias {
-				continue
-			}
-			stop := index + 1
-			for stop < end && !strings.EqualFold(firstField(lines[stop]), "Host") {
-				stop++
-			}
-			return append(lines[:index:index], lines[stop:]...), nil
-		}
-		return nil, errUnmanaged(alias)
+		return append(lines[:start:start], append(replacement, lines[stop:]...)...), nil
 	})
+}
+
+// managedStanza bounds alias's entry inside the managed block: its Host line
+// through to the line before the next Host, so both callers splice the same
+// span.
+func managedStanza(lines []string, alias string) (int, int, bool) {
+	begin, end := blockBounds(lines)
+	for index := begin + 1; begin >= 0 && index < end; index++ {
+		fields := strings.Fields(lines[index])
+		if len(fields) != 2 || !strings.EqualFold(fields[0], "Host") || fields[1] != alias {
+			continue
+		}
+		stop := index + 1
+		for stop < end && !strings.EqualFold(firstField(lines[stop]), "Host") {
+			stop++
+		}
+		return index, stop, true
+	}
+	return 0, 0, false
 }
 
 func errUnmanaged(alias string) error {

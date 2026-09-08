@@ -43,37 +43,55 @@ func newJupyterToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
+// tunnelEndpoint is one of an allocation's tunnel ports resolved to a live URI
+// and the credential that reaches it.
+type tunnelEndpoint struct {
+	uri        string
+	credential GenerationCredential
+	expiresAt  time.Time
+}
+
+// allocationEndpoint resolves a named port on the allocation's own tunnel. The
+// reasons it cannot are distinct failures a caller reports in its own words.
+func (s Service) allocationEndpoint(ctx context.Context, runtime Runtime, description string) (tunnelEndpoint, error) {
+	if s.Tunnels == nil || !idPattern.MatchString(runtime.ID) || !generationPattern.MatchString(runtime.Generation) {
+		return tunnelEndpoint{}, errors.New("the runtime is not addressable")
+	}
+	credential, err := s.Credentials.Get(runtime.ID, runtime.Generation)
+	if err != nil {
+		return tunnelEndpoint{}, errors.New("this allocation generation has no stored credential")
+	}
+	record, err := s.Tunnels.Get(ctx, devtunnel.GetRequest{AccessToken: credential.ConnectToken, TunnelID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID})
+	if err != nil {
+		return tunnelEndpoint{}, errors.New("the allocation tunnel could not be reached")
+	}
+	// The service slides a hosted tunnel's expiration forward, so only the live
+	// record is authoritative; the persisted value is a creation-time record.
+	if !record.ExpiresAt.After(s.now()) {
+		return tunnelEndpoint{}, errors.New("the allocation tunnel has expired")
+	}
+	uri, err := allocationPortURI(record, runtime.Tunnel, description)
+	if err != nil {
+		return tunnelEndpoint{}, err
+	}
+	return tunnelEndpoint{uri: uri, credential: credential, expiresAt: record.ExpiresAt.UTC()}, nil
+}
+
 func (s Service) RuntimeAccess(ctx context.Context, runtime Runtime) (*RuntimeAccessResponse, error) {
 	// The causes below are distinct failures that otherwise arrive as one 409.
 	unavailable := func(reason string) (*RuntimeAccessResponse, error) {
 		return nil, apierr.New("runtime_access_unavailable", "Linkspan access is unavailable: "+reason, 409)
 	}
-	if s.Tunnels == nil || !idPattern.MatchString(runtime.ID) || !generationPattern.MatchString(runtime.Generation) {
-		return unavailable("the runtime is not addressable")
-	}
 	if runtime.State != "READY" {
 		return unavailable("the runtime is " + strings.ToLower(runtime.State))
 	}
-	credential, err := s.Credentials.Get(runtime.ID, runtime.Generation)
-	if err != nil {
-		return unavailable("this allocation generation has no stored credential")
-	}
-	record, err := s.Tunnels.Get(ctx, devtunnel.GetRequest{AccessToken: credential.ConnectToken, TunnelID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID})
-	if err != nil {
-		return unavailable("the allocation tunnel could not be reached")
-	}
-	// The service slides a hosted tunnel's expiration forward, so only the live
-	// record is authoritative; the persisted value is a creation-time record.
-	if !record.ExpiresAt.After(s.now()) {
-		return unavailable("the allocation tunnel has expired")
-	}
-	uri, err := allocationPortURI(record, runtime.Tunnel, jupyterPortDescription)
+	endpoint, err := s.allocationEndpoint(ctx, runtime, jupyterPortDescription)
 	if err != nil {
 		return unavailable(err.Error())
 	}
 	return &RuntimeAccessResponse{
-		RuntimeID: runtime.ID, Generation: runtime.Generation, ExpiresAt: record.ExpiresAt.UTC(),
-		Jupyter: RuntimeJupyterAccess{URI: uri, Token: credential.JupyterToken},
+		RuntimeID: runtime.ID, Generation: runtime.Generation, ExpiresAt: endpoint.expiresAt,
+		Jupyter: RuntimeJupyterAccess{URI: endpoint.uri, Token: endpoint.credential.JupyterToken},
 	}, nil
 }
 

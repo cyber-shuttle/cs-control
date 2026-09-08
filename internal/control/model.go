@@ -97,21 +97,22 @@ type RuntimeResponse struct {
 	Resources  Resources `json:"resources"`
 	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	// When Slurm was first seen running this allocation, and so what --time is
+	// measured from. Absent until it starts, so a client can tell a queue wait
+	// from a countdown.
+	StartedAt time.Time `json:"startedAt,omitzero"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 type Runtime struct {
 	RuntimeResponse
-	Owner   authn.Principal `json:"owner"`
-	Tunnel  TunnelMetadata  `json:"tunnel"`
-	JobID   string          `json:"jobId,omitempty"`
-	JobName string          `json:"jobName"`
-	// When Slurm was first seen running this allocation, and so what --time is
-	// measured from. Zero until it starts.
-	StartedAt     time.Time `json:"startedAt,omitempty"`
-	Node          string    `json:"node,omitempty"`
-	PrivateRoot   string    `json:"privateRoot"`
-	WorkspaceRoot string    `json:"workspaceRoot"`
+	Owner         authn.Principal `json:"owner"`
+	Tunnel        TunnelMetadata  `json:"tunnel"`
+	JobID         string          `json:"jobId,omitempty"`
+	JobName       string          `json:"jobName"`
+	Node          string          `json:"node,omitempty"`
+	PrivateRoot   string          `json:"privateRoot"`
+	WorkspaceRoot string          `json:"workspaceRoot"`
 }
 
 type RuntimeList struct {

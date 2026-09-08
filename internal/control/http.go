@@ -79,7 +79,7 @@ func (a *HTTPAPI) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, handlers := range map[string]map[string]http.HandlerFunc{
 		"/api/v1/ssh":                  {http.MethodGet: answer(http.StatusOK, a.listHosts), http.MethodPost: answer(http.StatusCreated, a.addHost)},
-		"/api/v1/ssh/{alias}":          {http.MethodDelete: answer(http.StatusOK, a.removeHost)},
+		"/api/v1/ssh/{alias}":          {http.MethodPut: answer(http.StatusOK, a.updateHost), http.MethodDelete: answer(http.StatusOK, a.removeHost)},
 		"/api/v1/ssh/{alias}/auth":     {http.MethodGet: requireUpgrade("SSH authentication requires a WebSocket", a.sshAuth)},
 		"/api/v1/ssh/{alias}/slurm":    {http.MethodGet: answer(http.StatusOK, a.discoverSlurm)},
 		"/api/v1/ssh/{alias}/test":     {http.MethodPost: answer(http.StatusOK, a.testHost)},
@@ -128,6 +128,14 @@ func (a *HTTPAPI) addHost(request *http.Request) (sshconfig.Host, error) {
 		return sshconfig.Host{}, err
 	}
 	return a.Service.AddHost(add)
+}
+
+func (a *HTTPAPI) updateHost(request *http.Request) (sshconfig.Host, error) {
+	var update UpdateHostRequest
+	if err := decodeJSON(request, &update); err != nil {
+		return sshconfig.Host{}, err
+	}
+	return a.Service.UpdateHost(request.PathValue("alias"), update)
 }
 
 func (a *HTTPAPI) removeHost(request *http.Request) (sshconfig.Host, error) {

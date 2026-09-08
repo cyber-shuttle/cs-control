@@ -39,6 +39,7 @@ func TestHTTPRouteSurfaceRetainsOnlyRequiredControlOperations(t *testing.T) {
 		{http.MethodPost, "/api/v1/runtimes/rt-012345abcdef/stop"},
 		{http.MethodGet, "/api/v1/ssh"},
 		{http.MethodPost, "/api/v1/ssh"},
+		{http.MethodPut, "/api/v1/ssh/delta"},
 		{http.MethodDelete, "/api/v1/ssh/delta"},
 		{http.MethodPost, "/api/v1/ssh/delta/test"},
 		{http.MethodGet, "/api/v1/ssh/delta/auth"},
