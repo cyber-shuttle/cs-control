@@ -70,8 +70,8 @@ The login node supplies only the binary a job cannot start without, the Linkspan
 workflow document, both in one constant script during create. The binary belongs to the account rather than to
 a workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens. The environment, its
 dependencies, the server, and the wait for that server to answer all happen inside the allocation: the workflow
-is one `jupyter.sessions.start` step, and Linkspan builds the environment under `$HOME/.linkspan`, starts the
-server and publishes its port.
+is one `jupyter.sessions.start` step, and Linkspan builds the environment under `$HOME/.cybershuttle`, starts
+the server and publishes its port.
 
 An allocation hosts a tunnel this control plane created, so its Linkspan must accept `--tunnel-host-token`.
 Preparation refuses a host whose Linkspan does not, rather than letting the allocation fail on its first flag.

@@ -102,8 +102,8 @@ account, it:
 - writes the workflow document the job will run, under `$HOME/.cybershuttle/runtimes/<runtime id>`.
 
 Linkspan is the CyberShuttle agent that runs as the batch job's main process: it hosts the tunnel, installs
-`uv`, builds the Python environment under `$HOME/.linkspan` and starts Jupyter Server on the compute node.
-Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle` and `$HOME/.linkspan`. `csctl` keeps a multiplexed OpenSSH connection to the
+`uv`, builds the Python environment under `$HOME/.cybershuttle` and starts Jupyter Server on the compute node.
+Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle`. `csctl` keeps a multiplexed OpenSSH connection to the
 login node open between operations and starts no other long-lived process there; the allocation itself runs on
 a compute node. The flags and outputs `csctl` depends on are listed in
 [Linkspan's compatibility document](https://github.com/cyber-shuttle/linkspan/blob/main/docs/COMPATIBILITY.md).
