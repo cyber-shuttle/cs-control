@@ -27,10 +27,10 @@ func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime R
 	// tunnel exists, so it rides the command line alongside the tokens and
 	// leaves the reviewed script byte-identical to the one Slurm validated.
 	ports := allocationPorts(runtime.ID, runtime.Generation)
-	// Jupyter Server reads its own token and port from the environment, so the
-	// workflow that starts it names neither and nothing secret is written down.
-	export := fmt.Sprintf("--export=ALL,JUPYTER_TOKEN=%s,CS_TUNNEL_HOST_TOKEN=%s,JUPYTER_PORT=%d,CS_CONTROL_PORT=%d,CS_TUNNEL_ID=%s,CS_TUNNEL_CLUSTER=%s",
-		jupyterToken, hostToken, ports.jupyter, ports.control, runtime.Tunnel.ID, runtime.Tunnel.ClusterID)
+	// Linkspan starts Jupyter Server with the token it inherits, so the workflow
+	// that asks for it names no token and nothing secret is written down.
+	export := fmt.Sprintf("--export=ALL,JUPYTER_TOKEN=%s,CS_TUNNEL_HOST_TOKEN=%s,CS_CONTROL_PORT=%d,CS_TUNNEL_ID=%s,CS_TUNNEL_CLUSTER=%s",
+		jupyterToken, hostToken, ports.control, runtime.Tunnel.ID, runtime.Tunnel.ClusterID)
 	outText, errText, runErr := s.Runner.RunOutput(ctx, host, strings.NewReader(script), "sbatch", "--job-name="+jobName, export, "--parsable")
 	if runErr != nil {
 		message := sshexec.FailureMessage(errText, runErr)
@@ -107,10 +107,6 @@ func buildScript(runtime Runtime, linkspan string) string {
 		`exec "$LINKSPAN_BIN" --port "$CS_CONTROL_PORT" --tunnel-enable --tunnel-id "$CS_TUNNEL_ID" --tunnel-cluster "$CS_TUNNEL_CLUSTER" --tunnel-host-token "$CS_TUNNEL_HOST_TOKEN" --workflow `+sshexec.ShellQuote(runtimeWorkflowPath(runtime)),
 		"")
 	return strings.Join(lines, "\n")
-}
-
-func jupyterEnvironment(home string) string {
-	return strings.TrimSuffix(home, "/") + "/.cybershuttle/jupyter-env"
 }
 
 func minutesToWalltime(minutes int) string {

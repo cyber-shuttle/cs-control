@@ -22,7 +22,7 @@ const tunnelAuthorizationHeader = "X-Tunnel-Authorization"
 // sampleRuntime reads one live sample from the Linkspan the allocation is
 // running, over the control port already declared on its tunnel.
 func (s Service) sampleRuntime(ctx context.Context, runtime Runtime) (MetricSample, error) {
-	endpoint, err := s.allocationEndpoint(ctx, runtime, controlPortDescription)
+	endpoint, err := s.allocationEndpoint(ctx, runtime, allocationPorts(runtime.ID, runtime.Generation).control)
 	if err != nil {
 		return MetricSample{}, err
 	}

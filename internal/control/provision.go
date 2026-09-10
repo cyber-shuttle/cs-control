@@ -16,13 +16,10 @@ import (
 // Two downloads is not a scheduler round trip, so it gets its own budget.
 const provisionTimeout = 5 * time.Minute
 
-// Jupyter Server requires 3.10 or newer, and uv supplies it rather than the host.
-const provisionPythonVersion = "3.12"
-
 // provisionScript is deliberately constant: paths and the workflow document
 // arrive as arguments, so nothing derived from a request is written into the
-// remote shell program. It installs Linkspan and uv, writes the workflow, and
-// reports each outcome as one line. Present and working is left alone.
+// remote shell program. It installs Linkspan, writes the workflow, and reports
+// each outcome as one line. Present and working is left alone.
 const provisionScript = `set -u
 LC_ALL=C
 LANG=C
@@ -36,16 +33,6 @@ document=$4
 case "$home" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
 case "$linkspan" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
 case "$workflow" in /*) ;; *) printf '%s\n' 'error=arguments'; exit 70 ;; esac
-
-uv="$home/.local/bin/uv"
-if [ -x "$uv" ] || command -v uv >/dev/null 2>&1; then
-  printf '%s\n' 'uv=present'
-else
-  curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh >/dev/null 2>&1 || {
-    printf '%s\n' 'error=uv-install'; exit 71; }
-  [ -x "$uv" ] || { printf '%s\n' 'error=uv-missing'; exit 72; }
-  printf '%s\n' 'uv=installed'
-fi
 
 # Newest wins, and a tie goes to the release: a build made by hand carries a
 # version above the published one and is left alone, while a release that has
@@ -116,8 +103,6 @@ printf '%s\n' 'provision=complete'
 
 // What each refusal means to the person who asked for a runtime.
 var provisionFailures = map[string]string{
-	"uv-install":           "could not install uv, which the allocation builds its environment with",
-	"uv-missing":           "uv is not executable after installation",
 	"arguments":            "the host was given paths it could not use",
 	"linkspan-directory":   "could not create the directory the Linkspan binary belongs in",
 	"architecture":         "the host reports an architecture Linkspan is not released for",
@@ -127,12 +112,12 @@ var provisionFailures = map[string]string{
 	"workflow":             "could not write the workflow the allocation runs",
 }
 
-// provisionRuntime gives a host the two binaries an allocation needs and the
+// provisionRuntime gives a host the binary an allocation needs and the
 // workflow it will run, in one round trip before submission, leaving whatever is
 // already there untouched.
 func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Runtime, home, linkspan string) error {
 	// One preparation per host: a second caller is told to come back rather than
-	// run a second uv against the environment the first is building.
+	// race the first over the binary it is installing.
 	if _, busy := hostPreparations.LoadOrStore(alias, true); busy {
 		return apierr.New("runtime_provisioning_in_progress",
 			"The runtime environment on "+alias+" is still being prepared. Try again in a moment.", http.StatusConflict)
@@ -142,7 +127,7 @@ func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Run
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionTimeout)
 	defer cancel()
 	s.runtimeStatus(runtime.ID, "Preparing the runtime environment")
-	document := base64.StdEncoding.EncodeToString([]byte(runtimeWorkflow(runtime, home)))
+	document := base64.StdEncoding.EncodeToString([]byte(runtimeWorkflow(runtime)))
 	remote := strings.Join([]string{
 		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-s"), sshexec.ShellQuote("--"),
 		sshexec.ShellQuote("csctl-provision"), sshexec.ShellQuote(home), sshexec.ShellQuote(linkspan),
@@ -164,13 +149,8 @@ func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Run
 	if report["provision"] != "complete" {
 		return apierr.New("runtime_provisioning_failed", provisionMessage(alias, report["error"], errText), http.StatusBadGateway)
 	}
-	for _, installed := range []struct{ key, what string }{
-		{"uv", "uv"},
-		{"linkspan", "Linkspan"},
-	} {
-		if report[installed.key] == "installed" {
-			s.runtimeStatus(runtime.ID, "Installed "+installed.what)
-		}
+	if report["linkspan"] == "installed" {
+		s.runtimeStatus(runtime.ID, "Installed Linkspan")
 	}
 	s.runtimeStatus(runtime.ID, "Runtime environment ready")
 	return nil
