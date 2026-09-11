@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/framed"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
@@ -155,8 +156,15 @@ func (s Service) applyObservation(runtime *Runtime, observation schedulerObserva
 	return lines
 }
 
+// schedulerScope is one batched scheduler conversation: one owner's runtimes on
+// one host. Two owners naming the same alias are two different logins.
+type schedulerScope struct {
+	owner authn.Principal
+	host  string
+}
+
 // reconcileSnapshots performs all scheduler and endpoint I/O without holding the
-// state lock, batching scheduler calls into one SSH execution per host.
+// state lock, batching scheduler calls into one SSH execution per owner and host.
 //
 // Narration is returned per snapshot rather than appended to the tail here: the
 // round runs on a snapshot that the owner may have superseded by stopping or
@@ -164,14 +172,15 @@ func (s Service) applyObservation(runtime *Runtime, observation schedulerObserva
 func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) ([]Runtime, [][]string) {
 	results := append([]Runtime(nil), snapshots...)
 	narration := make([][]string, len(results))
-	byHost := map[string][]int{}
+	byScope := map[schedulerScope][]int{}
 	for i := range results {
 		if reconcile(results[i].State) {
-			byHost[results[i].SSHHost] = append(byHost[results[i].SSHHost], i)
+			scope := schedulerScope{owner: results[i].Owner, host: results[i].SSHHost}
+			byScope[scope] = append(byScope[scope], i)
 		}
 	}
 	var wg sync.WaitGroup
-	for host, indexes := range byHost {
+	for scope, indexes := range byScope {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -179,7 +188,9 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Runtime) ([
 			for position, index := range indexes {
 				group[position] = results[index]
 			}
-			observations, cancelErrors, err := s.schedulerObservations(ctx, host, group)
+			// As the owner: the alias resolves through that owner's configuration,
+			// and `squeue --me` answers for whoever it logs in as.
+			observations, cancelErrors, err := s.forPrincipal(scope.owner).schedulerObservations(ctx, scope.host, group)
 			// Service shutdown or a superseded background refresh must leave the last
 			// good persisted runtime state completely untouched.
 			if err != nil && ctx.Err() != nil {
@@ -354,6 +365,12 @@ func (s Service) schedulerObservations(ctx context.Context, host string, runtime
 				}
 			}
 			if name := strings.TrimSpace(parts[3]); queue || byID[observation.jobID].jobID == "" {
+				// The queue stands over accounting for state and node, but squeue is
+				// not asked for elapsed time; without this the anchor a countdown
+				// needs would be reset to this poll on every round.
+				if observation.elapsedSeconds == 0 {
+					observation.elapsedSeconds = byID[observation.jobID].elapsedSeconds
+				}
 				byID[observation.jobID], byName[name] = observation, observation
 			}
 		}

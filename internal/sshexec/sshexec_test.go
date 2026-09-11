@@ -178,3 +178,55 @@ func listenUnix(t *testing.T, path string) net.Listener {
 	}
 	return listener
 }
+
+// Two callers naming the same alias reach it through their own configurations,
+// so the multiplexed connection must not be shared: one authenticating a host
+// must never hand the other an authenticated session.
+func TestControlPathIsPerConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	base := Runner{ControlDir: dir}
+	mine := base
+	mine.Hosts.UserPath = filepath.Join(dir, "a", "config")
+	theirs := base
+	theirs.Hosts.UserPath = filepath.Join(dir, "b", "config")
+
+	minePath, err := mine.controlPath("delta", "identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirsPath, err := theirs.controlPath("delta", "identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if minePath == theirsPath {
+		t.Fatal("two configurations share one control master for the same alias")
+	}
+	// The same caller keeps one master, or every call would authenticate again.
+	again, err := mine.controlPath("delta", "identity")
+	if err != nil || again != minePath {
+		t.Fatalf("control path is not stable for one caller: %q vs %q (%v)", again, minePath, err)
+	}
+}
+
+// The configuration is named explicitly, so an alias never resolves through the
+// configuration of the account this daemon happens to run as.
+func TestArgsNameTheCallersConfiguration(t *testing.T) {
+	runner := Runner{ControlDir: t.TempDir()}
+	runner.Hosts.UserPath = "/tmp/some/caller/config"
+	args, err := runner.sshArgs("delta", false, "identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-F /tmp/some/caller/config") {
+		t.Fatalf("ssh was not pointed at the caller's configuration: %s", joined)
+	}
+	// An unset configuration must not produce a -F with nothing after it.
+	bare, err := Runner{ControlDir: t.TempDir()}.sshArgs("delta", false, "identity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(bare, " "), "-F") {
+		t.Fatalf("an unset configuration still produced -F: %v", bare)
+	}
+}

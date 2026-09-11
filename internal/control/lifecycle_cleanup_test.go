@@ -16,7 +16,7 @@ func TestRuntimeScriptExecsLinkspanWithTheAllocationIdentity(t *testing.T) {
 	argsLog := filepath.Join(dir, "args")
 	if err := os.WriteFile(linkspan, []byte(`#!/bin/sh
 printf '%s\n' "$@" > "$ARGS_LOG"
-printf '%s\n' "$JUPYTER_TOKEN" "$JUPYTER_PORT" > "$ENV_LOG"
+printf '%s\n' "$JUPYTER_TOKEN" > "$ENV_LOG"
 exit 7
 `), 0o700); err != nil {
 		t.Fatal(err)
@@ -38,7 +38,7 @@ exit 7
 	ports := allocationPorts(runtime.ID, runtime.Generation)
 	command.Env = append(os.Environ(), "HOME="+dir, "ARGS_LOG="+argsLog, "ENV_LOG="+filepath.Join(dir, "env"),
 		"JUPYTER_TOKEN="+jupyterToken, "CS_TUNNEL_HOST_TOKEN="+hostToken,
-		fmt.Sprintf("JUPYTER_PORT=%d", ports.jupyter), fmt.Sprintf("CS_CONTROL_PORT=%d", ports.control),
+		fmt.Sprintf("CS_CONTROL_PORT=%d", ports.control),
 		"CS_TUNNEL_ID="+tunnelID, "CS_TUNNEL_CLUSTER="+tunnelCluster)
 	if err := command.Run(); err == nil || err.(*exec.ExitError).ExitCode() != 7 {
 		t.Fatalf("script did not exec Linkspan or preserve status 7: %v", err)
@@ -51,10 +51,9 @@ exit 7
 			t.Fatalf("Linkspan argv missing %q: %q", required, got)
 		}
 	}
-	// Linkspan inherits what Jupyter Server reads for itself, so the workflow
-	// never names the token or the port.
-	got := string(mustRead(t, filepath.Join(dir, "env")))
-	if !strings.Contains(got, jupyterToken) || !strings.Contains(got, strconv.Itoa(int(ports.jupyter))) {
-		t.Fatalf("Linkspan did not inherit the Jupyter environment: %q", got)
+	// Linkspan starts Jupyter Server with the token it inherits, so the workflow
+	// never names it.
+	if got := string(mustRead(t, filepath.Join(dir, "env"))); !strings.Contains(got, jupyterToken) {
+		t.Fatalf("Linkspan did not inherit the Jupyter token: %q", got)
 	}
 }

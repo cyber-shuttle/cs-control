@@ -96,16 +96,14 @@ global cluster's tunnel quota is exhausted; it changes tunnel management only.
 Creating a runtime prepares the login node over SSH before it submits anything. In one connection, as your
 account, it:
 
-- installs [uv](https://docs.astral.sh/uv/) into `$HOME/.local/bin` by piping `https://astral.sh/uv/install.sh`
-  into `sh`, unless a `uv` is already present;
 - downloads a [Linkspan](https://github.com/cyber-shuttle/linkspan) release tarball from GitHub into
   `$HOME/.cybershuttle/bin`, unless the installed one is current, and refuses the host if that Linkspan does
   not accept `--tunnel-host-token`;
 - writes the workflow document the job will run, under `$HOME/.cybershuttle/runtimes/<runtime id>`.
 
-Linkspan is the CyberShuttle agent that runs as the batch job's main process: it hosts the tunnel, builds the
-Python environment and starts Jupyter Server on the compute node. Nothing runs as root and nothing is installed
-outside `$HOME/.cybershuttle` and `$HOME/.local/bin`. `csctl` keeps a multiplexed OpenSSH connection to the
+Linkspan is the CyberShuttle agent that runs as the batch job's main process: it hosts the tunnel, installs
+`uv`, builds the Python environment under `$HOME/.cybershuttle` and starts Jupyter Server on the compute node.
+Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle`. `csctl` keeps a multiplexed OpenSSH connection to the
 login node open between operations and starts no other long-lived process there; the allocation itself runs on
 a compute node. The flags and outputs `csctl` depends on are listed in
 [Linkspan's compatibility document](https://github.com/cyber-shuttle/linkspan/blob/main/docs/COMPATIBILITY.md).

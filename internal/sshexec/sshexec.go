@@ -69,6 +69,12 @@ func (r Runner) sshArgs(alias string, interactive bool, identity string) ([]stri
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 	}
+	// Name the configuration rather than inheriting whichever one belongs to the
+	// account this daemon runs as: the file is the caller's own, and an alias
+	// must resolve to what that caller configured and to nothing else.
+	if r.Hosts.UserPath != "" {
+		args = append(args, "-F", r.Hosts.UserPath)
+	}
 	if r.ControlDir != "" {
 		path, err := r.controlPath(alias, identity)
 		if err != nil {
@@ -214,7 +220,10 @@ func (r Runner) controlPath(alias, identity string) (string, error) {
 	}
 	// ControlDir names a stable namespace, not the socket location: OpenSSH
 	// appends a temporary suffix while binding and macOS caps AF_UNIX paths hard.
-	hash := sha256.Sum256([]byte(alias + "\x00" + identity + "\x00" + r.ControlDir + "\x00" + r.Bin()))
+	// The configuration is part of the identity of the connection: two callers
+	// naming the same alias reach it under their own configurations, so they must
+	// not share one authenticated master.
+	hash := sha256.Sum256([]byte(alias + "\x00" + identity + "\x00" + r.ControlDir + "\x00" + r.Bin() + "\x00" + r.Hosts.UserPath))
 	baseName := "m-" + hex.EncodeToString(hash[:controlSocketHashBytes])
 	directory, err := privateControlDirectory(baseName)
 	if err != nil {
@@ -299,7 +308,11 @@ func (runner Runner) MasterHealthy(alias, path string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, runner.Bin(), "-S", path, "-O", "check", alias)
+	args := []string{"-S", path, "-O", "check"}
+	if runner.Hosts.UserPath != "" {
+		args = append(args, "-F", runner.Hosts.UserPath)
+	}
+	cmd := exec.CommandContext(ctx, runner.Bin(), append(args, alias)...)
 	cmd.Env = ChildEnv()
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	return cmd.Run() == nil

@@ -374,7 +374,7 @@ func serveSSHRoute(auth *SSHAuthManager) http.Handler {
 				httpx.WriteError(writer, apierr.New("ssh_authentication_unavailable", "SSH authentication is unavailable", 503))
 				return
 			}
-			auth.ServeWebSocket(writer, request, segments[1])
+			auth.ServeWebSocket(writer, request, segments[1], auth.runner)
 		default:
 			httpx.WriteError(writer, apierr.New("not_found", "route not found", 404))
 		}

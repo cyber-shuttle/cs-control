@@ -325,6 +325,20 @@ func TestStartedAtComesFromSlurmElapsedNotThePollTime(t *testing.T) {
 	}
 }
 
+// squeue is asked for four fields and so reports no elapsed time. Its row wins
+// on state and node by design, and must not take the anchor down with it.
+func TestQueueRowDoesNotResetTheAccountingElapsedAnchor(t *testing.T) {
+	service, _, _ := reconciliationService(t)
+	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
+	t.Setenv("FAKE_QUEUE_LINES", "101|RUNNING|node1|"+runtime.JobName)
+	t.Setenv("FAKE_STATUS_LINES", "101|RUNNING|node1|"+runtime.JobName+"|7200")
+	putRuntimes(t, service, runtime)
+	got, _ := service.reconcileSnapshots(context.Background(), []Runtime{runtime})
+	if elapsed := time.Since(got[0].StartedAt); elapsed < 2*time.Hour-time.Minute {
+		t.Fatalf("a two-hour-old job was anchored %s ago: the queue row reset it", elapsed)
+	}
+}
+
 // Slurm kills a running job at its --time, so an allocation anchored further
 // back than that is over the moment it is seen. A queued one may wait for days
 // under no such deadline: only the scheduler retires that, and only by answering.

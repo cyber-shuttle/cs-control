@@ -52,7 +52,7 @@ func TestRuntimeAccessDiscoversOwnerJupyterWithoutCallingTheAllocation(t *testin
 	runtime := readyAccessRuntime(now)
 	manager := &testTunnelManager{getResponse: &devtunnel.Record{
 		ID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID, ExpiresAt: runtime.Tunnel.ExpiresAt,
-		Ports: []devtunnel.PortRecord{{PortNumber: 31001, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
+		Ports: []devtunnel.PortRecord{{PortNumber: allocationPorts(runtime.ID, runtime.Generation).jupyter, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
 	}}
 	service := Service{Store: Store{Dir: t.TempDir()}, Tunnels: manager, Credentials: CredentialStore{Dir: t.TempDir() + "/credentials"}, Now: func() time.Time { return now }}
 	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {
@@ -93,7 +93,7 @@ func TestRuntimeAccessDiscoversOwnerJupyterWithoutCallingTheAllocation(t *testin
 func TestRuntimeAccessIsOwnerOnly(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	runtime := readyAccessRuntime(now)
-	manager := &testTunnelManager{getResponse: &devtunnel.Record{ID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID, ExpiresAt: runtime.Tunnel.ExpiresAt, Ports: []devtunnel.PortRecord{{PortNumber: 31001, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms"}}}}}
+	manager := &testTunnelManager{getResponse: &devtunnel.Record{ID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID, ExpiresAt: runtime.Tunnel.ExpiresAt, Ports: []devtunnel.PortRecord{{PortNumber: allocationPorts(runtime.ID, runtime.Generation).jupyter, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms"}}}}}
 	service := Service{Store: Store{Dir: t.TempDir()}, Tunnels: manager, Credentials: CredentialStore{Dir: t.TempDir() + "/credentials"}, Now: func() time.Time { return now }}
 	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestRuntimeAccessAcceptsATunnelWhoseExpirationTheServiceExtended(t *testing
 	extended := runtime.Tunnel.ExpiresAt.Add(17 * time.Minute)
 	manager := &testTunnelManager{getResponse: &devtunnel.Record{
 		ID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID, ExpiresAt: extended,
-		Ports: []devtunnel.PortRecord{{PortNumber: 31001, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
+		Ports: []devtunnel.PortRecord{{PortNumber: allocationPorts(runtime.ID, runtime.Generation).jupyter, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
 	}}
 	service := Service{Store: Store{Dir: t.TempDir()}, Tunnels: manager, Credentials: CredentialStore{Dir: t.TempDir() + "/credentials"}, Now: func() time.Time { return now }}
 	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {
@@ -144,7 +144,7 @@ func TestRuntimeAccessRefusesAnExpiredTunnelAndNamesTheReason(t *testing.T) {
 	runtime := readyAccessRuntime(now)
 	manager := &testTunnelManager{getResponse: &devtunnel.Record{
 		ID: runtime.Tunnel.ID, ClusterID: runtime.Tunnel.ClusterID, ExpiresAt: now.Add(-time.Second),
-		Ports: []devtunnel.PortRecord{{PortNumber: 31001, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
+		Ports: []devtunnel.PortRecord{{PortNumber: allocationPorts(runtime.ID, runtime.Generation).jupyter, Protocol: "http", Description: "cybershuttle-jupyter", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
 	}}
 	service := Service{Store: Store{Dir: t.TempDir()}, Tunnels: manager, Credentials: CredentialStore{Dir: t.TempDir() + "/credentials"}, Now: func() time.Time { return now }}
 	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {

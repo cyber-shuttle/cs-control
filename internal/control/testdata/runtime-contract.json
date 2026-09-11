@@ -12,5 +12,6 @@
     "wallMinutes": 60
   },
   "createdAt": "2030-01-01T00:00:00Z",
+  "startedAt": "2030-01-01T00:00:30Z",
   "updatedAt": "2030-01-01T00:01:00Z"
 }

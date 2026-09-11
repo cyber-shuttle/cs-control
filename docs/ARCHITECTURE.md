@@ -41,7 +41,7 @@ Create proceeds in this order:
    script.
 2. One creator-owned Dev Tunnel for the allocation generation, the generation credential written to disk, then
    the runtime record persisted — durable before anything slow begins.
-3. Login-node preparation: uv, Linkspan and the workflow document.
+3. Login-node preparation: Linkspan and the workflow document.
 4. `sbatch`, with the job name and the allocation identity on the command line.
 
 Because the record is durable before preparation starts, preparation progress streams into the log tail the
@@ -66,11 +66,12 @@ record or a second path to keep consistent with create.
 
 ### Self-preparing allocations
 
-The login node supplies only the two binaries a job cannot start without — the Linkspan release it execs and
-uv — plus the workflow document, all in one constant script during create. Both binaries belong to the account
-rather than to a workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens. The environment,
-its dependencies, the server, and the wait for that server to answer all happen inside the allocation, through
-the workflow Linkspan runs.
+The login node supplies only the binary a job cannot start without, the Linkspan release it execs, plus the
+workflow document, both in one constant script during create. The binary belongs to the account rather than to
+a workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens. The environment, its
+dependencies, the server, and the wait for that server to answer all happen inside the allocation: the workflow
+is one `jupyter.sessions.start` step, and Linkspan builds the environment under `$HOME/.cybershuttle`, starts
+the server and publishes its port.
 
 An allocation hosts a tunnel this control plane created, so its Linkspan must accept `--tunnel-host-token`.
 Preparation refuses a host whose Linkspan does not, rather than letting the allocation fail on its first flag.
@@ -88,15 +89,16 @@ The batch script execs Linkspan and names no application. What runs inside an al
 business: preparation writes the per-runtime `workflow.yaml` beside the allocation and the batch script points
 Linkspan at it, so the service starts through Linkspan once Linkspan is live.
 
-Linkspan's `shell.exec` runs without a shell and expands nothing, so the workflow carries only validated remote
-paths. Jupyter Server reads its own token and port from `JUPYTER_TOKEN` and `JUPYTER_PORT`. Those, the tunnel
-host token, and the allocation identity the tunnel only assigns at creation — its ID, cluster, and
-generation-derived ports — are injected with fixed `sbatch --export` arguments, and the job is named on the
-same command line with `sbatch --job-name`.
+The workflow carries only validated remote paths and the Jupyter port, which is not secret. Linkspan starts
+Jupyter Server with the token it inherits from `JUPYTER_TOKEN`. That, the tunnel host token, and the
+allocation identity the tunnel only assigns at creation — its ID, cluster, and generation-derived control port
+— are injected with fixed `sbatch --export` arguments, and the job is named on the same command line with
+`sbatch --job-name`.
 
 Validation and submission scripts are byte-identical and contain no generated secret literal: nothing unknown
 at review time is written into the script text. Both listening ports are derived from the runtime ID and
-generation, so they can be declared on the tunnel before the job starts and bound exactly as declared.
+generation, so they can be declared on the tunnel before the job starts and bound exactly as declared; Linkspan
+republishes the Jupyter port, anonymous as declared, when its server starts, and access looks it up by number.
 
 ### States and reconciliation
 
@@ -115,6 +117,26 @@ startup log tails — filtered to the same owned set, because a tail is as priva
 it. The strong `ETag` is taken over that filtered body, so it cannot match across principals, and a poll whose
 `If-None-Match` still matches is answered `304 Not Modified` with no body.
 
+### Samples and run records
+
+Two things about a running allocation are not scheduler state and are not reconciled with it.
+
+Resource samples are read from the Linkspan the allocation is running, over the control port already declared
+on its own tunnel, once every five seconds. They are process-local and bounded to the last twenty, held beside
+the log tail rather than in `state.json`: a window on a running allocation is not a fact about it, and
+rewriting persisted state every five seconds to hold one would be the wrong store. They are served on their
+own route for the same reason the poll is cheap — samples change on every tick, so folding them into
+`GET /api/v1/runtimes` would defeat its `ETag` for exactly the runtimes that have any. A missed sample is a
+gap in a window, not a fault.
+
+A run record is the opposite: it is the one durable trace an allocation leaves. Ending forgets everything else
+— relaunch replaces the runtime record in place and delete drops it — so the reconciliation that first sees a
+terminal state freezes what the allocation did, carrying its final sample window with it, under the same lock
+that would otherwise lose it. A run is named by the generation that ran it, so a card accumulates runs rather
+than overwriting them, and its history outlives the card. Slurm's own accounting is read separately and later:
+`slurmdbd` flushes step usage a beat after a job ends, so the record is completed on the sampling tick for ten
+minutes and then left as it is.
+
 ## Dev Tunnels
 
 One creator-owned tunnel per allocation generation, declaring both allocation ports at creation. Tunnel-wide
@@ -128,13 +150,27 @@ authority before the error is returned. Tunnel expiry is the final cleanup backs
 job failure.
 
 Create and delete use the delegated OAuth bearer. The management read behind `/access` uses
-`Authorization: tunnel <connect token>`.
+`Authorization: tunnel <connect token>`, and the metrics read reaches Linkspan on the control port with the
+same connect token in `X-Tunnel-Authorization`, which is how Dev Tunnels authorizes a non-anonymous port. The
+edge answers `200` with an interstitial page once the host is gone, so a body that parses is the liveness
+signal rather than the status.
 
 ## SSH configuration
 
-Host entries the API creates live between `# >>> cybershuttle managed >>>` and `# <<< cybershuttle managed <<<`
-in `~/.ssh/config`, written atomically at mode `0600`. Everything outside those markers is read and never
-rewritten, and only a managed alias may be removed.
+Every caller has their own host configuration, and nothing else. A principal's entries live in
+`<state>/hosts/<principal>/config`, named by a hash of the subject and tenant so an identifier from another
+system never becomes a path, and written atomically at mode `0600` between
+`# >>> cybershuttle managed >>>` and `# <<< cybershuttle managed <<<`.
+
+This is a boundary, not a filing convention. `ssh` is invoked with `-F` naming that file, so an alias resolves
+through the configuration of the caller who added it and through no other. The account `csctl` runs as has no
+standing in the API: its `~/.ssh/config` is neither read nor written, and its aliases are invisible. Two
+callers may use the same alias name for different hosts. The control master is keyed by the configuration as
+well as the alias, so one caller authenticating a host never hands another an authenticated session, and
+scheduler reconciliation, log tailing and accounting each run as the runtime's own owner.
+
+What this does not do: an `IdentityFile` may still name any path the daemon account can read, and there is no
+way to upload a key. Isolation is of configuration and of connections, not of the filesystem underneath them.
 
 A pasted `ssh` command is parsed server-side into host, user, port, identity file and an allowlisted set of
 `-o` options — only how a connection authenticates or keeps itself alive. Anything that can run a local program
@@ -150,7 +186,8 @@ authentication WebSocket is what establishes that master.
 
 | Path | Contents |
 | --- | --- |
-| `state.json` | non-secret scheduler, allocation and tunnel metadata |
+| `state.json` | non-secret scheduler, allocation and tunnel metadata, and the bounded record of what finished allocations did |
+| `hosts/` | one SSH host configuration per principal, mode `0600` under a `0700` directory |
 | `credentials/` | per-generation Dev Tunnel connect token and Jupyter token, mode `0600` under a `0700` directory |
 | `ssh/` | OpenSSH `ControlMaster` sockets |
 

@@ -73,8 +73,9 @@ Request bodies are JSON, at most 64 KiB. Unknown fields and trailing data are re
 
 ### `GET /api/v1/ssh` → 200
 
-Every host `~/.ssh/config` and `/etc/ssh/ssh_config` resolve to. `managed` marks the entries this API wrote,
-which are the only ones it may remove.
+The caller's own hosts, and only those. Each principal has a private configuration this API writes; the
+account the daemon runs as has none of its own standing here, and one caller's aliases are invisible to
+another. `managed` marks the entries this API wrote, which are the only ones it may change.
 
 ```json
 {
@@ -103,10 +104,23 @@ configuration text. `name` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`.
 { "name": "delta", "command": "ssh -i ~/.ssh/id_ed25519 -J bastion alice@login.delta.example.edu" }
 ```
 
-`-p`, `-i`, `-l`, `-J`, `-o` and one `[user@]host` target are understood. `-o` is limited to an allowlist
+The alias is the caller's own, so a name another principal already uses is free. `-p`, `-i`, `-l`, `-J`, `-o`
+and one `[user@]host` target are understood. `-o` is limited to an allowlist
 covering how a connection authenticates or keeps itself alive; every other option, every other flag, and a
 trailing remote command are refused with `invalid_ssh_command`. The response is the resulting host, and an
 alias that already exists is `ssh_host_exists`.
+
+### `PUT /api/v1/ssh/{alias}` → 200
+
+Replaces a managed entry with what the command now says, so a login whose host, port, user or jump
+changed is corrected without losing its alias. The body is the same pasted command `POST` takes, and it
+is parsed by the same rules; the alias comes from the path, so an edit cannot rename what it edits.
+
+```json
+{ "command": "ssh -p 2222 -i ~/.ssh/id_ed25519 -J bastion alice@login2.delta.example.edu" }
+```
+
+The response is the resulting host. An alias outside the managed block is `ssh_host_not_managed`.
 
 ### `DELETE /api/v1/ssh/{alias}` → 200
 
@@ -230,12 +244,15 @@ The response is one runtime record, which is also the item shape everywhere else
   "rootFolder": "$HOME/project",
   "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60 },
   "createdAt": "2030-01-01T00:00:00Z",
+  "startedAt": "2030-01-01T00:00:30Z",
   "updatedAt": "2030-01-01T00:01:00Z"
 }
 ```
 
 `state` is one of `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, `FAILED`. `account` and
-`error` are omitted when empty. Owner, tunnel, job ID, job name, node and remote paths are held but never
+`error` are omitted when empty. `startedAt` is when Slurm was first seen running the allocation, taken from
+the scheduler's own elapsed figure rather than from a poll, and is absent until it starts: with
+`resources.wallMinutes` it is the deadline a client counts down to, so a queue wait is never mistaken for one. Owner, tunnel, job ID, job name, node and remote paths are held but never
 returned.
 
 ### `GET /api/v1/runtimes` → 200 or 304
@@ -302,6 +319,75 @@ tunnel expiration, not the value recorded at creation.
 
 A runtime that is not `READY`, has no stored credential, or whose tunnel cannot be reached or has expired is
 `runtime_access_unavailable` with the reason in the message.
+
+### `GET /api/v1/runtimes/{id}/metrics` → 200
+
+What the allocation is using now, as Linkspan on the compute node reports it over the control port of the
+allocation's own tunnel. Samples are bounded, process-local and five seconds apart; the window holds the last
+twenty. They are deliberately not part of the poll above: they change every tick, and folding them in would
+defeat its `ETag` for exactly the runtimes that have any.
+
+```json
+{
+  "runtimeId": "rt-012345abcdef",
+  "samples": [
+    {
+      "at": "2030-01-01T00:05:00Z",
+      "memBytes": 2147483648,
+      "cpuUsageUsec": 295339339,
+      "gpus": [{ "index": 0, "utilPct": 40, "memUsedMiB": 1024, "memTotalMiB": 40960 }]
+    }
+  ]
+}
+```
+
+Every figure is optional: a host with no GPUs reports none, and a cgroup file that cannot be read is absent
+rather than zero, which for a cumulative counter is a different claim. `at` is when the sample was observed
+here, so consecutive samples differentiate `cpuUsageUsec` into a rate. A runtime that is not running answers
+with an empty window rather than an error.
+
+### `GET /api/v1/runtimes/history` → 200
+
+What this caller's finished allocations did, newest first and bounded. A run is named by the generation that
+ran it, so relaunching a card leaves the previous run behind rather than overwriting it, and deleting the card
+does not remove the runs it accumulated.
+
+```json
+{
+  "runs": [
+    {
+      "runtimeId": "rt-012345abcdef",
+      "generation": "g-0123456789abcdef",
+      "sshHost": "delta",
+      "partition": "cpu",
+      "rootFolder": "$HOME/project",
+      "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60 },
+      "finalState": "STOPPED",
+      "startedAt": "2030-01-01T00:00:30Z",
+      "endedAt": "2030-01-01T01:00:30Z",
+      "stats": {
+        "cores": 2,
+        "requestedMemory": "4.0 GB",
+        "elapsedSeconds": 3600,
+        "maxRss": "2.0 GB",
+        "cpuEfficiencyPct": 50,
+        "memoryEfficiencyPct": 50
+      },
+      "samples": [],
+      "logs": [
+        { "stream": "status", "text": "Allocation is running", "at": "2030-01-01T00:00:05Z" }
+      ]
+    }
+  ]
+}
+```
+
+The record is frozen when the allocation ends, carrying its final sample window and its narration with it.
+Both are process-local and dropped at that moment, so the run is the only place either survives: a runtime
+that is no longer running carries no log tail in `GET /api/v1/runtimes`, because what it said belongs to the
+run that said it. `logs` has the same shape as the tails on that route and is absent when it said nothing. `stats` comes from
+Slurm's own accounting and is absent until it lands: `slurmdbd` flushes step usage a beat after a job ends, so
+it is read again on the sampling tick for ten minutes and then left as it is.
 
 ## Device-code sign-in
 

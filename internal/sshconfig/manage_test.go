@@ -82,3 +82,49 @@ func TestAddAndRemoveTouchOnlyTheManagedBlock(t *testing.T) {
 		t.Fatalf("config is not private: %v %v", info.Mode(), err)
 	}
 }
+
+func TestUpdateRewritesOneManagedEntryInPlace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	config := Config{UserPath: path, SystemPath: filepath.Join(dir, "absent")}
+	for _, command := range []struct{ alias, command string }{
+		{"delta", "ssh me@login.example.edu"},
+		{"anvil", "ssh me@anvil.example.edu"},
+	} {
+		host, err := ParseCommand(command.alias, command.command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := config.Add(host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	edited, err := ParseCommand("delta", "ssh -p 2222 -i ~/.ssh/id_ed25519 -J bastion you@login2.example.edu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Update(edited); err != nil {
+		t.Fatal(err)
+	}
+	hosts, err := config.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Host{}
+	for _, host := range hosts {
+		byName[host.Name] = host
+	}
+	if len(hosts) != 2 {
+		t.Fatalf("an edit changed the entry count: %+v", hosts)
+	}
+	if got := byName["delta"]; got.Hostname != "login2.example.edu" || got.User != "you" || got.Port != 2222 || !got.Managed {
+		t.Fatalf("delta was not rewritten: %+v", got)
+	}
+	// The neighbour in the same block keeps every field the edit did not name.
+	if got := byName["anvil"]; got.Hostname != "anvil.example.edu" || got.User != "me" {
+		t.Fatalf("editing one entry disturbed another: %+v", got)
+	}
+	if err := config.Update(Host{Name: "absent"}); err == nil {
+		t.Fatal("updated an entry this package never wrote")
+	}
+}

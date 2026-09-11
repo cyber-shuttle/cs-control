@@ -19,7 +19,6 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-control/internal/gateway"
 	"github.com/cyber-shuttle/cs-control/internal/safeio"
-	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
@@ -64,11 +63,13 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("resolve credential directory: %w", err)
 	}
 	service := control.Service{
-		Runner: sshexec.Runner{Timeout: sshTimeout, ControlDir: filepath.Join(stateDir, "ssh"),
-			Hosts: sshconfig.Config{UserPath: defaultUserSSHConfig(), SystemPath: "/etc/ssh/ssh_config"}},
+		// Hosts is left unset: every SSH operation runs through a service scoped to
+		// the caller, whose own configuration this daemon writes and reads. The
+		// account csctl runs as has no standing in the API.
+		Runner: sshexec.Runner{Timeout: sshTimeout, ControlDir: filepath.Join(stateDir, "ssh")},
 		Store:  control.Store{Dir: stateDir},
-		Config: control.Config{LinkspanPath: *linkspan},
-		Logs:   control.NewRuntimeLogs(), Tunnels: tunnelManager,
+		Config: control.Config{LinkspanPath: *linkspan, HostsDir: filepath.Join(stateDir, "hosts")},
+		Logs:   control.NewRuntimeLogs(), Metrics: control.NewRuntimeMetrics(), Tunnels: tunnelManager,
 		Credentials: control.CredentialStore{Dir: credentialDir},
 	}
 	switch args[0] {
@@ -205,14 +206,6 @@ func defaultStateDir() string {
 		return ".cs-control"
 	}
 	return filepath.Join(home, ".cybershuttle", "control")
-}
-
-func defaultUserSSHConfig() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".ssh/config"
-	}
-	return filepath.Join(home, ".ssh", "config")
 }
 
 func envOr(name, fallback string) string {

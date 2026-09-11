@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -35,47 +36,28 @@ func TestBuildScriptRunsLinkspanAndNamesNoApplication(t *testing.T) {
 	}
 }
 
-// The workflow carries what the script no longer does, and it carries it in a
-// form shell.exec can run: no shell, no expansion, no argument with a space.
-func TestRuntimeWorkflowStartsJupyterWithoutSecretsOrExpansion(t *testing.T) {
+// The workflow asks Linkspan for the server on the port this control plane
+// declared, and carries no secret: the token is the environment's to supply.
+func TestRuntimeWorkflowStartsJupyterWithoutSecrets(t *testing.T) {
 	runtime := Runtime{
-		RuntimeResponse: RuntimeResponse{ID: "rt-012345abcdef"},
+		RuntimeResponse: RuntimeResponse{ID: "rt-012345abcdef", Generation: "g-0123456789abcdef"},
 		PrivateRoot:     "/home/test/.cybershuttle/runtimes/rt-012345abcdef", WorkspaceRoot: "/home/test/project",
 	}
-	document := runtimeWorkflow(runtime, "/home/test")
+	document := runtimeWorkflow(runtime)
+	port := strconv.Itoa(int(allocationPorts(runtime.ID, runtime.Generation).jupyter))
 	for _, required := range []string{
-		"action: shell.exec",
-		// The interpreter belongs to the account; the workspace only says what
-		// the server opens.
-		"/home/test/.cybershuttle/jupyter-env/bin/python -m jupyter_server",
-		"--ServerApp.root_dir=/home/test/project",
+		"action: jupyter.sessions.start",
+		`root_dir: "/home/test/project"`,
+		`addr: "127.0.0.1:` + port + `"`,
 	} {
 		if !strings.Contains(document, required) {
 			t.Fatalf("workflow is missing %q:\n%s", required, document)
 		}
 	}
-	// The token and the port are the environment's to supply: shell.exec
-	// expands nothing, and a secret in this file would be a secret on disk.
-	for _, forbidden := range []string{"token", "$", "--port"} {
+	for _, forbidden := range []string{"token", "$", "shell.exec"} {
 		if strings.Contains(document, forbidden) {
-			t.Fatalf("workflow names %q, which it cannot resolve:\n%s", forbidden, document)
+			t.Fatalf("workflow names %q, which it must not:\n%s", forbidden, document)
 		}
-	}
-	for _, command := range strings.Split(document, "command: ")[1:] {
-		if strings.Count(strings.SplitN(command, "\n", 2)[0], `"`) != 2 {
-			t.Fatalf("workflow command is not one quoted scalar: %s", command)
-		}
-	}
-	// The allocation builds what it needs, starts it, and waits for it, in that
-	// order: a runtime is not usable until the server answers.
-	order := []string{"venv", "pip install", "setsid --fork", "/api/status"}
-	at := -1
-	for _, step := range order {
-		next := strings.Index(document, step)
-		if next <= at {
-			t.Fatalf("workflow does not build, start and then wait: %s\n%s", step, document)
-		}
-		at = next
 	}
 }
 
