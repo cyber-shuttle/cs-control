@@ -51,9 +51,9 @@ type tunnelEndpoint struct {
 	expiresAt  time.Time
 }
 
-// allocationEndpoint resolves a named port on the allocation's own tunnel. The
+// allocationEndpoint resolves one port on the allocation's own tunnel. The
 // reasons it cannot are distinct failures a caller reports in its own words.
-func (s Service) allocationEndpoint(ctx context.Context, runtime Runtime, description string) (tunnelEndpoint, error) {
+func (s Service) allocationEndpoint(ctx context.Context, runtime Runtime, number uint16) (tunnelEndpoint, error) {
 	if s.Tunnels == nil || !idPattern.MatchString(runtime.ID) || !generationPattern.MatchString(runtime.Generation) {
 		return tunnelEndpoint{}, errors.New("the runtime is not addressable")
 	}
@@ -70,7 +70,7 @@ func (s Service) allocationEndpoint(ctx context.Context, runtime Runtime, descri
 	if !record.ExpiresAt.After(s.now()) {
 		return tunnelEndpoint{}, errors.New("the allocation tunnel has expired")
 	}
-	uri, err := allocationPortURI(record, runtime.Tunnel, description)
+	uri, err := allocationPortURI(record, runtime.Tunnel, number)
 	if err != nil {
 		return tunnelEndpoint{}, err
 	}
@@ -85,7 +85,7 @@ func (s Service) RuntimeAccess(ctx context.Context, runtime Runtime) (*RuntimeAc
 	if runtime.State != "READY" {
 		return unavailable("the runtime is " + strings.ToLower(runtime.State))
 	}
-	endpoint, err := s.allocationEndpoint(ctx, runtime, jupyterPortDescription)
+	endpoint, err := s.allocationEndpoint(ctx, runtime, allocationPorts(runtime.ID, runtime.Generation).jupyter)
 	if err != nil {
 		return unavailable(err.Error())
 	}
@@ -178,7 +178,9 @@ func (s Service) releaseAllocationTunnel(auth authn.TunnelAuthorization, runtime
 	return errors.Join(deleteErr, s.Credentials.Delete(runtimeID, generation))
 }
 
-func allocationPortURI(record devtunnel.Record, tunnel TunnelMetadata, description string) (string, error) {
+// Linkspan republishes the port when its server starts, without the description
+// it was declared with, so the number is the only stable key.
+func allocationPortURI(record devtunnel.Record, tunnel TunnelMetadata, number uint16) (string, error) {
 	// Only the identity is stable across a tunnel's life; comparing the sliding
 	// expiration to its creation-time value refuses every healthy allocation.
 	if record.ID != tunnel.ID || record.ClusterID != tunnel.ClusterID {
@@ -186,7 +188,7 @@ func allocationPortURI(record devtunnel.Record, tunnel TunnelMetadata, descripti
 	}
 	result := ""
 	for _, port := range record.Ports {
-		if port.Description != description {
+		if port.PortNumber != number {
 			continue
 		}
 		if port.Protocol != "http" || port.PortNumber == 0 || len(port.PortForwardingURIs) != 1 {

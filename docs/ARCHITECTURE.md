@@ -41,7 +41,7 @@ Create proceeds in this order:
    script.
 2. One creator-owned Dev Tunnel for the allocation generation, the generation credential written to disk, then
    the runtime record persisted — durable before anything slow begins.
-3. Login-node preparation: uv, Linkspan and the workflow document.
+3. Login-node preparation: Linkspan and the workflow document.
 4. `sbatch`, with the job name and the allocation identity on the command line.
 
 Because the record is durable before preparation starts, preparation progress streams into the log tail the
@@ -66,11 +66,12 @@ record or a second path to keep consistent with create.
 
 ### Self-preparing allocations
 
-The login node supplies only the two binaries a job cannot start without — the Linkspan release it execs and
-uv — plus the workflow document, all in one constant script during create. Both binaries belong to the account
-rather than to a workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens. The environment,
-its dependencies, the server, and the wait for that server to answer all happen inside the allocation, through
-the workflow Linkspan runs.
+The login node supplies only the binary a job cannot start without, the Linkspan release it execs, plus the
+workflow document, both in one constant script during create. The binary belongs to the account rather than to
+a workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens. The environment, its
+dependencies, the server, and the wait for that server to answer all happen inside the allocation: the workflow
+is one `jupyter.sessions.start` step, and Linkspan builds the environment under `$HOME/.cybershuttle`, starts
+the server and publishes its port.
 
 An allocation hosts a tunnel this control plane created, so its Linkspan must accept `--tunnel-host-token`.
 Preparation refuses a host whose Linkspan does not, rather than letting the allocation fail on its first flag.
@@ -88,15 +89,16 @@ The batch script execs Linkspan and names no application. What runs inside an al
 business: preparation writes the per-runtime `workflow.yaml` beside the allocation and the batch script points
 Linkspan at it, so the service starts through Linkspan once Linkspan is live.
 
-Linkspan's `shell.exec` runs without a shell and expands nothing, so the workflow carries only validated remote
-paths. Jupyter Server reads its own token and port from `JUPYTER_TOKEN` and `JUPYTER_PORT`. Those, the tunnel
-host token, and the allocation identity the tunnel only assigns at creation — its ID, cluster, and
-generation-derived ports — are injected with fixed `sbatch --export` arguments, and the job is named on the
-same command line with `sbatch --job-name`.
+The workflow carries only validated remote paths and the Jupyter port, which is not secret. Linkspan starts
+Jupyter Server with the token it inherits from `JUPYTER_TOKEN`. That, the tunnel host token, and the
+allocation identity the tunnel only assigns at creation — its ID, cluster, and generation-derived control port
+— are injected with fixed `sbatch --export` arguments, and the job is named on the same command line with
+`sbatch --job-name`.
 
 Validation and submission scripts are byte-identical and contain no generated secret literal: nothing unknown
 at review time is written into the script text. Both listening ports are derived from the runtime ID and
-generation, so they can be declared on the tunnel before the job starts and bound exactly as declared.
+generation, so they can be declared on the tunnel before the job starts and bound exactly as declared; Linkspan
+republishes the Jupyter port, anonymous as declared, when its server starts, and access looks it up by number.
 
 ### States and reconciliation
 

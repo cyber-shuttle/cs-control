@@ -12,13 +12,13 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
-// A host that has never run a runtime has neither the interpreter the script
-// starts nor the binary it execs, so creating one installs both first.
+// A host that has never run a runtime lacks the binary its job execs, so
+// creating one installs it first.
 func TestCreateProvisionsABareHost(t *testing.T) {
 	ssh, _, commandLog := fakeSSH(t)
 	provisionLog := t.TempDir() + "/provision"
 	t.Setenv("FAKE_PROVISION_LOG", provisionLog)
-	t.Setenv("FAKE_PROVISION_REPORT", "uv=installed")
+	t.Setenv("FAKE_PROVISION_REPORT", "linkspan=installed")
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: Store{Dir: t.TempDir()}, Logs: NewRuntimeLogs()}
 	configureTestTunnel(t, &service)
 	created, err := service.Create(testTunnelContext(), createRequest())
@@ -32,11 +32,11 @@ func TestCreateProvisionsABareHost(t *testing.T) {
 	if err != nil || string(script) != provisionScript {
 		t.Fatalf("host did not receive the provisioning script: %v", err)
 	}
-	if document := provisionedWorkflow(t, commandLog); document != runtimeWorkflow(*created, "/home/tester") {
+	if document := provisionedWorkflow(t, commandLog); document != runtimeWorkflow(*created) {
 		t.Fatalf("host did not receive the workflow document:\n%s", document)
 	}
 	joined := runtimeLogText(t, service.Logs, created.ID, false)
-	for _, expected := range []string{"Preparing the runtime environment", "Installed uv", "Runtime environment ready"} {
+	for _, expected := range []string{"Preparing the runtime environment", "Installed Linkspan", "Runtime environment ready"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("status never reported %q: %s", expected, joined)
 		}
