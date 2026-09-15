@@ -46,6 +46,7 @@ func TestRuntimeWorkflowStartsJupyterWithoutSecrets(t *testing.T) {
 	document := runtimeWorkflow(runtime)
 	port := strconv.Itoa(int(allocationPorts(runtime.ID, runtime.Generation).jupyter))
 	for _, required := range []string{
+		"tasks:\n  - on: start",
 		"action: jupyter.sessions.start",
 		`root_dir: "/home/test/project"`,
 		`addr: "127.0.0.1:` + port + `"`,
