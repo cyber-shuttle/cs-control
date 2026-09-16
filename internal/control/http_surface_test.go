@@ -68,6 +68,9 @@ func TestHTTPRouteSurfaceRetainsRequiredControlOperations(t *testing.T) {
 		{http.MethodPost, "/api/v1/ssh/delta/test", http.StatusOK},
 		{http.MethodGet, "/api/v1/ssh/delta/auth", http.StatusUpgradeRequired},
 		{http.MethodGet, "/api/v1/ssh/delta/slurm", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/keys", http.StatusOK},
+		{http.MethodPost, "/api/v1/keys", http.StatusBadRequest},
+		{http.MethodDelete, "/api/v1/keys/delta-key", http.StatusNotFound},
 	} {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {
 			request := httptest.NewRequest(test.method, test.path, nil).WithContext(testTunnelContext())

@@ -1,17 +1,21 @@
 // Every caller has their own host configuration and nothing else.
-// One principal's aliases are invisible to another, and each gets its own private config file.
+// One principal's aliases and login keys are invisible to another, and each gets its own private config file.
 //
 //	handlerAs
 //	hostRequest
 //	hostNames
 //	isolatedHostService
 //	sshRefusingAuthentication
+//	uploadedKey
 //	Test*
 package control
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,6 +29,7 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"golang.org/x/crypto/ssh"
 )
 
 func handlerAs(t *testing.T, service Service, principal authn.Principal) http.Handler {
@@ -96,6 +101,23 @@ exit 255
 	return path
 }
 
+func uploadedKey(t *testing.T, handler http.Handler, name string) sshconfig.Key {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	testutil.Check(t, err)
+	block, err := ssh.MarshalPrivateKey(private, "")
+	testutil.Check(t, err)
+	body, err := json.Marshal(addKeyRequest{Name: name, PrivateKey: string(pem.EncodeToMemory(block))})
+	testutil.Check(t, err)
+	response := hostRequest(t, handler, http.MethodPost, "/api/v1/keys", string(body))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s", response.Code, response.Body.String())
+	}
+	var key sshconfig.Key
+	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &key))
+	return key
+}
+
 func TestSSHHostsAreIsolatedPerPrincipal(t *testing.T) {
 	service := isolatedHostService(t)
 	mine := handlerAs(t, service, testPrincipal)
@@ -124,6 +146,56 @@ func TestSSHHostsAreIsolatedPerPrincipal(t *testing.T) {
 	}
 	if got := hostNames(t, mine); len(got) != 1 {
 		t.Fatalf("another principal's delete reached this caller's host: %v", got)
+	}
+}
+
+func TestLoginKeysAreOwnedPerPrincipalAndFollowTheHost(t *testing.T) {
+	service := isolatedHostService(t)
+	mine := handlerAs(t, service, testPrincipal)
+	theirs := handlerAs(t, service, otherTestPrincipal)
+	key := uploadedKey(t, mine, "delta-key")
+	if key.Type != "ssh-ed25519" || !strings.HasPrefix(key.Fingerprint, "SHA256:") {
+		t.Fatalf("upload did not describe the key: %+v", key)
+	}
+	if body := hostRequest(t, theirs, http.MethodGet, "/api/v1/keys", "").Body.String(); strings.Contains(body, "delta-key") {
+		t.Fatalf("another principal was shown this caller's key: %s", body)
+	}
+	if code := hostRequest(t, theirs, http.MethodPost, "/api/v1/ssh", `{"name":"delta","command":"ssh me@login.example.edu","key":"delta-key"}`).Code; code != http.StatusNotFound {
+		t.Fatalf("another principal assigned a key that is not theirs: %d", code)
+	}
+
+	created := hostRequest(t, mine, http.MethodPost, "/api/v1/ssh", `{"name":"delta","command":"ssh me@login.example.edu","key":"delta-key"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("add with key = %d %s", created.Code, created.Body.String())
+	}
+	var host sshconfig.Host
+	testutil.Check(t, json.Unmarshal(created.Body.Bytes(), &host))
+	keyDir := service.forPrincipal(testPrincipal).Runner.Hosts.KeyDir
+	if host.Key != "delta-key" || host.IdentityFile != filepath.Join(keyDir, "delta-key") || !strings.Contains(strings.Join(host.ExtraDirectives, "\n"), "IdentitiesOnly yes") {
+		t.Fatalf("the host does not carry its key: %+v", host)
+	}
+	if info, err := os.Stat(host.IdentityFile); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("stored key is not private: %v %v", info, err)
+	}
+
+	updated := hostRequest(t, mine, http.MethodPut, "/api/v1/ssh/delta", `{"command":"ssh me@login.example.edu","key":""}`)
+	var edited sshconfig.Host
+	testutil.Check(t, json.Unmarshal(updated.Body.Bytes(), &edited))
+	if updated.Code != http.StatusOK || edited.Key != "" || edited.IdentityFile != "" || len(edited.ExtraDirectives) != 0 {
+		t.Fatalf("an update without a key kept the old one: %d %+v", updated.Code, edited)
+	}
+	if code := hostRequest(t, mine, http.MethodPut, "/api/v1/ssh/delta", `{"command":"ssh me@login.example.edu","key":"delta-key"}`).Code; code != http.StatusOK {
+		t.Fatalf("reassign = %d", code)
+	}
+	if code := hostRequest(t, mine, http.MethodDelete, "/api/v1/keys/delta-key", "").Code; code != http.StatusOK {
+		t.Fatalf("delete key = %d", code)
+	}
+	list := hostRequest(t, mine, http.MethodGet, "/api/v1/ssh", "")
+	if strings.Contains(list.Body.String(), "delta-key") || strings.Contains(list.Body.String(), "Identit") {
+		t.Fatalf("deleting the key left the host naming it: %s", list.Body.String())
+	}
+	if body := hostRequest(t, mine, http.MethodGet, "/api/v1/keys", "").Body.String(); body != `{"keys":[]}`+"\n" && body != `{"keys":[]}` {
+		t.Fatalf("keys after delete = %s", body)
 	}
 }
 

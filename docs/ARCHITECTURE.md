@@ -194,7 +194,7 @@ what establishes that master.
 | Path | Contents |
 | --- | --- |
 | `state.json` | non-secret scheduler, session and tunnel metadata, and the bounded record of what finished sessions did |
-| `hosts/` | one SSH host configuration per principal, mode `0600` under a `0700` directory |
+| `hosts/` | one SSH host configuration per principal, and the login keys they uploaded under `keys/`, mode `0600` under a `0700` directory |
 | `credentials/` | per-seq Dev Tunnel connect token and Jupyter token, mode `0600` under a `0700` directory |
 
 OAuth credentials and tunnel host and manage-ports credentials are never persisted.
