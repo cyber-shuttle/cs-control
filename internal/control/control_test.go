@@ -1,8 +1,17 @@
+// The end-to-end shape of a session's lifecycle against a fake SSH and scheduler.
+// Covers discovery, create, idempotency, cancellation, ownership, and the loopback listen policy.
+//
+//	fakeSSH
+//	testService
+//	newTestCreateRequest
+//	assertScriptRedirectsToTheSessionsGenerationLog
+//	Test*
 package control
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +23,7 @@ import (
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
 func fakeSSH(t *testing.T) (string, string, string) {
@@ -28,36 +38,37 @@ func fakeSSH(t *testing.T) (string, string, string) {
 	acceptedJobName := filepath.Join(dir, "accepted-job-name")
 	schedulerQueryCount := filepath.Join(dir, "scheduler-query-count")
 	acceptedJobID := filepath.Join(dir, "accepted-job-id")
-	if err := os.WriteFile(status, []byte("RUNNING\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.WriteFile(status, []byte("RUNNING\n"), 0o600))
 	path := filepath.Join(dir, "ssh")
 	script := `#!/bin/sh
 set -eu
 if [ "$1" = "-G" ]; then
-  printf 'host %s\nhostname %s.example\nuser tester\nport 22\n' "$2" "$2"
+  shift
+  while [ "$1" = "-o" ] || [ "$1" = "-F" ]; do shift 2; done
+  printf 'host %s\nhostname %s.example\nuser tester\nport 22\n' "$1" "$1"
   exit 0
 fi
-while [ "$1" = "-o" ]; do shift 2; done
+while [ "$1" = "-o" ] || [ "$1" = "-F" ]; do shift 2; done
 alias=$1; shift
 [ "$#" -eq 1 ] || { echo "expected one OpenSSH remote command argument" >&2; exit 2; }
 wire_command=$1
 printf '%s|%s\n' "$alias" "$wire_command" >> "$FAKE_COMMAND_LOG"
-if printf '%s' "$wire_command" | grep -q 'csctl-runtime-log-tail'; then
-  [ -z "${FAKE_RUNTIME_LOG_SCRIPT:-}" ] || cat > "$FAKE_RUNTIME_LOG_SCRIPT"
-  [ -n "${FAKE_RUNTIME_LOG_SCRIPT:-}" ] || cat >/dev/null
+if printf '%s' "$wire_command" | grep -q 'csctl-session-log-tail'; then
+  cat > "${FAKE_SESSION_LOG_SCRIPT:-/dev/null}"
   eval "set -- $wire_command"
   shift 4
-  for runtime_id in "$@"; do
-    printf '__CSCTL_RUNTIME_LOG__|%s|stdout\n' "$runtime_id"
-    printf '%s' "${FAKE_RUNTIME_STDOUT:-}" | od -An -v -tx1 | tr -d ' \n'
-    printf '\n__CSCTL_RUNTIME_LOG__|%s|stderr\n' "$runtime_id"
-    printf '%s' "${FAKE_RUNTIME_STDERR:-}" | od -An -v -tx1 | tr -d ' \n'
+  [ -z "${FAKE_SESSION_LOG_BANNER:-}" ] || printf '%b\n' "$FAKE_SESSION_LOG_BANNER"
+  while [ "$#" -gt 0 ]; do
+    session_id=$1; shift 2
+    printf '__CSCTL_SESSION_LOG__|%s|stdout\n' "$session_id"
+    printf '%s' "${FAKE_SESSION_STDOUT:-}" | od -An -v -tx1 | tr -d ' \n'
+    printf '\n__CSCTL_SESSION_LOG__|%s|stderr\n' "$session_id"
+    printf '%s' "${FAKE_SESSION_STDERR:-}" | od -An -v -tx1 | tr -d ' \n'
     printf '\n'
   done
   exit 0
 fi
-if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = "'sh' '-s' '--' 'csctl-runtime-status'" ]; then
+if [ "$wire_command" = "'sh' '-s' '--' 'csctl-session-status'" ]; then
   payload=$(cat)
   printf '%s\n__CSCTL_SCRIPT_END__\n' "$payload" >> "$FAKE_STATUS_SCRIPT_LOG"
   query_count=0; [ ! -f "$FAKE_SCHEDULER_QUERY_COUNT" ] || query_count=$(cat "$FAKE_SCHEDULER_QUERY_COUNT")
@@ -91,13 +102,19 @@ if [ "$wire_command" = "sh -s -- csctl-runtime-status" ] || [ "$wire_command" = 
 fi
 if [ "$wire_command" = "'sh' '-s'" ]; then
   cat > "$FAKE_DISCOVERY_SCRIPT_LOG"
+  if [ -n "${FAKE_DISCOVERY_BLOCK_ALIAS:-}" ] && [ "$alias" = "$FAKE_DISCOVERY_BLOCK_ALIAS" ]; then
+    [ -z "${FAKE_DISCOVERY_STARTED:-}" ] || printf '1' > "$FAKE_DISCOVERY_STARTED"
+    while [ -n "${FAKE_DISCOVERY_RELEASE:-}" ] && [ ! -e "$FAKE_DISCOVERY_RELEASE" ]; do sleep .01; done
+  fi
   if [ -n "${FAKE_DISCOVERY_FAIL:-}" ]; then printf '%s\n' "$FAKE_DISCOVERY_FAIL" >&2; exit 255; fi
   printf 'REMOTE LOGIN BANNER\n' >&2
   user=${FAKE_REMOTE_USER:-tester}
   printf '%s\n' "$DISC_USER"
   case "$user" in ''|*[!A-Za-z0-9_.-]*) printf '%s\n' "$DISC_ERROR_USER"; exit 72;; esac
   printf '%s\n%s\n' "$user" "$DISC_ACCOUNTS"
-  printf 'Account|\nproject-a|\nproject-a|\n%s\n' "$DISC_PARTITIONS"
+  printf 'Account|\nproject-a|\nproject-a|\n'
+  if [ -n "${FAKE_DISCOVERY_PARTITIONS_FAIL:-}" ]; then printf '%s\n' "$DISC_ERROR_PARTITIONS"; exit 74; fi
+  printf '%s\n' "$DISC_PARTITIONS"
   printf 'cpu*|24+|191000+|(null)\ngpu|64|515000|gpu:a100:2(S:2,5)\n%s\n' "$DISC_HOME"
   printf '/home/tester\n%s\n' "$DISC_DONE"
   exit 0
@@ -136,12 +153,18 @@ case "$command" in
   "printenv EMPTY") exit 1;;
   "printenv RELATIVE") printf 'relative/path\n';;
   "printenv MULTILINE") printf '/scratch/one\n/scratch/two\n';;
+  "sacct -P -n --units=K --starttime="*)
+    [ -z "${FAKE_RUN_STATS_LOG:-}" ] || printf '%s\n' "$command" >> "$FAKE_RUN_STATS_LOG"
+    if [ -n "${FAKE_RUN_STATS_SLEEP_ONCE:-}" ] && [ ! -e "$FAKE_RUN_STATS_SLEEP_ONCE" ]; then
+      : > "$FAKE_RUN_STATS_SLEEP_ONCE"
+      sleep "${FAKE_RUN_STATS_SLEEP_SECONDS:-0}"
+    fi
+    printf '%s\n' "${FAKE_RUN_STATS_OUTPUT:-}"
+    ;;
   *) echo "unexpected command: $command" >&2; exit 2;;
 esac
 `
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeScript(t, path, script)
 	t.Setenv("FAKE_STATUS", status)
 	t.Setenv("FAKE_SCRIPT_LOG", scriptLog)
 	t.Setenv("FAKE_VALIDATION_SCRIPT_LOG", validationScriptLog)
@@ -159,58 +182,66 @@ esac
 	t.Setenv("DISC_HOME", markerHome)
 	t.Setenv("DISC_DONE", markerDone)
 	t.Setenv("DISC_ERROR_USER", markerErrorUser)
+	t.Setenv("DISC_ERROR_PARTITIONS", markerErrorPartitions)
 	return path, scriptLog, commandLog
 }
 
-func testService(t *testing.T) Service {
+func testService(t *testing.T, now ...func() time.Time) Service {
 	t.Helper()
+	clock := func() time.Time { return time.Unix(1, 0).UTC() }
+	if len(now) > 0 {
+		clock = now[0]
+	}
 	ssh, _, _ := fakeSSH(t)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Now: func() time.Time { return time.Unix(1, 0).UTC() }}
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Now: clock, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
 	configureTestTunnel(t, &service)
 	return service
 }
 
-func createRequest() CreateRequest {
-	return CreateRequest{ID: "rt-012345abcdef", IdempotencyKey: "request-one", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: Resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}}
+func newTestCreateRequest() createRequest {
+	return createRequest{ID: "s-012345abcdef", IdempotencyKey: "request-one", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}}
+}
+
+func assertScriptRedirectsToTheSessionsGenerationLog(t *testing.T, scriptLog string, session *Session) {
+	t.Helper()
+	if session.Generation == "" {
+		t.Fatal("session has no generation")
+	}
+	script, err := os.ReadFile(scriptLog)
+	testutil.Check(t, err)
+	expected := `"$LOG_DIR/` + sessionLogBasename(session.ID, session.Generation) + `.out"`
+	if !strings.Contains(string(script), expected) {
+		t.Fatalf("submitted script does not redirect to %q, the basename the tail script later reads:\n%s", expected, script)
+	}
 }
 
 func TestDiscoverNormalizesSchedulerData(t *testing.T) {
 	ssh, _, commandLog := fakeSSH(t)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}}
-	resource, err := service.Discover(context.Background(), "delta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	resource, err := service.discover(context.Background(), "delta")
+	testutil.Check(t, err)
 	if resource.HomeDir != "/home/tester" || strings.Join(resource.Accounts, ",") != "project-a" || resource.Partitions[0].MemoryMB != 191000 {
 		t.Fatalf("unexpected discovery: %#v", resource)
 	}
-	if got := resource.Partitions[1].GRES[0]; got != (GRES{Name: "gpu:a100", Count: 2}) {
+	if got := resource.Partitions[1].GRES[0]; got != (gres{Name: "gpu:a100", Count: 2}) {
 		t.Fatalf("unexpected GRES: %#v", got)
 	}
-	commands, err := os.ReadFile(commandLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wire := string(commands)
+	wire := string(mustRead(t, commandLog))
 	if strings.Count(wire, "delta|'sh' '-s'") != 1 || strings.Count(strings.TrimSpace(wire), "\n") != 0 {
 		t.Fatalf("discovery must use exactly one remote exec after ssh -G:\n%s", wire)
 	}
 	script, err := os.ReadFile(os.Getenv("FAKE_DISCOVERY_SCRIPT_LOG"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if string(script) != discoveryScript || strings.Contains(string(script), "delta") || strings.Contains(string(script), "tester") {
 		t.Fatalf("discovery script was not the constant trusted script:\n%s", script)
 	}
 }
 
-// The remote program refuses an unsafe username itself, before it reaches
-// sacctmgr; discoveryResult refuses the rest of them without forking anything.
 func TestDiscoverRejectsUnsafeRemoteUsernameBeforeSacctmgr(t *testing.T) {
 	ssh, _, commandLog := fakeSSH(t)
 	t.Setenv("FAKE_REMOTE_USER", "bad;touch")
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}}
-	if _, err := service.Discover(context.Background(), "delta"); err == nil || !strings.Contains(err.Error(), "identify remote user") {
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	if _, err := service.discover(context.Background(), "delta"); err == nil || !strings.Contains(err.Error(), "identify remote user") {
 		t.Fatalf("expected unsafe username rejection, got %v", err)
 	}
 	wire := string(mustRead(t, commandLog))
@@ -230,122 +261,181 @@ func TestWorkspaceExpressionsRejectUnsafeOrUnavailableValues(t *testing.T) {
 	}
 }
 
-func TestCreateRejectsWorkspaceInsidePrivateRuntime(t *testing.T) {
-	request := createRequest()
-	request.RootFolder = "/home/tester/.cybershuttle/runtimes/rt-012345abcdef/workspace"
-	if _, err := testService(t).Create(testTunnelContext(), request); err == nil || apierr.For(err).Code != "invalid_root_folder" {
-		t.Fatalf("private runtime overlap was not rejected: %v", err)
+func TestCreateRejectsWorkspaceInsidePrivateSession(t *testing.T) {
+	request := newTestCreateRequest()
+	request.RootFolder = "/home/tester/.cybershuttle/sessions/s-012345abcdef/workspace"
+	service := testService(t)
+	if _, err := service.create(testTunnelContext(), request); err == nil || apierr.For(err).Code != "invalid_root_folder" {
+		t.Fatalf("private session overlap was not rejected: %v", err)
 	}
 }
 
-func TestCreateRejectsAllocationsBelowTheFloor(t *testing.T) {
-	for _, below := range []Resources{
-		{Cores: MinCores - 1, MemoryMB: MinMemoryMB, WallMinutes: 60},
-		{Cores: MinCores, MemoryMB: MinMemoryMB - 1, WallMinutes: 60},
+func TestCreateRejectsSessionsBelowTheFloor(t *testing.T) {
+	for _, below := range []resources{
+		{Cores: minCores - 1, MemoryMB: minMemoryMB, WallMinutes: 60},
+		{Cores: minCores, MemoryMB: minMemoryMB - 1, WallMinutes: 60},
 	} {
-		request := createRequest()
+		request := newTestCreateRequest()
 		request.Resources = below
-		if _, err := testService(t).Create(testTunnelContext(), request); err == nil || apierr.For(err).Code != "invalid_resources" {
+		service := testService(t)
+		if _, err := service.create(testTunnelContext(), request); err == nil || apierr.For(err).Code != "invalid_resources" {
 			t.Fatalf("%d cores / %d MB was not rejected: %v", below.Cores, below.MemoryMB, err)
 		}
 	}
-	request := createRequest()
-	request.Resources = Resources{Cores: MinCores, MemoryMB: MinMemoryMB, WallMinutes: 60}
-	if _, err := testService(t).Create(testTunnelContext(), request); err != nil {
+	request := newTestCreateRequest()
+	request.Resources = resources{Cores: minCores, MemoryMB: minMemoryMB, WallMinutes: 60}
+	service := testService(t)
+	if _, err := service.create(testTunnelContext(), request); err != nil {
 		t.Fatalf("the floor itself was rejected: %v", err)
 	}
 }
 
-func TestRuntimeLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
+func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 	ssh, scriptLog, _ := fakeSSH(t)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}}
+	cancellations := filepath.Join(t.TempDir(), "cancellations")
+	t.Setenv("FAKE_SCANCEL_LOG", cancellations)
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
 	configureTestTunnel(t, &service)
-	runtime, err := service.Create(testTunnelContext(), createRequest())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.State != "QUEUED" || runtime.PrivateRoot != "/home/tester/.cybershuttle/runtimes/rt-012345abcdef" || runtime.WorkspaceRoot != "/home/tester/projects/example" {
-		t.Fatalf("unexpected runtime: %#v", runtime)
+	session, err := service.create(testTunnelContext(), newTestCreateRequest())
+	testutil.Check(t, err)
+	if session.State != "QUEUED" || session.PrivateRoot != "/home/tester/.cybershuttle/sessions/s-012345abcdef" || session.WorkspaceRoot != "/home/tester/projects/example" {
+		t.Fatalf("unexpected session: %#v", session)
 	}
 	script, err := os.ReadFile(scriptLog)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	text := string(script)
-	// The allocation runs Linkspan against a workflow. What that workflow starts
-	// is its own business, so the script names no service.
-	for _, expected := range []string{`LINKSPAN_BIN='/opt/cybershuttle/linkspan'`, `exec "$LINKSPAN_BIN" --port`, "--workflow '/home/tester/.cybershuttle/runtimes/rt-012345abcdef/workflow.yaml'"} {
+	for _, expected := range []string{`LINKSPAN_BIN='/opt/cybershuttle/linkspan'`, `exec "$LINKSPAN_BIN" --port`, "--workflow '/home/tester/.cybershuttle/sessions/s-012345abcdef/workflow.yaml'"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("script missing %q:\n%s", expected, text)
 		}
 	}
-	for _, forbidden := range []string{"jupyter", "python", "--managed-jupyter", "--runtime-id", "--remote-root"} {
+	for _, forbidden := range []string{"jupyter", "python", "--managed-jupyter", "--session-id", "--remote-root"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("script retained service-specific flag %q:\n%s", forbidden, text)
 		}
 	}
+	t.Setenv("FAKE_SESSION_STDOUT", "Linkspan started\n")
 	listed, err := reconciledList(context.Background(), service)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if len(listed) != 1 || listed[0].State != "READY" || listed[0].Node != "cn001" {
 		t.Fatalf("unexpected list: %#v", listed)
 	}
-	stopped, err := service.Stop(testTunnelContext(), runtime.ID)
+	stopped, err := service.stop(testTunnelContext(), session.ID)
 	if err != nil || stopped.State != "STOPPED" {
 		t.Fatalf("unexpected stop: %#v %v", stopped, err)
 	}
+	data, err := os.ReadFile(cancellations)
+	if err != nil || !strings.Contains(string(data), "scancel 12345") {
+		t.Fatalf("known job was not cancelled: %q %v", data, err)
+	}
+	runs, err := service.listRuns(testPrincipal)
+	if err != nil || len(runs) != 1 || runs[0].SessionID != session.ID {
+		t.Fatalf("stop did not freeze a run: %#v %v", runs, err)
+	}
+	if _, ok := service.Logs.Tail(session.ID); ok {
+		t.Fatal("stop left the live log tail behind")
+	}
+}
+
+func TestSubmittedScriptLogPathMatchesTheGenerationTheTailReads(t *testing.T) {
+	ssh, scriptLog, _ := fakeSSH(t)
+	t.Setenv("FAKE_SCANCEL_LOG", filepath.Join(t.TempDir(), "cancellations"))
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	configureTestTunnel(t, &service)
+
+	session, err := service.create(testTunnelContext(), newTestCreateRequest())
+	testutil.Check(t, err)
+	assertScriptRedirectsToTheSessionsGenerationLog(t, scriptLog, session)
+
+	t.Setenv("FAKE_SESSION_STDOUT", "Linkspan started\n")
+	_, err = reconciledList(context.Background(), service)
+	testutil.Check(t, err)
+	_, err = service.stop(testTunnelContext(), session.ID)
+	testutil.Check(t, err)
+	relaunched, err := service.start(testTunnelContext(), session.ID)
+	testutil.Check(t, err)
+	if relaunched.Generation == session.Generation {
+		t.Fatalf("relaunch reused the prior generation %q", relaunched.Generation)
+	}
+	assertScriptRedirectsToTheSessionsGenerationLog(t, scriptLog, relaunched)
 }
 
 func TestCreateIsIdempotent(t *testing.T) {
 	service := testService(t)
-	first, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 2, MemoryMB: 4096, WallMinutes: 10}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := service.Create(testTunnelContext(), CreateRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: Resources{Cores: 2, MemoryMB: 4096, WallMinutes: 10}})
+	first, err := service.create(testTunnelContext(), createRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: resources{Cores: 2, MemoryMB: 4096, WallMinutes: 10}})
+	testutil.Check(t, err)
+	second, err := service.create(testTunnelContext(), createRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: resources{Cores: 2, MemoryMB: 4096, WallMinutes: 10}})
 	if err != nil || first.ID != second.ID || first.JobID != second.JobID {
 		t.Fatalf("idempotency failed: %#v %#v %v", first, second, err)
 	}
 }
 
+func TestConcurrentMismatchedCreateInTheIdempotencyWindowAnswersConflict(t *testing.T) {
+	ssh, _, _ := fakeSSH(t)
+	started := filepath.Join(t.TempDir(), "discovery-started")
+	release := filepath.Join(t.TempDir(), "discovery-release")
+	t.Setenv("FAKE_DISCOVERY_BLOCK_ALIAS", "delta")
+	t.Setenv("FAKE_DISCOVERY_STARTED", started)
+	t.Setenv("FAKE_DISCOVERY_RELEASE", release)
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	configureTestTunnel(t, &service)
+
+	requestA := createRequest{IdempotencyKey: "shared-key", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}}
+	requestB := requestA
+	requestB.SSHHost = "beta"
+
+	errs := make(chan error, 1)
+	go func() {
+		_, err := service.create(testTunnelContext(), requestA)
+		errs <- err
+	}()
+	waitForFile(t, started)
+
+	// B completes fully while A is paused past its own idempotency check but before it re-checks under lock.
+	_, err := service.create(testTunnelContext(), requestB)
+	testutil.Check(t, err)
+	testutil.Check(t, os.WriteFile(release, nil, 0o600))
+
+	if err := <-errs; apierr.For(err).Code != "idempotency_conflict" {
+		t.Fatalf("a mismatched create that landed in the idempotency window answered %v, not idempotency_conflict", err)
+	}
+}
+
 func TestStopSurvivesRequestCancellation(t *testing.T) {
 	service := testService(t)
-	runtime := pendingRuntime(runtimeLogIDOne, "delta", "12345")
-	runtime.State = "READY"
-	runtime.Account = "project-a"
-	runtime.RootFolder = "projects/example"
-	runtime.WorkspaceRoot = "/home/tester/projects/example"
-	runtime.PrivateRoot = "/home/tester/.cybershuttle/runtimes/" + runtime.ID
-	putRuntimes(t, service, runtime)
+	session := pendingSession(sessionLogIDOne, "delta", "12345")
+	session.State = "READY"
+	session.Account = "project-a"
+	session.RootFolder = "projects/example"
+	session.WorkspaceRoot = "/home/tester/projects/example"
+	session.PrivateRoot = "/home/tester/.cybershuttle/sessions/" + session.ID
+	putSessions(t, service, session)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	stopped, err := service.Stop(testTunnelContextFrom(ctx), runtime.ID)
+	stopped, err := service.stop(testTunnelContextFrom(ctx), session.ID)
 	if err != nil || stopped.State != "STOPPING" || strings.Contains(stopped.Error, "context canceled") {
 		t.Fatalf("canceled request interrupted durable stop: %#v %v", stopped, err)
 	}
 }
 
-func TestHTTPRequiresValidatedPrincipalForRuntimeInventory(t *testing.T) {
+func TestHTTPRequiresValidatedPrincipalForSessionInventory(t *testing.T) {
 	service := testService(t)
-	handler := NewHTTPHandler(service, nil)
+	handler := NewHTTPHandler(service, noopAuth{})
 	defer handler.Close()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/runtimes", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("request without validated principal status = %d", response.Code)
-	}
-	request = httptest.NewRequest(http.MethodGet, "/api/v1/runtimes", nil).WithContext(testTunnelContext())
+	testutil.Equal(t, response.Code, http.StatusUnauthorized, "request without validated principal status")
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil).WithContext(testTunnelContext())
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("validated principal status = %d: %s", response.Code, response.Body.String())
 	}
-	var list RuntimeList
-	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil || list.Runtimes == nil {
-		t.Fatalf("invalid runtime DTO: %#v %v", list, err)
+	var list sessionList
+	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
+		t.Fatalf("invalid session DTO: %#v %v", list, err)
 	}
 }
 
@@ -362,37 +452,92 @@ func TestLoopbackListenValidation(t *testing.T) {
 	}
 }
 
-func TestDeleteRemovesATerminalRuntimeAndItsCredential(t *testing.T) {
+func TestDeleteRemovesATerminalSessionAndItsCredential(t *testing.T) {
 	service := testService(t)
-	runtime := pendingRuntime(runtimeLogIDOne, "delta", "12345")
-	setTestRuntimeMetadata(&runtime)
-	runtime.State = "FAILED"
-	putRuntimes(t, service, runtime)
-	if err := service.Credentials.Put(runtime.ID, runtime.Generation, testCredential()); err != nil {
-		t.Fatal(err)
-	}
-	service.Logs.Append(runtime.ID, "starting")
+	session := pendingSession(sessionLogIDOne, "delta", "12345")
+	setTestSessionMetadata(&session)
+	session.State = "FAILED"
+	putSessions(t, service, session)
+	testutil.Check(t, service.Credentials.Put(session.ID, session.Generation, credential()))
+	service.Logs.Append(session.ID, "starting", service.now())
 
-	deleted, err := service.Delete(testTunnelContext(), runtime.ID)
-	if err != nil || deleted.ID != runtime.ID {
+	deleted, err := service.delete(testTunnelContext(), session.ID)
+	if err != nil || deleted.ID != session.ID {
 		t.Fatalf("delete failed: %#v %v", deleted, err)
 	}
-	runtimes, err := service.ListCached()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, remaining := range runtimes {
-		if remaining.ID == runtime.ID {
-			t.Fatalf("deleted runtime is still listed: %#v", remaining)
+	sessions, err := service.loadSessions()
+	testutil.Check(t, err)
+	for _, remaining := range sessions {
+		if remaining.ID == session.ID {
+			t.Fatalf("deleted session is still listed: %#v", remaining)
 		}
 	}
-	if _, err := service.Credentials.Get(runtime.ID, runtime.Generation); err == nil {
+	if _, err := service.Credentials.Get(session.ID, session.Generation); err == nil {
 		t.Fatal("delete left the generation credential on disk")
 	}
-	if _, ok := service.Logs.Tail(runtime.ID); ok {
-		t.Fatal("delete left the runtime log tail in memory")
+	if _, ok := service.Logs.Tail(session.ID); ok {
+		t.Fatal("delete left the session log tail in memory")
 	}
-	if _, err := service.Delete(testTunnelContext(), runtime.ID); err == nil {
-		t.Fatal("deleting an absent runtime should not succeed")
+	if _, err := service.delete(testTunnelContext(), session.ID); err == nil {
+		t.Fatal("deleting an absent session should not succeed")
+	}
+}
+
+func TestStopAndDeleteSurviveADevTunnelsReleaseFailure(t *testing.T) {
+	ssh, _, _ := fakeSSH(t)
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	manager := configureTestTunnel(t, &service)
+	created, err := service.create(testTunnelContext(), newTestCreateRequest())
+	testutil.Check(t, err)
+	manager.deleteErr = errors.New("Dev Tunnels outage")
+
+	stopped, err := service.stop(testTunnelContext(), created.ID)
+	if err != nil {
+		t.Fatalf("a Dev Tunnels outage during stop answered an error instead of the record: %v", err)
+	}
+	if stopped.State != "STOPPED" {
+		t.Fatalf("unexpected state after stop: %#v", stopped)
+	}
+	if !strings.Contains(stopped.Error, "Dev Tunnels outage") {
+		t.Fatalf("the release failure was not recorded on the session: %#v", stopped)
+	}
+
+	deleted, err := service.delete(testTunnelContext(), created.ID)
+	if err != nil {
+		t.Fatalf("delete answered an error instead of removing the stopped session: %v", err)
+	}
+	if deleted.ID != created.ID {
+		t.Fatalf("unexpected deleted session: %#v", deleted)
+	}
+}
+
+func TestStopOnAnAlreadyStoppedSessionChangesNothing(t *testing.T) {
+	current := time.Unix(1000, 0).UTC()
+	clock := func() time.Time { return current }
+	ssh, _, _ := fakeSSH(t)
+	t.Setenv("FAKE_SCANCEL_LOG", filepath.Join(t.TempDir(), "cancellations"))
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Now: clock, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	configureTestTunnel(t, &service)
+
+	session, err := service.create(testTunnelContext(), newTestCreateRequest())
+	testutil.Check(t, err)
+	t.Setenv("FAKE_SESSION_STDOUT", "Linkspan started\n")
+	_, err = reconciledList(context.Background(), service)
+	testutil.Check(t, err)
+
+	current = current.Add(time.Minute)
+	first, err := service.stop(testTunnelContext(), session.ID)
+	if err != nil || first.State != "STOPPED" {
+		t.Fatalf("unexpected first stop: %#v %v", first, err)
+	}
+
+	current = current.Add(time.Minute)
+	second, err := service.stop(testTunnelContext(), session.ID)
+	testutil.Check(t, err)
+	if !second.UpdatedAt.Equal(first.UpdatedAt) {
+		t.Fatalf("a second stop on an already-stopped session changed UpdatedAt: %v -> %v", first.UpdatedAt, second.UpdatedAt)
+	}
+	if second.Error != first.Error {
+		t.Fatalf("a second stop on an already-stopped session changed Error: %q -> %q", first.Error, second.Error)
 	}
 }

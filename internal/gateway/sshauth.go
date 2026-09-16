@@ -1,13 +1,17 @@
-// Package gateway serves the interactive SSH authentication WebSocket, whose
-// prompt establishes a multiplexed control master. It runs commands only
-// through sshexec and has no view of the runtime domain.
+// Package gateway serves the interactive SSH authentication WebSocket, whose prompt establishes a control master.
+// It runs commands only through sshexec and has no view of the session domain.
+// The request that first sees the master turn healthy owns it, so shutdown reaps that exact process.
+//
+//	authInputOp, authAttempt, ownedMaster, SSHAuthManager
+//	stopAndReap, closeMaster, cleanupFailedAttempt
+//	writeReady, masterExitFrame, readClientFrames, negotiableWindow, writeClientInput
+//	NewSSHAuthManager
 package gateway
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,13 +20,12 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
+	"github.com/cyber-shuttle/cs-control/internal/apihttp"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
-	"github.com/cyber-shuttle/cs-control/internal/httpx"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 	"github.com/gorilla/websocket"
 )
 
-// Requests have already passed the exact-origin OAuth boundary.
 var controlUpgrader = websocket.Upgrader{Subprotocols: []string{authn.ControlWebSocketProtocol}, CheckOrigin: func(*http.Request) bool { return true }}
 
 const (
@@ -40,9 +43,7 @@ const (
 
 var (
 	authWriteTimeout = 5 * time.Second
-	// An idle WebSocket is the first thing a proxy closes, and answering a second
-	// factor leaves this one idle for as long as the person takes.
-	authKeepAlive = 20 * time.Second
+	authKeepAlive    = 20 * time.Second
 )
 
 type authInputOp struct {
@@ -50,17 +51,14 @@ type authInputOp struct {
 	resize *clientFrame
 }
 
-type authSession struct {
-	alias string
-	// The caller's own runner: an alias resolves through their configuration, and
-	// the master it authenticates is theirs alone.
+type authAttempt struct {
+	alias       string
 	runner      sshexec.Runner
 	controlPath string
 	ctx         context.Context
 	cancel      context.CancelFunc
 
 	mu       sync.Mutex
-	finished bool
 	cmd      *exec.Cmd
 	master   *os.File
 	conn     *websocket.Conn
@@ -83,28 +81,168 @@ type SSHAuthManager struct {
 	cancel context.CancelFunc
 	mu     sync.Mutex
 	closed bool
-	active map[string]*authSession
+	active map[string]*authAttempt
 	owned  map[string]*ownedMaster
 	wg     sync.WaitGroup
 }
 
-func NewSSHAuthManager(runner sshexec.Runner) *SSHAuthManager {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &SSHAuthManager{runner: runner, ctx: ctx, cancel: cancel, active: map[string]*authSession{}, owned: map[string]*ownedMaster{}}
+func (s *authAttempt) assignConnection(conn *websocket.Conn) {
+	s.mu.Lock()
+	s.conn = conn
+	s.mu.Unlock()
 }
 
-func (m *SSHAuthManager) admit(alias string, runner sshexec.Runner) (*authSession, error) {
-	// Reject a duplicate alias before resolving `ssh -G`, which may invoke helpers
-	// and take seconds: a second WebSocket would otherwise wait for teardown and
-	// then become a new authentication.
+func (s *authAttempt) assign(cmd *exec.Cmd, master *os.File, waitDone chan struct{}) {
+	s.mu.Lock()
+	s.cmd, s.master, s.waitDone = cmd, master, waitDone
+	s.mu.Unlock()
+}
+
+func (s *authAttempt) closeIO() {
+	s.mu.Lock()
+	conn, master := s.conn, s.master
+	s.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if master != nil {
+		_ = master.Close()
+	}
+}
+
+func stopAndReap(attempt *authAttempt) {
+	attempt.mu.Lock()
+	cmd, master, waitDone := attempt.cmd, attempt.master, attempt.waitDone
+	attempt.mu.Unlock()
+	if master != nil {
+		_ = master.Close()
+	}
+	if cmd == nil || cmd.Process == nil || waitDone == nil {
+		return
+	}
+	sshexec.KillGroup(cmd, waitDone)
+}
+
+func closeMaster(master *ownedMaster) {
+	if master == nil {
+		return
+	}
+	sshexec.KillGroup(master.cmd, master.waitDone)
+	if master.master != nil {
+		_ = master.master.Close()
+	}
+	sshexec.UnlockControl(master.lock)
+}
+
+func cleanupFailedAttempt(attempt *authAttempt) {
+	attempt.cancel()
+	stopAndReap(attempt)
+	if attempt.lock != nil {
+		sshexec.UnlockControl(attempt.lock)
+		attempt.lock = nil
+	}
+}
+
+func writeReady(conn *websocket.Conn) {
+	_ = writeJSON(conn, authWriteTimeout, serverFrame{Type: "ready"})
+	_ = writeJSON(conn, authWriteTimeout, exitFrame(0, ""))
+}
+
+func masterExitFrame(err error) serverFrame {
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return exitFrame(1, "SSH control master exited before becoming ready")
+	case errors.As(err, &exit):
+		return exitFrame(exit.ExitCode(), "SSH authentication failed")
+	}
+	return exitFrame(1, "SSH authentication failed")
+}
+
+func readClientFrames(attempt *authAttempt, conn *websocket.Conn, input chan<- authInputOp) <-chan struct{} {
+	done := make(chan struct{})
+	queue := func(operation authInputOp) bool {
+		select {
+		case input <- operation:
+			return true
+		case <-attempt.ctx.Done():
+		default:
+			attempt.cancel()
+		}
+		return false
+	}
+	go func() {
+		defer close(done)
+		for {
+			messageType, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			switch messageType {
+			case websocket.BinaryMessage:
+				if len(data) > maxAuthInput {
+					attempt.cancel()
+					return
+				}
+				if !queue(authInputOp{data: data}) {
+					return
+				}
+			case websocket.TextMessage:
+				var frame clientFrame
+				if err := json.Unmarshal(data, &frame); err != nil {
+					return
+				}
+				if frame.Type == "resize" && !queue(authInputOp{resize: &frame}) {
+					return
+				}
+			default:
+				attempt.cancel()
+				return
+			}
+		}
+	}()
+	return done
+}
+
+func negotiableWindow(frame clientFrame) bool {
+	return frame.Cols >= ptyMinCols && frame.Cols <= ptyMaxCols && frame.Rows >= ptyMinRows && frame.Rows <= ptyMaxRows
+}
+
+func writeClientInput(attempt *authAttempt, master *os.File, input <-chan authInputOp) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case operation := <-input:
+				switch {
+				case operation.resize == nil:
+					if _, err := master.Write(operation.data); err != nil {
+						return
+					}
+				case negotiableWindow(*operation.resize):
+					_ = pty.Setsize(master, &pty.Winsize{Cols: operation.resize.Cols, Rows: operation.resize.Rows})
+				}
+			case <-attempt.ctx.Done():
+				return
+			}
+		}
+	}()
+	return done
+}
+
+func NewSSHAuthManager(runner sshexec.Runner) *SSHAuthManager {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &SSHAuthManager{runner: runner, ctx: ctx, cancel: cancel, active: map[string]*authAttempt{}, owned: map[string]*ownedMaster{}}
+}
+
+func (m *SSHAuthManager) admit(alias string, runner sshexec.Runner) (*authAttempt, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		return nil, apierr.New("service_stopping", "SSH authentication service is stopping", 503)
 	}
 	for _, active := range m.active {
-		// Same name, same configuration: two callers naming the same alias are
-		// authenticating different hosts and must not block each other.
 		if active.alias == alias && active.runner.Hosts.UserPath == runner.Hosts.UserPath {
 			m.mu.Unlock()
 			return nil, apierr.New("ssh_authentication_in_progress", "SSH authentication is already in progress for "+alias, 409)
@@ -121,136 +259,44 @@ func (m *SSHAuthManager) admit(alias string, runner sshexec.Runner) (*authSessio
 	if m.closed {
 		return nil, apierr.New("service_stopping", "SSH authentication service is stopping", 503)
 	}
-	// Recheck after the unlocked effective-configuration lookup.
 	for _, active := range m.active {
-		if active.alias == alias || active.controlPath == path {
+		if active.controlPath == path {
 			return nil, apierr.New("ssh_authentication_in_progress", "SSH authentication is already in progress for "+alias, 409)
 		}
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
-	session := &authSession{alias: alias, runner: runner, controlPath: path, ctx: ctx, cancel: cancel}
-	m.active[path] = session
+	attempt := &authAttempt{alias: alias, runner: runner, controlPath: path, ctx: ctx, cancel: cancel}
+	m.active[path] = attempt
 	m.wg.Add(1)
-	return session, nil
+	return attempt, nil
 }
 
-func (m *SSHAuthManager) finish(session *authSession, own bool) bool {
+func (m *SSHAuthManager) finish(attempt *authAttempt, own bool) bool {
 	m.mu.Lock()
-	session.mu.Lock()
-	// A successful process may race with shutdown. Do not publish ownership
-	// after Close; let the caller reap the exact process while retaining its lock.
-	if own && (m.closed || session.cmd == nil || session.waitDone == nil) {
-		session.mu.Unlock()
+	attempt.mu.Lock()
+	if own && (m.closed || attempt.cmd == nil || attempt.waitDone == nil) {
+		attempt.mu.Unlock()
 		m.mu.Unlock()
 		return false
 	}
-	session.finished = true
-	if m.active[session.controlPath] == session {
-		delete(m.active, session.controlPath)
+	if m.active[attempt.controlPath] == attempt {
+		delete(m.active, attempt.controlPath)
 	}
 	if own {
-		m.owned[session.controlPath] = &ownedMaster{
-			alias: session.alias, lock: session.lock,
-			cmd: session.cmd, master: session.master, waitDone: session.waitDone,
+		m.owned[attempt.controlPath] = &ownedMaster{
+			alias: attempt.alias, lock: attempt.lock,
+			cmd: attempt.cmd, master: attempt.master, waitDone: attempt.waitDone,
 		}
-		session.lock = nil
+		attempt.lock = nil
 	}
-	session.mu.Unlock()
+	attempt.mu.Unlock()
 	m.mu.Unlock()
-	sshexec.UnlockControl(session.lock)
-	session.lock = nil
+	sshexec.UnlockControl(attempt.lock)
+	attempt.lock = nil
 	m.wg.Done()
 	return own
 }
 
-func (m *SSHAuthManager) command(session *authSession) (*exec.Cmd, bool, error) {
-	// A manager keeps the lifecycle flock for masters it created, so an expired
-	// ControlPersist process leaves a lock that outlives its socket and would make
-	// the next authentication wait forever on itself.
-	if healthy, err := m.reclaimExpiredOwned(session.runner, session.alias, session.controlPath); err != nil || healthy {
-		return nil, healthy, err
-	}
-	lock, healthy, err := session.runner.AcquireControlLock(session.ctx, session.alias, session.controlPath)
-	if err != nil {
-		return nil, false, err
-	}
-	session.lock = lock
-	if healthy {
-		return nil, true, nil
-	}
-	if err := sshexec.RemoveStaleControl(session.controlPath); err != nil {
-		return nil, false, err
-	}
-	args, err := session.runner.Args(session.ctx, session.alias, true)
-	if err != nil {
-		return nil, false, err
-	}
-	// Authenticate and persist only: with every option before the host, -N/-T stop
-	// OpenSSH starting a remote shell whose MOTD would pollute this prompt.
-	host := args[len(args)-1]
-	options := []string{"-q", "-T", "-N", "-o", "LogLevel=ERROR"}
-	args = append(args[:len(args)-1], append(options, host)...)
-	cmd := exec.Command(session.runner.Bin(), args...)
-	cmd.Env = sshexec.ChildEnv()
-	return cmd, false, nil
-}
-
-func (s *authSession) assignConnection(conn *websocket.Conn) {
-	s.mu.Lock()
-	s.conn = conn
-	s.mu.Unlock()
-}
-
-func (s *authSession) assign(cmd *exec.Cmd, master *os.File, waitDone chan struct{}) {
-	s.mu.Lock()
-	s.cmd, s.master, s.waitDone = cmd, master, waitDone
-	s.mu.Unlock()
-}
-
-func (s *authSession) closeIO() {
-	s.mu.Lock()
-	conn, master := s.conn, s.master
-	s.mu.Unlock()
-	if conn != nil {
-		_ = conn.Close()
-	}
-	if master != nil {
-		_ = master.Close()
-	}
-}
-
-// stopAndReap ends a session that never became an owned master. A closed
-// waitDone already tells KillGroup the process was reaped.
-func stopAndReap(session *authSession) {
-	session.mu.Lock()
-	cmd, master, waitDone := session.cmd, session.master, session.waitDone
-	session.mu.Unlock()
-	if master != nil {
-		_ = master.Close()
-	}
-	if cmd == nil || cmd.Process == nil || waitDone == nil {
-		return
-	}
-	sshexec.KillGroup(cmd, waitDone)
-}
-
-func closeMaster(master *ownedMaster) {
-	if master == nil {
-		return
-	}
-	// Reap this exact process group; never unlink whatever now occupies its
-	// former ControlPath.
-	sshexec.KillGroup(master.cmd, master.waitDone)
-	if master.master != nil {
-		_ = master.master.Close()
-	}
-	sshexec.UnlockControl(master.lock)
-}
-
-// reclaimExpiredOwned reports that this manager's own foreground master is still
-// alive and answering. A dead one is reaped and its lock released before startup
-// retries, leaving the stale socket for locked startup cleanup; a foreign healthy
-// socket is reused later but never claimed or terminated here.
 func (m *SSHAuthManager) reclaimExpiredOwned(runner sshexec.Runner, alias, path string) (bool, error) {
 	m.mu.Lock()
 	master := m.owned[path]
@@ -283,119 +329,45 @@ func (m *SSHAuthManager) reclaimExpiredOwned(runner sshexec.Runner, alias, path 
 	return false, nil
 }
 
-func cleanupFailedSession(session *authSession) {
-	stopAndReap(session)
-	if session.lock != nil {
-		// Stale-path removal belongs only to the next exclusive startup.
-		sshexec.UnlockControl(session.lock)
-		session.lock = nil
+func (m *SSHAuthManager) command(attempt *authAttempt) (*exec.Cmd, bool, error) {
+	if healthy, err := m.reclaimExpiredOwned(attempt.runner, attempt.alias, attempt.controlPath); err != nil || healthy {
+		return nil, healthy, err
 	}
-}
-
-func writeReady(conn *websocket.Conn) {
-	_ = writeJSON(conn, authWriteTimeout, serverFrame{Type: "ready"})
-	_ = writeJSON(conn, authWriteTimeout, exitFrame(0, ""))
-}
-
-// masterExitFrame reports a fixed message rather than the process error, so no
-// diagnostic from the remote host reaches the browser.
-func masterExitFrame(err error) serverFrame {
-	var exit *exec.ExitError
-	switch {
-	case err == nil:
-		return exitFrame(1, "SSH control master exited before becoming ready")
-	case errors.As(err, &exit):
-		return exitFrame(exit.ExitCode(), "SSH authentication failed")
+	lock, healthy, err := attempt.runner.AcquireControlLock(attempt.ctx, attempt.alias, attempt.controlPath)
+	if err != nil {
+		return nil, false, err
 	}
-	return exitFrame(1, "SSH authentication failed")
-}
-
-// readClientFrames forwards browser input and resize frames until the socket
-// closes. A client may not queue unbounded credentials or terminal input, so a
-// full queue ends the session rather than buffering behind it.
-func readClientFrames(session *authSession, conn *websocket.Conn, input chan<- authInputOp) <-chan struct{} {
-	done := make(chan struct{})
-	queue := func(operation authInputOp) bool {
-		select {
-		case input <- operation:
-			return true
-		case <-session.ctx.Done():
-		default:
-			session.cancel()
-		}
-		return false
+	attempt.lock = lock
+	if healthy {
+		return nil, true, nil
 	}
-	go func() {
-		defer close(done)
-		for {
-			messageType, data, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-			switch messageType {
-			case websocket.BinaryMessage:
-				if len(data) > maxAuthInput {
-					session.cancel()
-					return
-				}
-				if !queue(authInputOp{data: data}) {
-					return
-				}
-			case websocket.TextMessage:
-				var frame clientFrame
-				if err := json.Unmarshal(data, &frame); err != nil {
-					return
-				}
-				if frame.Type == "resize" && !queue(authInputOp{resize: &frame}) {
-					return
-				}
-			default:
-				session.cancel()
-				return
-			}
-		}
-	}()
-	return done
-}
-
-func negotiableWindow(frame clientFrame) bool {
-	return frame.Cols >= ptyMinCols && frame.Cols <= ptyMaxCols && frame.Rows >= ptyMinRows && frame.Rows <= ptyMaxRows
-}
-
-func writeClientInput(session *authSession, master *os.File, input <-chan authInputOp) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case operation := <-input:
-				switch {
-				case operation.resize == nil:
-					if _, err := master.Write(operation.data); err != nil {
-						return
-					}
-				case negotiableWindow(*operation.resize):
-					_ = pty.Setsize(master, &pty.Winsize{Cols: operation.resize.Cols, Rows: operation.resize.Rows})
-				}
-			case <-session.ctx.Done():
-				return
-			}
-		}
-	}()
-	return done
+	if err := sshexec.RemoveStaleControl(attempt.controlPath); err != nil {
+		return nil, false, err
+	}
+	args, err := attempt.runner.Args(attempt.ctx, attempt.alias, true)
+	if err != nil {
+		return nil, false, err
+	}
+	host := args[len(args)-1]
+	options := make([]string, 0, 6)
+	options = append(options, "-q", "-T", "-N", "-o", "LogLevel=ERROR", host)
+	args = append(args[:len(args)-1], options...)
+	cmd := exec.Command(attempt.runner.Bin(), args...)
+	cmd.Env = sshexec.ChildEnv()
+	return cmd, false, nil
 }
 
 func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *http.Request, alias string, runner sshexec.Runner) {
-	session, err := m.admit(alias, runner)
+	attempt, err := m.admit(alias, runner)
 	if err != nil {
-		httpx.WriteError(writer, err)
+		apihttp.WriteError(writer, err)
 		return
 	}
 	finished := false
 	defer func() {
 		if !finished {
-			cleanupFailedSession(session)
-			m.finish(session, false)
+			cleanupFailedAttempt(attempt)
+			m.finish(attempt, false)
 		}
 	}()
 
@@ -403,11 +375,11 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 	if err != nil {
 		return
 	}
-	session.assignConnection(conn)
-	defer conn.Close()
+	attempt.assignConnection(conn)
+	defer func() { _ = conn.Close() }()
 	conn.SetReadLimit(maxAuthFrame)
 
-	cmd, alreadyReady, err := m.command(session)
+	cmd, alreadyReady, err := m.command(attempt)
 	if err != nil {
 		_ = writeJSON(conn, authWriteTimeout, exitFrame(1, "failed to prepare SSH"))
 		return
@@ -415,7 +387,8 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 	if alreadyReady {
 		writeReady(conn)
 		finished = true
-		m.finish(session, false)
+		m.finish(attempt, false)
+		attempt.cancel()
 		return
 	}
 	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: ptyInitialCols, Rows: ptyInitialRows})
@@ -426,18 +399,18 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 	waitDone := make(chan struct{})
 	go func() {
 		err := cmd.Wait()
-		session.mu.Lock()
-		session.waitErr = err
-		session.mu.Unlock()
+		attempt.mu.Lock()
+		attempt.waitErr = err
+		attempt.mu.Unlock()
 		close(waitDone)
 	}()
-	session.assign(cmd, master, waitDone)
+	attempt.assign(cmd, master, waitDone)
 
 	output := make(chan []byte, 8)
-	go pumpPTY(session.ctx, master, output, 16<<10)
+	go pumpPTY(attempt.ctx, master, output, 16<<10)
 	input := make(chan authInputOp, maxQueuedAuthInput/maxAuthInput)
-	clientGone := readClientFrames(session, conn, input)
-	inputWriterDone := writeClientInput(session, master, input)
+	clientGone := readClientFrames(attempt, conn, input)
+	inputWriterDone := writeClientInput(attempt, master, input)
 
 	readiness := time.NewTicker(50 * time.Millisecond)
 	defer readiness.Stop()
@@ -454,34 +427,35 @@ func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *htt
 				return
 			}
 		case <-readiness.C:
-			if !session.runner.MasterHealthy(alias, session.controlPath) {
+			if !attempt.runner.MasterHealthy(alias, attempt.controlPath) {
 				continue
 			}
 			finished = true
-			if !m.finish(session, true) {
-				cleanupFailedSession(session)
-				m.finish(session, false)
+			if !m.finish(attempt, true) {
+				cleanupFailedAttempt(attempt)
+				m.finish(attempt, false)
 				_ = writeJSON(conn, authWriteTimeout, exitFrame(1, "SSH authentication service is stopping"))
 				return
 			}
 			writeReady(conn)
-			session.cancel() // stop browser I/O goroutines, not the owned process
-			// Nothing reads the PTY the owned master authenticated on once this
-			// loop ends, so drain it: a full buffer would block that master.
-			go func() { _, _ = io.Copy(io.Discard, master) }()
+			attempt.cancel()
+			go func() {
+				for range output {
+				}
+			}()
 			return
 		case <-waitDone:
 			_ = master.Close()
-			session.mu.Lock()
-			err := session.waitErr
-			session.mu.Unlock()
+			attempt.mu.Lock()
+			err := attempt.waitErr
+			attempt.mu.Unlock()
 			_ = writeJSON(conn, authWriteTimeout, masterExitFrame(err))
 			return
 		case <-clientGone:
 			return
 		case <-inputWriterDone:
 			return
-		case <-session.ctx.Done():
+		case <-attempt.ctx.Done():
 			return
 		}
 	}
@@ -495,14 +469,14 @@ func (m *SSHAuthManager) Close() {
 	}
 	m.closed = true
 	m.cancel()
-	sessions := make([]*authSession, 0, len(m.active))
-	for _, session := range m.active {
-		session.cancel()
-		sessions = append(sessions, session)
+	attempts := make([]*authAttempt, 0, len(m.active))
+	for _, attempt := range m.active {
+		attempt.cancel()
+		attempts = append(attempts, attempt)
 	}
 	m.mu.Unlock()
-	for _, session := range sessions {
-		session.closeIO()
+	for _, attempt := range attempts {
+		attempt.closeIO()
 	}
 	m.wg.Wait()
 	m.mu.Lock()

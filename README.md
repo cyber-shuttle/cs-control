@@ -10,34 +10,36 @@ machine. `csctl` is the local daemon that does that work: it submits the [Slurm]
 job, prepares the login node, and creates a tunnel the compute node hosts outbound, so a session is reachable
 without the cluster opening an inbound port.
 
-A runtime is the record a client creates and polls; the allocation is the Slurm job that serves it, and one
-runtime can outlive several. Everything happens as you: your `~/.ssh/config`, your SSH credentials, your Slurm
-allocation. `csctl` binds to loopback only and never proxies session traffic — once an allocation is running,
+A session is the record a client creates and polls; a Slurm job serves it, and one session can outlive
+several. Everything happens as you: your own SSH host configuration, your SSH credentials, your Slurm
+account. `csctl` binds to loopback only and never proxies session traffic — once a session is running,
 the browser reaches it directly over the tunnel.
 
 ## Status
 
-Pre-release. There are no tagged versions and no published binaries; `csctl version` prints a constant string
-that corresponds to no release. The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records
-what has changed on `main`.
+Pre-release. There are no published binaries; `csctl version` prints the build's hardcoded version constant.
+The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records what has changed on `main`.
 
 ## Requirements
 
 - **macOS or Linux**, with an OpenSSH client on `PATH`. CI covers Linux only.
-- **Go 1.23 or newer.** Building from source is the only install path.
+- **Go 1.24 or newer.** Building from source is the only install path.
 - **A Microsoft Entra tenant.** `--oauth-authority` accepts only `https://login.microsoftonline.com/<tenant>/`
   with no port; the multi-tenant aliases `common`, `consumers` and `organizations` are rejected.
 - **A Microsoft account entitled to
   [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview).** Sign-in uses the
-  Dev Tunnels first-party client, and each allocation creates a tunnel against that account.
+  Dev Tunnels first-party client, and each session creates a tunnel against that account.
 - **An SSH-reachable Linux Slurm cluster** whose login node provides `sacctmgr`, `sinfo`, `sbatch`, `squeue`,
-  `sacct`, `scancel`, `curl` and `tar`, and whose nodes run Linux `x86_64` or `arm64`.
-- **[Linkspan](https://github.com/cyber-shuttle/linkspan) 0.16.0 or newer**, the release that added
-  `--tunnel-host-token`; `csctl` installs the latest release on a host that has none.
-- **Outbound internet.** From the login node to `astral.sh` and `github.com`; from the compute node to
-  `tunnelsassetsprod.blob.core.windows.net`, which Linkspan fetches Microsoft's `devtunnel` CLI from before it
-  hosts the tunnel; and from your own machine to `login.microsoftonline.com`,
-  `*.rel.tunnels.api.visualstudio.com` and `*.devtunnels.ms`. See
+  `sacct`, `scancel`, `curl`, `tar`, `base64`, `od`, `install`, `printenv`, `sed` and `sort -V`, and whose
+  nodes run Linux `x86_64` or `arm64` with `curl`.
+- **[Linkspan](https://github.com/cyber-shuttle/linkspan) 0.19.0 or newer**, the release whose workflow
+  document is `tasks`; `csctl` installs the latest release on a host that has none.
+- **Outbound internet.** From the login node to `github.com`; from the compute node to `astral.sh`,
+  `github.com` and `pypi.org`, which Linkspan installs `uv`, its Python and packages from, and to
+  `tunnelsassetsprod.blob.core.windows.net`, which Linkspan fetches Microsoft's `devtunnel` CLI from, and to
+  `*.rel.tunnels.api.visualstudio.com` and `*.devtunnels.ms`, which it hosts the tunnel through; and from
+  your own machine to `login.microsoftonline.com`, `*.rel.tunnels.api.visualstudio.com` and
+  `*.devtunnels.ms`. See
   [what it runs on the cluster](#what-it-runs-on-the-cluster).
 
 ## Install
@@ -46,7 +48,7 @@ what has changed on `main`.
 go install github.com/cyber-shuttle/cs-control/cmd/csctl@latest
 ```
 
-There are no tags, so `@latest` resolves to the current `main` commit. From a clone:
+`@latest` resolves to the newest tagged release. From a clone:
 
 ```bash
 git clone https://github.com/cyber-shuttle/cs-control.git
@@ -67,11 +69,11 @@ csctl serve \
 and loopback HTTP origins are accepted, wildcards are not. `--listen` defaults to `127.0.0.1:8045` and must be
 an explicit loopback address.
 
-There are no CLI commands for hosts or runtimes — a client drives the daemon over the API. Confirm it is
+There are no CLI commands for hosts or sessions — a client drives the daemon over the API. Confirm it is
 listening and that the authentication boundary is in front of it:
 
 ```console
-$ curl -si http://127.0.0.1:8045/api/v1/runtimes | head -1
+$ curl -si http://127.0.0.1:8045/api/v1/sessions | head -1
 HTTP/1.1 401 Unauthorized
 ```
 
@@ -93,41 +95,43 @@ global cluster's tunnel quota is exhausted; it changes tunnel management only.
 
 ## What it runs on the cluster
 
-Creating a runtime prepares the login node over SSH before it submits anything. In one connection, as your
+Creating a session prepares the login node over SSH before it submits anything. In one connection, as your
 account, it:
 
 - downloads a [Linkspan](https://github.com/cyber-shuttle/linkspan) release tarball from GitHub into
-  `$HOME/.cybershuttle/bin`, unless the installed one is current, and refuses the host if that Linkspan does
-  not accept `--tunnel-host-token`;
-- writes the workflow document the job will run, under `$HOME/.cybershuttle/runtimes/<runtime id>`.
+  `$HOME/.cybershuttle/bin`, unless the installed one is current, and refuses the host if that Linkspan is
+  older than 0.19.0;
+- writes the workflow document the job will run, under `$HOME/.cybershuttle/sessions/<session id>`.
 
 Linkspan is the CyberShuttle agent that runs as the batch job's main process: it hosts the tunnel, installs
 `uv`, builds the Python environment under `$HOME/.cybershuttle` and starts Jupyter Server on the compute node.
 Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle`. `csctl` keeps a multiplexed OpenSSH connection to the
-login node open between operations and starts no other long-lived process there; the allocation itself runs on
-a compute node. The flags and outputs `csctl` depends on are listed in
+login node open between operations and starts no other long-lived process there; the session itself runs on
+a compute node. The batch script redirects the job's stdout and stderr to
+`$HOME/.cybershuttle/logs/<session id>-<generation>.out` and `.err`; nothing prunes them. The flags and outputs
+`csctl` depends on are listed in
 [Linkspan's compatibility document](https://github.com/cyber-shuttle/linkspan/blob/main/docs/COMPATIBILITY.md).
 
 ## Local state
 
 `~/.cybershuttle/control`, created and verified at mode `0700`:
 
-- `state.json` — non-secret scheduler, allocation and tunnel metadata
-- `credentials/` — the per-allocation Dev Tunnel connect token and Jupyter token, mode `0600`
-- `ssh/` — OpenSSH `ControlMaster` sockets
+- `state.json` — non-secret scheduler, session and tunnel metadata
+- `credentials/` — the per-generation Dev Tunnel connect token and Jupyter token, mode `0600`
+- `hosts/<principal>/config` — each caller's own managed SSH host entries, mode `0600`
 
-The API adds SSH host entries to `~/.ssh/config` inside its own managed block, and reads but never rewrites
-anything outside it.
+Each caller's SSH host entries live in their own `hosts/<principal>/config` inside a managed block; the API
+never reads or writes `~/.ssh/config` for the account `csctl` runs as.
 
 ## Documentation
 
 - [docs/API.md](docs/API.md) — the loopback HTTP and WebSocket API a client drives
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — package layering, allocation lifecycle, trust boundaries
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — package layering, session lifecycle, trust boundaries
 
 ## Related projects
 
 - **[cs-jupyter](https://github.com/cyber-shuttle/cs-jupyter)** — the browser client that drives this API: it
-  signs in, creates and polls runtimes, and connects to a `READY` one.
+  signs in, creates and polls sessions, and connects to a `READY` one.
 - **[linkspan](https://github.com/cyber-shuttle/linkspan)** — the compute-node agent `csctl` installs and
   submits as the job's main process.
 

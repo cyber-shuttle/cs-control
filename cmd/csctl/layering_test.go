@@ -1,3 +1,7 @@
+// Enforces docs/ARCHITECTURE.md's package order. Every import must name a strictly lower layer.
+//
+//	modulePrefix, lowestToHighest
+//	TestNoPackageImportsUpward
 package main
 
 import (
@@ -5,29 +9,33 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
 const modulePrefix = "github.com/cyber-shuttle/cs-control/"
 
 var lowestToHighest = []string{
+	"internal/testutil",
 	"internal/apierr",
+	"internal/apihttp",
 	"internal/safeio",
-	"internal/framed",
 	"internal/httpx",
 	"internal/sshconfig",
 	"internal/sshexec",
 	"internal/devtunnel",
+	"internal/credentialstore",
 	"internal/authn",
-	"internal/gateway",
 	"internal/control",
+	"internal/gateway",
 	"cmd/csctl",
 }
 
 func TestNoPackageImportsUpward(t *testing.T) {
-	listed, err := exec.Command("go", "list", "-f", `{{.ImportPath}} {{join .Imports " "}}`, modulePrefix+"...").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
+	listed, err := exec.Command("go", "list", "-f",
+		`{{.ImportPath}} {{join .Imports " "}} {{join .TestImports " "}} {{join .XTestImports " "}}`,
+		modulePrefix+"...").Output()
+	testutil.Check(t, err)
 
 	for _, line := range strings.Split(strings.TrimSpace(string(listed)), "\n") {
 		fields := strings.Fields(line)

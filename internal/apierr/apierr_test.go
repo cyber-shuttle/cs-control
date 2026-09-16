@@ -1,3 +1,6 @@
+// Tests that For hides an unclassified error's own text, and passes a classified error through unchanged.
+//
+//	TestUnclassifiedErrorDoesNotCarryItsOwnText
 package apierr
 
 import (
@@ -17,12 +20,9 @@ func TestUnclassifiedErrorDoesNotCarryItsOwnText(t *testing.T) {
 	if strings.Contains(api.Message, "state.json") {
 		t.Errorf("an unclassified error reached the client as its own text: %q", api.Message)
 	}
-}
 
-func TestClassifiedErrorKeepsItsCodeAndMessage(t *testing.T) {
-	api := For(New("invalid_json", "body is not JSON", 400))
-
-	if api.Code != "invalid_json" || api.Message != "body is not JSON" || api.Status != 400 {
-		t.Errorf("a subsystem's classified error was rewritten: %+v", api)
+	classified := For(New("invalid_json", "body is not JSON", 400))
+	if classified.Code != "invalid_json" || classified.Message != "body is not JSON" || classified.Status != 400 {
+		t.Errorf("a subsystem's classified error was rewritten: %+v", classified)
 	}
 }

@@ -1,3 +1,17 @@
+// Exercises SSHAuthManager end to end against a stub OpenSSH.
+// Covers single-flight admission, prompt round-trip, keep-alive, master ownership, and rejected attacker paths.
+// The stub re-execs this test binary as TestSSHAuthHelper to answer OpenSSH's own invocations.
+//
+//	pollUntil, waitForFile, waitProcessGone, authTestFrame, readAuthServerFrame, testIdentityToken,
+//	testPrincipal, oauthValidatorFunc, serveSSHRoute, newAuthTestService, assertManagerCloseReaps, bindTestUnixSocket
+//	TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup, TestSSHAuthHelper,
+//	TestControlPathRejectsSymlinkAndInsecureTempArtifacts, TestControlPathChangesForEveryEffectiveConfigurationSource
+//	TestPromptWaitKeepsTheConnectionAlive
+//	TestOwnedForegroundMasterShutdownDoesNotTouchForeignReplacement
+//	TestStopAndReapKillsStubbornProcess, TestConcurrentManagersSerializeControlPathStartup
+//	TestCloseUnblocksFullPTYInputQueueAndReapsProcess
+//	TestServeWebSocketAlreadyReadyCancelsAttemptContext
+//	TestCleanupFailedAttemptCancelsContextAndDoesNotLeakGoroutines
 package gateway
 
 import (
@@ -13,40 +27,162 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/gorilla/websocket"
+
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
+	"github.com/cyber-shuttle/cs-control/internal/apihttp"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
-	"github.com/cyber-shuttle/cs-control/internal/httpx"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
-	"github.com/gorilla/websocket"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
-func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
+func pollUntil(t *testing.T, timeout time.Duration, ready func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ready() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal(msg)
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	pollUntil(t, 3*time.Second, func() bool {
+		info, err := os.Stat(path)
+		return err == nil && info.Size() > 0
+	}, "timed out waiting for "+path)
+}
+
+func waitProcessGone(t *testing.T, pid int) {
+	t.Helper()
+	pollUntil(t, 3*time.Second, func() bool {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	}, fmt.Sprintf("timed out waiting for process %d to exit", pid))
+}
+
+type authTestFrame struct {
+	serverFrame
+	Output []byte
+}
+
+func readAuthServerFrame(t *testing.T, connection *websocket.Conn) authTestFrame {
+	t.Helper()
+	_ = connection.SetReadDeadline(time.Now().Add(5 * time.Second))
+	messageType, data, err := connection.ReadMessage()
+	testutil.Check(t, err)
+	if messageType == websocket.BinaryMessage {
+		return authTestFrame{serverFrame: serverFrame{Type: "output"}, Output: data}
+	}
+	testutil.Equal(t, messageType, websocket.TextMessage, "auth WebSocket message type")
+	var frame serverFrame
+	testutil.Check(t, json.Unmarshal(data, &frame))
+	if frame.Type == "output" {
+		t.Fatal("auth output must use binary WebSocket messages")
+	}
+	return authTestFrame{serverFrame: frame}
+}
+
+const testIdentityToken = "signed-test-identity-token"
+
+var testPrincipal = authn.Principal{Subject: "test-owner", Tenant: "test-tenant"}
+
+type oauthValidatorFunc func(context.Context, string) (authn.Principal, error)
+
+func (f oauthValidatorFunc) Validate(ctx context.Context, credentials authn.OAuthCredentials) (authn.Principal, error) {
+	return f(ctx, credentials.AccessToken)
+}
+
+func serveSSHRoute(auth *SSHAuthManager) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		segments := strings.Split(strings.Trim(strings.TrimPrefix(request.URL.Path, "/api/v1/"), "/"), "/")
+		if len(segments) != 3 || segments[0] != "ssh" {
+			apihttp.WriteError(writer, apierr.New("not_found", "route not found", 404))
+			return
+		}
+		switch segments[2] {
+		case "auth":
+			if request.Method != http.MethodGet || request.Header.Get("Upgrade") == "" {
+				apihttp.WriteError(writer, apierr.New("upgrade_required", "SSH authentication requires a WebSocket", 426))
+				return
+			}
+			if auth == nil {
+				apihttp.WriteError(writer, apierr.New("service_stopping", "SSH authentication service is stopping", 503))
+				return
+			}
+			auth.ServeWebSocket(writer, request, segments[1], auth.runner)
+		default:
+			apihttp.WriteError(writer, apierr.New("not_found", "route not found", 404))
+		}
+	})
+}
+
+func newAuthTestService(t *testing.T) sshexec.Runner {
+	t.Helper()
 	dir := t.TempDir()
 	wrapper := filepath.Join(dir, "ssh")
-	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$TEST_BINARY\" -test.run=TestSSHAuthHelper -- \"$@\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	userConfig := filepath.Join(dir, "config")
-	if err := os.WriteFile(userConfig, []byte("Host delta\n  HostName example.test\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	systemConfig := filepath.Join(dir, "system")
-	if err := os.WriteFile(systemConfig, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(dir, "ssh.log")
+	testutil.Check(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$TEST_BINARY\" -test.run=TestSSHAuthHelper -- \"$@\"\n"), 0o700))
+	user := filepath.Join(dir, "config")
+	included := filepath.Join(dir, "included.conf")
+	testutil.Check(t, os.WriteFile(included, []byte("Host *\n  ServerAliveInterval 30\n"), 0o600))
+	testutil.Check(t, os.WriteFile(user, []byte("Include "+included+"\nHost delta\n  HostName one.example\n  User tester\n"), 0o600))
+	system := filepath.Join(dir, "system")
+	testutil.Check(t, os.WriteFile(system, nil, 0o600))
 	t.Setenv("GO_WANT_SSH_AUTH_HELPER", "1")
 	t.Setenv("TEST_BINARY", os.Args[0])
-	t.Setenv("AUTH_HELPER_LOG", logPath)
+	t.Setenv("AUTH_HELPER_LOG", filepath.Join(dir, "ssh.log"))
+	t.Setenv("AUTH_HELPER_EFFECTIVE_FILES", strings.Join([]string{user, system, included}, string(os.PathListSeparator)))
+	return sshexec.Runner{SSHBin: wrapper, Timeout: 10 * time.Second, ControlNamespace: filepath.Join(dir, "control"), Hosts: sshconfig.Config{UserPath: user}}
+}
+
+func assertManagerCloseReaps(t *testing.T, manager *SSHAuthManager, pidFile string) {
+	t.Helper()
+	data, err := os.ReadFile(pidFile)
+	testutil.Check(t, err)
+	var pid int
+	_, err = fmt.Sscanf(string(data), "%d", &pid)
+	testutil.Check(t, err)
+	closed := make(chan struct{})
+	started := time.Now()
+	go func() { manager.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSHAuthManager.Close blocked on slow client or PTY")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("Close took %s", elapsed)
+	}
+	waitProcessGone(t, pid)
+}
+
+func bindTestUnixSocket(path string) error {
+	_ = os.Remove(path)
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: path}); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
+	service := newAuthTestService(t)
 	t.Setenv("AUTH_HELPER_REMOTE_NOISE", "1")
-	service := sshexec.Runner{SSHBin: wrapper, Timeout: 10 * time.Second, ControlDir: filepath.Join(dir, "control"), Hosts: sshconfig.Config{UserPath: userConfig, SystemPath: systemConfig}}
+	logPath := os.Getenv("AUTH_HELPER_LOG")
 	auth := NewSSHAuthManager(service)
 	api := serveSSHRoute(auth)
 	defer auth.Close()
@@ -58,20 +194,14 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 		}
 		return testPrincipal, nil
 	}), []string{approvedOrigin})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	server.Config.Handler = handler
 	server.Start()
 	defer server.Close()
 
 	unauthorized, err := http.Get(server.URL + "/api/v1/ssh/delta/auth")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if unauthorized.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthorized auth returned %d", unauthorized.StatusCode)
-	}
+	testutil.Check(t, err)
+	testutil.Equal(t, unauthorized.StatusCode, http.StatusUnauthorized, "unauthorized auth")
 	_ = unauthorized.Body.Close()
 
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/ssh/delta/auth"
@@ -80,11 +210,11 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	hostile := http.Header{"Origin": {"https://evil.example"}}
 	if connection, response, dialErr := dialer.Dial(url, hostile); dialErr == nil || response == nil || response.StatusCode != http.StatusForbidden {
 		if connection != nil {
-			connection.Close()
+			_ = connection.Close()
 		}
 		t.Fatalf("hostile origin response=%v error=%v, want 403", response, dialErr)
 	} else {
-		response.Body.Close()
+		_ = response.Body.Close()
 	}
 
 	header := http.Header{"Origin": {approvedOrigin}}
@@ -92,7 +222,8 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open auth websocket: %v (%v)", err, response)
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
+	defer func() { _ = response.Body.Close() }()
 	if connection.Subprotocol() != authn.ControlWebSocketProtocol || response.Header.Get("Sec-WebSocket-Protocol") != authn.ControlWebSocketProtocol || strings.Contains(response.Header.Get("Sec-WebSocket-Protocol"), authn.WebSocketBearerPrefix) {
 		t.Fatalf("authentication subprotocol = %q response=%q", connection.Subprotocol(), response.Header.Get("Sec-WebSocket-Protocol"))
 	}
@@ -115,13 +246,9 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	}
 	_ = secondResponse.Body.Close()
 
-	if err := connection.WriteJSON(clientFrame{Type: "resize", Cols: 120, Rows: 40}); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, connection.WriteJSON(clientFrame{Type: "resize", Cols: 120, Rows: 40}))
 	secret := []byte("correct horse battery staple\n")
-	if err := connection.WriteMessage(websocket.BinaryMessage, secret); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, connection.WriteMessage(websocket.BinaryMessage, secret))
 	ready, exited := false, false
 	for !exited {
 		frame := readAuthServerFrame(t, connection)
@@ -141,17 +268,13 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 		t.Fatalf("missing ready/output/resize evidence: ready=%v output=%q", ready, output.String())
 	}
 	if strings.Contains(output.String(), "MOTD") || strings.Contains(output.String(), "Lmod") {
-		t.Fatalf("remote-session noise reached authentication output: %q", output.String())
+		t.Fatalf("remote login noise reached authentication output: %q", output.String())
 	}
 
-	// A later batch command must ride the master this prompt established.
-	if _, err := service.Run(context.Background(), "delta", nil, "true"); err != nil {
-		t.Fatal(err)
-	}
+	_, err = service.Run(context.Background(), "delta", nil, "true")
+	testutil.Check(t, err)
 	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if !strings.Contains(string(logData), "BATCH_REUSED") {
 		t.Fatalf("batch operations did not reuse control path: %s", logData)
 	}
@@ -160,9 +283,7 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	}
 
 	controlPath, err := service.ControlPath(context.Background(), "delta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if _, err := os.Stat(controlPath); err != nil {
 		t.Fatalf("control path did not persist: %v", err)
 	}
@@ -175,36 +296,6 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	ownedPID := owned.cmd.Process.Pid
 	auth.Close()
 	waitProcessGone(t, ownedPID)
-	// Shutdown intentionally leaves any stale path for the next locked startup;
-	// it never unlinks a path that a foreign process may have replaced.
-}
-
-type authTestFrame struct {
-	serverFrame
-	Output []byte
-}
-
-func readAuthServerFrame(t *testing.T, connection *websocket.Conn) authTestFrame {
-	t.Helper()
-	_ = connection.SetReadDeadline(time.Now().Add(5 * time.Second))
-	messageType, data, err := connection.ReadMessage()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if messageType == websocket.BinaryMessage {
-		return authTestFrame{serverFrame: serverFrame{Type: "output"}, Output: data}
-	}
-	if messageType != websocket.TextMessage {
-		t.Fatalf("unexpected auth WebSocket message type %d", messageType)
-	}
-	var frame serverFrame
-	if err := json.Unmarshal(data, &frame); err != nil {
-		t.Fatal(err)
-	}
-	if frame.Type == "output" {
-		t.Fatal("auth output must use binary WebSocket messages")
-	}
-	return authTestFrame{serverFrame: frame}
 }
 
 func TestSSHAuthHelper(t *testing.T) {
@@ -219,8 +310,18 @@ func TestSSHAuthHelper(t *testing.T) {
 		}
 	}
 	args := os.Args[separator:]
-	if len(args) == 2 && args[0] == "-G" {
-		fmt.Println("host", args[1])
+	log := func(value string) {
+		file, _ := os.OpenFile(os.Getenv("AUTH_HELPER_LOG"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		defer func() { _ = file.Close() }()
+		_, _ = fmt.Fprintln(file, value)
+	}
+	if args[0] == "-G" {
+		rest := args[1:]
+		if len(rest) >= 2 && rest[0] == "-F" {
+			log("G -F " + rest[1])
+			rest = rest[2:]
+		}
+		fmt.Println("host", rest[0])
 		for _, path := range strings.Split(os.Getenv("AUTH_HELPER_EFFECTIVE_FILES"), string(os.PathListSeparator)) {
 			if path == "" {
 				continue
@@ -233,11 +334,6 @@ func TestSSHAuthHelper(t *testing.T) {
 			fmt.Printf("config %s\n%s\n", filepath.Base(path), data)
 		}
 		os.Exit(0)
-	}
-	log := func(value string) {
-		file, _ := os.OpenFile(os.Getenv("AUTH_HELPER_LOG"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		defer file.Close()
-		_, _ = fmt.Fprintln(file, value)
 	}
 	if len(args) >= 5 && args[0] == "-S" && args[2] == "-O" {
 		path, operation := args[1], args[3]
@@ -301,8 +397,6 @@ func TestSSHAuthHelper(t *testing.T) {
 		}
 		fmt.Printf("\r\nAuthenticated\r\nSIZE=%dx%d\r\n", cols, rows)
 		log("MASTER_READY")
-		// Server mode intentionally remains foreground so cs-control owns and
-		// can reap this exact process rather than acting on a replaceable path.
 		stopping := make(chan os.Signal, 1)
 		signal.Notify(stopping, syscall.SIGTERM, syscall.SIGINT)
 		<-stopping
@@ -319,94 +413,6 @@ func TestSSHAuthHelper(t *testing.T) {
 	os.Exit(2)
 }
 
-// waitForFile waits for a fake to write its marker.
-func waitForFile(t *testing.T, path string) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", path)
-}
-
-// waitProcessGone waits for a reaped process to actually leave the table.
-func waitProcessGone(t *testing.T, pid int) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for process %d to exit", pid)
-}
-
-const testIdentityToken = "signed-test-identity-token"
-
-var testPrincipal = authn.Principal{Subject: "test-owner", Tenant: "test-tenant"}
-
-type oauthValidatorFunc func(context.Context, string) (authn.Principal, error)
-
-func (f oauthValidatorFunc) Validate(ctx context.Context, credentials authn.OAuthCredentials) (authn.Principal, error) {
-	return f(ctx, credentials.AccessToken)
-}
-
-// serveSSHRoute routes the interactive SSH authentication path to the gateway
-// under test. It mirrors the shape the HTTP layer serves without depending on it.
-func serveSSHRoute(auth *SSHAuthManager) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		segments := strings.Split(strings.Trim(strings.TrimPrefix(request.URL.Path, "/api/v1/"), "/"), "/")
-		if len(segments) != 3 || segments[0] != "ssh" {
-			httpx.WriteError(writer, apierr.New("not_found", "route not found", 404))
-			return
-		}
-		switch segments[2] {
-		case "auth":
-			if request.Method != http.MethodGet || request.Header.Get("Upgrade") == "" {
-				httpx.WriteError(writer, apierr.New("upgrade_required", "SSH authentication requires a WebSocket", 426))
-				return
-			}
-			if auth == nil {
-				httpx.WriteError(writer, apierr.New("ssh_authentication_unavailable", "SSH authentication is unavailable", 503))
-				return
-			}
-			auth.ServeWebSocket(writer, request, segments[1], auth.runner)
-		default:
-			httpx.WriteError(writer, apierr.New("not_found", "route not found", 404))
-		}
-	})
-}
-
-func newAuthTestService(t *testing.T) sshexec.Runner {
-	t.Helper()
-	dir := t.TempDir()
-	wrapper := filepath.Join(dir, "ssh")
-	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$TEST_BINARY\" -test.run=TestSSHAuthHelper -- \"$@\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	user := filepath.Join(dir, "config")
-	included := filepath.Join(dir, "included.conf")
-	if err := os.WriteFile(included, []byte("Host *\n  ServerAliveInterval 30\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(user, []byte("Include "+included+"\nHost delta\n  HostName one.example\n  User tester\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	system := filepath.Join(dir, "system")
-	if err := os.WriteFile(system, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GO_WANT_SSH_AUTH_HELPER", "1")
-	t.Setenv("TEST_BINARY", os.Args[0])
-	t.Setenv("AUTH_HELPER_LOG", filepath.Join(dir, "ssh.log"))
-	t.Setenv("AUTH_HELPER_EFFECTIVE_FILES", strings.Join([]string{user, system, included}, string(os.PathListSeparator)))
-	return sshexec.Runner{SSHBin: wrapper, Timeout: 10 * time.Second, ControlDir: filepath.Join(dir, "control"), Hosts: sshconfig.Config{UserPath: user, SystemPath: system}}
-}
-
 func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -417,9 +423,7 @@ func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 			name: "symlink directory",
 			setup: func(t *testing.T, root string, _ sshexec.Runner) {
 				target := t.TempDir()
-				if err := os.Symlink(target, filepath.Join(root, fmt.Sprintf("csctl-%d", os.Getuid()))); err != nil {
-					t.Fatal(err)
-				}
+				testutil.Check(t, os.Symlink(target, filepath.Join(root, fmt.Sprintf("csctl-%d", os.Getuid()))))
 			},
 			run: func(service sshexec.Runner) error {
 				_, err := service.ControlPath(context.Background(), "delta")
@@ -429,9 +433,7 @@ func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 		{
 			name: "insecure directory",
 			setup: func(t *testing.T, root string, _ sshexec.Runner) {
-				if err := os.Mkdir(filepath.Join(root, fmt.Sprintf("csctl-%d", os.Getuid())), 0o755); err != nil {
-					t.Fatal(err)
-				}
+				testutil.Check(t, os.Mkdir(filepath.Join(root, fmt.Sprintf("csctl-%d", os.Getuid())), 0o755))
 			},
 			run: func(service sshexec.Runner) error {
 				_, err := service.ControlPath(context.Background(), "delta")
@@ -442,12 +444,8 @@ func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 			name: "symlink lock",
 			setup: func(t *testing.T, _ string, service sshexec.Runner) {
 				path, err := service.ControlPath(context.Background(), "delta")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(filepath.Join(t.TempDir(), "target"), path+".lock"); err != nil {
-					t.Fatal(err)
-				}
+				testutil.Check(t, err)
+				testutil.Check(t, os.Symlink(filepath.Join(t.TempDir(), "target"), path+".lock"))
 			},
 			run: func(service sshexec.Runner) error {
 				path, err := service.ControlPath(context.Background(), "delta")
@@ -461,14 +459,10 @@ func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, err := os.MkdirTemp("/tmp", "csctl-control-attack-")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer os.RemoveAll(root)
-			oldRoot := sshexec.ControlTempRoot
-			sshexec.ControlTempRoot = func() string { return root }
-			defer func() { sshexec.ControlTempRoot = oldRoot }()
+			testutil.Check(t, err)
+			defer func() { _ = os.RemoveAll(root) }()
 			service := newAuthTestService(t)
+			service.ControlTempRoot = func() string { return root }
 			test.setup(t, root, service)
 			if err := test.run(service); err == nil {
 				t.Fatal("unsafe control artifact was accepted")
@@ -480,80 +474,35 @@ func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 func TestControlPathChangesForEveryEffectiveConfigurationSource(t *testing.T) {
 	service := newAuthTestService(t)
 	before, err := service.ControlPath(context.Background(), "delta")
-	if err != nil {
-		t.Fatal(err)
+	testutil.Check(t, err)
+	logData, err := os.ReadFile(os.Getenv("AUTH_HELPER_LOG"))
+	testutil.Check(t, err)
+	if !strings.Contains(string(logData), "G -F "+service.Hosts.UserPath) {
+		t.Fatalf("-G was not resolved against the caller's own configuration: %s", logData)
 	}
-	// Retarget the alias the way a user does: by editing the config the effective
-	// lookup reads. The Include directive stays first so the rest of this test
-	// still exercises an included file.
 	original, err := os.ReadFile(service.Hosts.UserPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	retargeted := strings.Replace(string(original), "Host delta\n  HostName one.example\n  User tester\n",
 		"Host delta\n  HostName two.example\n  User other\n  Port 2222\n  IdentityFile ~/.ssh/other\n  ProxyJump bastion\n", 1)
-	if err := os.WriteFile(service.Hosts.UserPath, []byte(retargeted), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.WriteFile(service.Hosts.UserPath, []byte(retargeted), 0o600))
 	concrete, err := service.ControlPath(context.Background(), "delta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if before == concrete {
 		t.Fatal("concrete alias retarget reused its old ControlPath")
 	}
 
 	paths := strings.Split(os.Getenv("AUTH_HELPER_EFFECTIVE_FILES"), string(os.PathListSeparator))
-	included := paths[len(paths)-1]
-	includeBefore, err := service.ControlPath(context.Background(), "delta")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(included, []byte("Host *\n  ServerAliveInterval 45\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	includeAfter, err := service.ControlPath(context.Background(), "delta")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if includeBefore == includeAfter {
-		t.Fatal("included effective config change reused ControlPath")
-	}
-
-	system := service.Hosts.SystemPath
-	for name, addition := range map[string]string{
-		"wildcard": "Host *\n  ProxyJump new-bastion\n",
-		"match":    "Match host delta\n  User matched-user\n",
-		"system":   "Host delta\n  Port 2200\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			systemOriginal, err := os.ReadFile(system)
-			if err != nil {
-				t.Fatal(err)
-			}
-			prior, err := service.ControlPath(context.Background(), "delta")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(system, append(systemOriginal, addition...), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			after, err := service.ControlPath(context.Background(), "delta")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if prior == after {
-				t.Fatalf("%s effective config change reused ControlPath", name)
-			}
-			if err := os.WriteFile(system, systemOriginal, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		})
+	system := paths[1]
+	systemOriginal, err := os.ReadFile(system)
+	testutil.Check(t, err)
+	testutil.Check(t, os.WriteFile(system, append(systemOriginal, "Host *\n  ProxyJump new-bastion\n"...), 0o600))
+	outsideStanza, err := service.ControlPath(context.Background(), "delta")
+	testutil.Check(t, err)
+	if concrete == outsideStanza {
+		t.Fatal("a wildcard change outside the alias's own stanza reused ControlPath")
 	}
 }
 
-// A second factor is answered on another device, so the connection carries
-// nothing while the person answers it. What keeps it open is the keep-alive.
 func TestPromptWaitKeepsTheConnectionAlive(t *testing.T) {
 	oldKeepAlive := authKeepAlive
 	authKeepAlive = 20 * time.Millisecond
@@ -564,8 +513,8 @@ func TestPromptWaitKeepsTheConnectionAlive(t *testing.T) {
 	server := httptest.NewServer(serveSSHRoute(manager))
 	defer server.Close()
 
-	connection := dialAuthWithoutReading(t, server.URL)
-	defer connection.Close()
+	connection := dialAuthAlias(t, server.URL, "delta")
+	defer func() { _ = connection.Close() }()
 	pings := make(chan struct{}, 4)
 	connection.SetPingHandler(func(string) error {
 		select {
@@ -574,7 +523,6 @@ func TestPromptWaitKeepsTheConnectionAlive(t *testing.T) {
 		}
 		return nil
 	})
-	// The helper is sitting at its password prompt: nothing else will arrive.
 	go func() {
 		for {
 			if _, _, err := connection.ReadMessage(); err != nil {
@@ -596,7 +544,7 @@ func TestOwnedForegroundMasterShutdownDoesNotTouchForeignReplacement(t *testing.
 	server := httptest.NewServer(serveSSHRoute(manager))
 	defer server.Close()
 
-	connection := dialAuthWithoutReading(t, server.URL)
+	connection := dialAuthAlias(t, server.URL, "delta")
 	ready := false
 	for {
 		frame := readAuthServerFrame(t, connection)
@@ -612,9 +560,7 @@ func TestOwnedForegroundMasterShutdownDoesNotTouchForeignReplacement(t *testing.
 	}
 	_ = connection.Close()
 	path, err := service.ControlPath(context.Background(), "delta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	manager.mu.Lock()
 	owned := manager.owned[path]
 	manager.mu.Unlock()
@@ -626,13 +572,8 @@ func TestOwnedForegroundMasterShutdownDoesNotTouchForeignReplacement(t *testing.
 		t.Fatalf("ready was emitted after the owned process exited: %v", err)
 	}
 
-	// Replace the published socket while the owned process is still alive.
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := bindTestUnixSocket(path); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.Remove(path))
+	testutil.Check(t, bindTestUnixSocket(path))
 	manager.Close()
 	waitProcessGone(t, pid)
 	info, err := os.Lstat(path)
@@ -647,33 +588,24 @@ func TestOwnedForegroundMasterShutdownDoesNotTouchForeignReplacement(t *testing.
 
 func TestStopAndReapKillsStubbornProcess(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "trap '' TERM; while :; do sleep 1; done")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, cmd.Start())
 	waitDone := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(waitDone) }()
-	session := &authSession{}
-	session.assign(cmd, nil, waitDone)
-	time.Sleep(100 * time.Millisecond) // let the shell install its TERM trap
-	stopAndReap(session)
+	attempt := &authAttempt{}
+	attempt.assign(cmd, nil, waitDone)
+	time.Sleep(100 * time.Millisecond)
+	stopAndReap(attempt)
 	if cmd.ProcessState == nil || cmd.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
 		t.Fatalf("stubborn authentication process was not killed and reaped: %v", cmd.ProcessState)
-	}
-	if err := cmd.Process.Signal(syscall.Signal(0)); err == nil {
-		t.Fatal("stubborn authentication process is still alive")
 	}
 }
 
 func TestConcurrentManagersSerializeControlPathStartup(t *testing.T) {
 	service := newAuthTestService(t)
 	path, err := service.ControlPath(context.Background(), "delta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	check := filepath.Join(t.TempDir(), "ssh-check")
-	if err := os.WriteFile(check, []byte("#!/bin/sh\n[ -e \"$2\" ]\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.WriteFile(check, []byte("#!/bin/sh\n[ -e \"$2\" ]\n"), 0o700))
 	service.SSHBin = check
 	first, healthy, err := service.AcquireControlLock(context.Background(), "delta", path)
 	if err != nil || healthy {
@@ -694,12 +626,8 @@ func TestConcurrentManagersSerializeControlPathStartup(t *testing.T) {
 		t.Fatal("second manager bypassed the inter-process lock")
 	case <-time.After(100 * time.Millisecond):
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := bindTestUnixSocket(path); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	testutil.Check(t, bindTestUnixSocket(path))
 	select {
 	case got := <-second:
 		if got.err != nil || !got.healthy || got.lock != nil {
@@ -719,8 +647,8 @@ func TestCloseUnblocksFullPTYInputQueueAndReapsProcess(t *testing.T) {
 	manager := NewSSHAuthManager(service)
 	server := httptest.NewServer(serveSSHRoute(manager))
 	defer server.Close()
-	connection := dialAuthWithoutReading(t, server.URL)
-	defer connection.Close()
+	connection := dialAuthAlias(t, server.URL, "delta")
+	defer func() { _ = connection.Close() }()
 	waitForFile(t, pidFile)
 	payload := make([]byte, maxAuthInput)
 	for i := 0; i < 8; i++ {
@@ -729,50 +657,77 @@ func TestCloseUnblocksFullPTYInputQueueAndReapsProcess(t *testing.T) {
 	assertManagerCloseReaps(t, manager, pidFile)
 }
 
-func dialAuthWithoutReading(t *testing.T, serverURL string) *websocket.Conn {
-	t.Helper()
-	header := http.Header{"Authorization": {"Bearer service-token-service-token-1234"}, "Origin": {serverURL}}
-	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/api/v1/ssh/delta/auth"
-	connection, response, err := websocket.DefaultDialer.Dial(url, header)
-	if err != nil {
-		t.Fatalf("open auth websocket: %v (%v)", err, response)
-	}
-	return connection
-}
+func TestServeWebSocketAlreadyReadyCancelsAttemptContext(t *testing.T) {
+	service := newAuthTestService(t)
+	t.Setenv("AUTH_HELPER_AUTO", "1")
+	manager := NewSSHAuthManager(service)
+	defer manager.Close()
+	server := httptest.NewServer(serveSSHRoute(manager))
+	defer server.Close()
 
-func assertManagerCloseReaps(t *testing.T, manager *SSHAuthManager, pidFile string) {
-	t.Helper()
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
+	first := dialAuthAlias(t, server.URL, "delta")
+	defer func() { _ = first.Close() }()
+	for readAuthServerFrame(t, first).Type != "ready" {
 	}
-	var pid int
-	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
-		t.Fatal(err)
+
+	path, err := service.ControlPath(context.Background(), "delta")
+	testutil.Check(t, err)
+	captured := make(chan *authAttempt, 1)
+	go func() {
+		for {
+			manager.mu.Lock()
+			attempt := manager.active[path]
+			manager.mu.Unlock()
+			if attempt != nil {
+				captured <- attempt
+				return
+			}
+		}
+	}()
+
+	second := dialAuthAlias(t, server.URL, "delta")
+	defer func() { _ = second.Close() }()
+	for readAuthServerFrame(t, second).Type != "ready" {
 	}
-	closed := make(chan struct{})
-	started := time.Now()
-	go func() { manager.Close(); close(closed) }()
+
+	var attempt *authAttempt
 	select {
-	case <-closed:
+	case attempt = <-captured:
 	case <-time.After(2 * time.Second):
-		t.Fatal("SSHAuthManager.Close blocked on slow client or PTY")
+		t.Fatal("did not observe the reused attempt")
 	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
-		t.Fatalf("Close took %s", elapsed)
-	}
-	waitProcessGone(t, pid)
+	pollUntil(t, time.Second, func() bool { return attempt.ctx.Err() != nil },
+		"reusing a ready control master did not cancel the attempt context")
 }
 
-func bindTestUnixSocket(path string) error {
-	_ = os.Remove(path)
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		return err
+func TestCleanupFailedAttemptCancelsContextAndDoesNotLeakGoroutines(t *testing.T) {
+	service := newAuthTestService(t)
+	t.Setenv("AUTH_HELPER_NO_READ", "1")
+	manager := NewSSHAuthManager(service)
+	defer manager.Close()
+	server := httptest.NewServer(serveSSHRoute(manager))
+	defer server.Close()
+
+	runtime.GC()
+	baseline := runtime.NumGoroutine()
+
+	const attempts = 8
+	for i := 0; i < attempts; i++ {
+		pidFile := filepath.Join(t.TempDir(), "pid")
+		t.Setenv("AUTH_HELPER_PID_FILE", pidFile)
+		connection := dialAuthAlias(t, server.URL, "delta")
+		waitForFile(t, pidFile)
+		data, err := os.ReadFile(pidFile)
+		testutil.Check(t, err)
+		var pid int
+		_, err = fmt.Sscanf(string(data), "%d", &pid)
+		testutil.Check(t, err)
+		_ = connection.Close()
+		waitProcessGone(t, pid)
 	}
-	defer syscall.Close(fd)
-	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: path}); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
+
+	pollUntil(t, 3*time.Second, func() bool {
+		runtime.GC()
+		return runtime.NumGoroutine() <= baseline+2
+	}, fmt.Sprintf("goroutine count did not return to baseline after %d aborted authentications: have %d, want <= %d", attempts, runtime.NumGoroutine(), baseline+2))
 }

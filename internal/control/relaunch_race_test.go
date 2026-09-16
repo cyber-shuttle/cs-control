@@ -1,86 +1,63 @@
+// A relaunch races the reconciliation of the run it replaces.
+// A login that stopped accepting sessions must refuse cleanly rather than half-provision.
+//
+//	relaunchRaceService
+//	Test*
 package control
 
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/sshexec"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
-// relaunchRaceService holds provisioning open -- the window a relaunch spends
-// SUBMITTING with no job of its own -- and hands the test the clock.
 func relaunchRaceService(t *testing.T) (Service, *atomic.Int64, string, string) {
 	t.Helper()
-	ssh, _, _ := fakeSSH(t)
 	dir := t.TempDir()
 	started := filepath.Join(dir, "provision-started")
 	release := filepath.Join(dir, "provision-release")
 	t.Setenv("FAKE_PROVISION_STARTED", started)
 	clock := &atomic.Int64{}
 	clock.Store(time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC).UnixNano())
-	service := Service{
-		Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second},
-		Store:  Store{Dir: filepath.Join(dir, "state")},
-		Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"},
-		Now:    func() time.Time { return time.Unix(0, clock.Load()).UTC() },
-	}
-	configureTestTunnel(t, &service)
+	service := testService(t, func() time.Time { return time.Unix(0, clock.Load()).UTC() })
 	return service, clock, started, release
 }
 
-// A reconciliation landing while the next allocation is still being prepared
-// used to read the finished run's record as this one's outcome, leaving the
-// card STOPPED for good while its job ran on unattended.
 func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	service, clock, started, release := relaunchRaceService(t)
 	ctx := testTunnelContext()
-	created, err := service.Create(ctx, createRequest())
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The old job is still what the scheduler answers for this name.
-	if err := os.WriteFile(os.Getenv("FAKE_STATUS"), []byte("TIMEOUT\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	created, err := service.create(ctx, newTestCreateRequest())
+	testutil.Check(t, err)
+	testutil.Check(t, os.WriteFile(os.Getenv("FAKE_STATUS"), []byte("TIMEOUT\n"), 0o600))
 	finished := retire(t, service, created.ID)
 
-	// The card is older than the window that lets a just-submitted job be
-	// missing from the scheduler, which is true of every card worth running again.
 	clock.Store(finished.CreatedAt.Add(time.Hour).UnixNano())
 	t.Setenv("FAKE_PROVISION_RELEASE", release)
 	t.Setenv("FAKE_JOB_ID", "67890")
-	if err := os.Remove(started); err != nil {
-		t.Fatal(err)
-	}
-	result := make(chan *Runtime, 1)
+	testutil.Check(t, os.Remove(started))
+	result := make(chan *Session, 1)
 	errs := make(chan error, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runtime, err := service.Start(ctx, created.ID)
-		result <- runtime
+		session, err := service.start(ctx, created.ID)
+		result <- session
 		errs <- err
 	}()
-	// Preparation is one host at a time process-wide, so a failed assertion must
-	// still let the blocked relaunch finish or it holds delta for the package.
 	t.Cleanup(func() {
 		_ = os.WriteFile(release, nil, 0o600)
 		<-done
 	})
-	waitForSubmitStart(t, started, errs)
+	waitFor(t, errs, "sbatch started", func() bool { _, err := os.Stat(started); return err == nil })
 
-	if err := service.ReconcileAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-	during, err := service.GetCached(created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, service.reconcileAll(ctx))
+	during, err := service.loadSession(created.ID)
+	testutil.Check(t, err)
 	if during.State != "SUBMITTING" {
 		t.Fatalf("the finished run retired the relaunch: %s (job %q, node %q)", during.State, during.JobID, during.Node)
 	}
@@ -88,31 +65,22 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 		t.Fatalf("the relaunch adopted the finished run's job: %#v", during)
 	}
 
-	if err := os.WriteFile(release, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-errs; err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.WriteFile(release, nil, 0o600))
+	testutil.Check(t, <-errs)
 	relaunched := <-result
 	if relaunched.State != "QUEUED" || relaunched.JobID != "67890" {
-		t.Fatalf("the submitted relaunch was not queued: %#v (job %q)", relaunched.RuntimeResponse, relaunched.JobID)
+		t.Fatalf("the submitted relaunch was not queued: %#v (job %q)", relaunched.sessionResponse, relaunched.JobID)
 	}
 }
 
-// A host wanting a login refused the runtime; the tail should name the remedy.
 func TestPreparationRefusedForALoginSaysSo(t *testing.T) {
 	service := testService(t)
 	t.Setenv("FAKE_DISCOVERY_FAIL", "Permission denied (publickey,keyboard-interactive).")
-	_, err := service.Create(testTunnelContext(), createRequest())
+	_, err := service.create(testTunnelContext(), newTestCreateRequest())
 	if apierr.For(err).Code != "ssh_authentication_required" {
 		t.Fatalf("a host asking for a login was not reported as such: %v", err)
 	}
-	joined := runtimeLogText(t, service.Logs, createRequest().ID, false)
-	if !strings.Contains(joined, "Interactive SSH login required") {
-		t.Fatalf("the tail did not name the remedy: %s", joined)
-	}
-	if strings.Contains(joined, "Runtime preparation failed") {
-		t.Fatalf("a login refusal was reported as a failure: %s", joined)
+	if _, ok := service.Logs.Tail(newTestCreateRequest().ID); ok {
+		t.Fatal("a create that never persisted a record kept its log tail")
 	}
 }

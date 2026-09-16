@@ -1,3 +1,14 @@
+// The session state machine.
+// create persists a durable record first, then provisions and submits, so a poller sees progress as it happens.
+// A conclusive submission failure compensates through abandonSubmitIntent; an ambiguous one stays durable.
+//
+//	assignSessionID, sameCreateRequest, terminalSession, reconcilable, setSessionNode
+//	Service
+//	validate, create
+//	reusableSession, validateForCreate, recordSubmittedJob, scancelWithOwnTimeout, cancelUnsavedJob, cancelSupersededJob
+//	start, stop, forgetSessionBuffers, forgetUnpersistedBuffers, delete
+//	prepareSession, resolveWorkspaceRoot
+//	loadSessions, reconcileAll, loadSession, abandonSubmitIntent
 package control
 
 import (
@@ -14,35 +25,80 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
+	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 )
 
-func (s Service) Validate(ctx context.Context, request CreateRequest) (*ValidationResult, error) {
-	prepared, err := s.prepareRuntime(ctx, request)
-	if err != nil {
-		return nil, err
+func assignSessionID(request createRequest) (createRequest, error) {
+	if err := validateCreate(&request); err != nil {
+		return request, err
 	}
-	result, err := s.validateScript(ctx, prepared.request.SSHHost, prepared.script)
-	if err != nil {
-		return nil, err
+	if request.ID == "" {
+		sum := sha256.Sum256([]byte(request.IdempotencyKey))
+		request.ID = "s-" + hex.EncodeToString(sum[:6])
 	}
-	return validationResult(prepared, result), nil
+	if !idPattern.MatchString(request.ID) {
+		return request, apierr.New("invalid_session_id", "session ID must match s-[a-f0-9]{12}", http.StatusBadRequest)
+	}
+	return request, nil
 }
 
-func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, error) {
-	var err error
-	request, err = assignRuntimeID(request)
+func sameCreateRequest(session *Session, request createRequest) bool {
+	return session.SSHHost == request.SSHHost && session.Account == request.Account && session.Partition == request.Partition && session.RootFolder == request.RootFolder && session.Resources == request.Resources
+}
+
+func terminalSession(state string) bool {
+	return state == "STOPPED" || state == "FAILED"
+}
+
+func reconcilable(state string) bool {
+	return state == "SUBMITTING" || state == "QUEUED" || state == "STARTING" || state == "READY" || state == "STOPPING"
+}
+
+func setSessionNode(session *Session, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "(null)" || value == "None assigned" || !sshconfig.SafeName(value, 256) {
+		return
+	}
+	session.Node = value
+}
+
+func (s Service) validate(ctx context.Context, request createRequest) (*validationResult, error) {
+	request, err := assignSessionID(request)
 	if err != nil {
 		return nil, err
 	}
+	defer s.forgetUnpersistedBuffers(request.ID)
+	prepared, err := s.prepareSession(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.validateScript(ctx, prepared.session.SSHHost, prepared.script)
+	if err != nil {
+		return nil, err
+	}
+	return buildValidationResult(prepared, result), nil
+}
+
+func (s Service) create(ctx context.Context, request createRequest) (_ *Session, resultErr error) {
+	var err error
+	request, err = assignSessionID(request)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if resultErr != nil {
+			s.forgetUnpersistedBuffers(request.ID)
+		}
+	}()
 	auth, err := authn.TunnelAuthorizationFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	reused, err := s.reusableRuntime(request, auth.Principal)
+	reused, err := s.reusableSession(request, auth.Principal)
 	if err != nil || reused != nil {
 		return reused, err
 	}
-	prepared, err := s.prepareRuntime(ctx, request)
+	prepared, err := s.prepareSession(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -50,82 +106,96 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 		return nil, err
 	}
 
-	var intent Runtime
+	var intent Session
 	var record devtunnel.Record
 	var jupyterToken string
-	idempotent, tunnelCreated := false, false
-	err = s.Store.withLock(func(store Store, current *state) error {
-		existing := current.Runtimes[request.ID]
+	idempotent := false
+	var previous *Session
+	err = s.Store.withLock(func(current *state) error {
+		existing := current.Sessions[request.ID]
 		if existing != nil {
 			if existing.Owner != auth.Principal {
 				return errOwnerMismatch
 			}
-			if request.IdempotencyKey != "" && sameCreateRequest(existing, request) {
+			if request.IdempotencyKey != "" {
+				if !sameCreateRequest(existing, request) {
+					return errIdempotencyConflict
+				}
 				intent = *existing
 				idempotent = true
 				return nil
 			}
 			if !request.relaunch {
-				return apierr.New("runtime_exists", "runtime ID already exists", 409)
+				return apierr.New("session_exists", "session ID already exists", http.StatusConflict)
 			}
-			if !terminalRuntime(existing.State) {
-				return errRuntimeRunning
+			if !terminalSession(existing.State) {
+				return errSessionRunning
 			}
-		}
-		now := s.now()
-		intent = prepared.runtime
-		intent.State, intent.CreatedAt, intent.UpdatedAt = "SUBMITTING", now, now
-		if existing != nil {
-			intent.CreatedAt = existing.CreatedAt
-		}
-		var createErr error
-		record, jupyterToken, createErr = s.createAllocationTunnel(ctx, &intent, auth)
-		if createErr != nil {
-			return createErr
-		}
-		tunnelCreated = true
-		current.Runtimes[intent.ID] = &intent
-		if err := store.save(current); err != nil {
-			return fmt.Errorf("persist submit intent: %w", err)
+			snapshot := *existing
+			previous = &snapshot
 		}
 		return nil
 	})
 	if err != nil {
-		if tunnelCreated {
-			return nil, errors.Join(err, s.releaseAllocationTunnel(auth, intent.ID, intent.Generation, intent.Tunnel))
-		}
 		return nil, err
 	}
 	if idempotent {
 		return &intent, nil
 	}
 
-	// Installing the interpreter and the binary a first-time host lacks takes
-	// minutes. The runtime is already durable, so the reader watching it sees
-	// the preparation rather than a request that says nothing until it ends.
-	if err := s.provisionRuntime(ctx, request.SSHHost, intent, prepared.home, prepared.linkspan); err != nil {
-		s.runtimeStatus(intent.ID, "Runtime environment preparation failed")
+	now := s.now()
+	intent = prepared.session
+	intent.State, intent.CreatedAt, intent.UpdatedAt = "SUBMITTING", now, now
+	if previous != nil {
+		intent.CreatedAt = previous.CreatedAt
+	}
+	record, jupyterToken, err = s.createSessionTunnel(ctx, &intent, auth)
+	if err != nil {
+		return nil, err
+	}
+	prepared.script = buildScript(intent, prepared.linkspan)
+	err = s.Store.withLock(func(current *state) error {
+		existing := current.Sessions[request.ID]
+		same := existing == nil && previous == nil
+		if existing != nil && previous != nil {
+			same = existing.UpdatedAt.Equal(previous.UpdatedAt) && existing.State == previous.State && existing.Owner == previous.Owner
+		}
+		if !same {
+			return apierr.New("session_exists", "session ID already exists", http.StatusConflict)
+		}
+		current.Sessions[intent.ID] = &intent
+		if err := s.Store.save(current); err != nil {
+			return fmt.Errorf("persist submit intent: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, errors.Join(err, s.releaseSessionTunnel(auth, intent.ID, intent.Generation, intent.Tunnel))
+	}
+
+	if err := s.provisionSession(ctx, request.SSHHost, intent, prepared.home, prepared.linkspan); err != nil {
+		s.sessionStatus(intent.ID, "Session environment preparation failed")
 		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent, request.relaunch))
 	}
 
-	s.runtimeStatus(intent.ID, "Submitting runtime to Slurm")
-	jobID, err := s.submitRuntimeScript(ctx, request.SSHHost, intent, prepared.script, jupyterToken, record.HostToken)
+	s.sessionStatus(intent.ID, "Submitting session to Slurm")
+	jobID, err := s.submitSessionScript(ctx, request.SSHHost, intent, prepared.script, jupyterToken, record.HostToken)
 	if err != nil {
 		if ambiguousSubmission(err) {
-			s.runtimeStatus(intent.ID, "Runtime submission outcome is unresolved")
+			s.sessionStatus(intent.ID, "Session submission outcome is unresolved")
 			return nil, err
 		}
-		s.runtimeStatus(intent.ID, "Runtime submission failed")
+		s.sessionStatus(intent.ID, "Session submission failed")
 		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent, request.relaunch))
 	}
-	s.runtimeStatus(intent.ID, "Runtime submitted to Slurm")
+	s.sessionStatus(intent.ID, "Session submitted to Slurm")
 	created, superseded, err := s.recordSubmittedJob(intent.ID, jobID)
 	if err != nil {
-		s.runtimeStatus(intent.ID, "Runtime submission could not be saved")
-		return nil, s.cancelUnsavedJob(ctx, request.SSHHost, jobID, err)
+		s.sessionStatus(intent.ID, "Session submission could not be saved")
+		return nil, s.cancelUnsavedJob(request.SSHHost, jobID, err)
 	}
 	if created.State == "QUEUED" {
-		s.runtimeStatus(intent.ID, "Runtime is queued")
+		s.sessionStatus(intent.ID, "Session is queued")
 	}
 	if !superseded {
 		return created, nil
@@ -140,279 +210,283 @@ func (s Service) Create(ctx context.Context, request CreateRequest) (*Runtime, e
 	return created, nil
 }
 
-// reusableRuntime is the runtime an idempotency key already created, and only
-// when the same request created it.
-func (s Service) reusableRuntime(request CreateRequest, principal authn.Principal) (*Runtime, error) {
+func (s Service) reusableSession(request createRequest, principal authn.Principal) (*Session, error) {
 	if request.IdempotencyKey == "" {
 		return nil, nil
 	}
-	var existing *Runtime
-	err := s.Store.withLock(func(_ Store, current *state) error {
-		runtime := current.Runtimes[request.ID]
-		if runtime == nil {
+	var existing *Session
+	err := s.Store.withLock(func(current *state) error {
+		session := current.Sessions[request.ID]
+		if session == nil {
 			return nil
 		}
-		if runtime.Owner != principal {
+		if session.Owner != principal {
 			return errOwnerMismatch
 		}
-		if !sameCreateRequest(runtime, request) {
-			return apierr.New("idempotency_conflict", "idempotency key was already used for another request", 409)
+		if !sameCreateRequest(session, request) {
+			return errIdempotencyConflict
 		}
-		existing = detached(runtime)
+		existing = detached(session)
 		return nil
 	})
 	return existing, err
 }
 
-func (s Service) validateForCreate(ctx context.Context, request CreateRequest, script string) error {
-	s.runtimeStatus(request.ID, "Validating runtime with Slurm")
+func (s Service) validateForCreate(ctx context.Context, request createRequest, script string) error {
+	s.sessionStatus(request.ID, "Validating session with Slurm")
 	checked, err := s.validateScript(ctx, request.SSHHost, script)
 	if err == nil && !checked.passed {
-		err = apierr.New("slurm_validation_failed", validationMessage(checked), 400)
+		err = apierr.New("slurm_validation_failed", validationMessage(checked), http.StatusBadRequest)
 	}
 	if err != nil {
-		s.runtimeStatus(request.ID, "Slurm validation failed")
+		s.sessionStatus(request.ID, "Slurm validation failed")
 		return err
 	}
-	s.runtimeStatus(request.ID, "Slurm validation passed")
+	s.sessionStatus(request.ID, "Slurm validation passed")
 	return nil
 }
 
-// recordSubmittedJob attaches the job to its durable record, and reports a record
-// that moved on without it: that job goes rather than runs on.
-func (s Service) recordSubmittedJob(runtimeID, jobID string) (*Runtime, bool, error) {
-	var created *Runtime
+func (s Service) recordSubmittedJob(sessionID, jobID string) (*Session, bool, error) {
+	var created *Session
 	superseded := false
-	err := s.Store.withLock(func(store Store, current *state) error {
-		runtime := current.Runtimes[runtimeID]
-		if runtime == nil {
-			return errors.New("submitted runtime disappeared from state")
+	err := s.Store.withLock(func(current *state) error {
+		session := current.Sessions[sessionID]
+		if session == nil {
+			return errors.New("submitted session disappeared from state")
 		}
-		runtime.JobID = jobID
-		if runtime.State == "SUBMITTING" {
-			runtime.State = "QUEUED"
+		session.JobID = jobID
+		if session.State == "SUBMITTING" {
+			session.State = "QUEUED"
 		}
-		superseded = runtime.State != "QUEUED"
-		runtime.UpdatedAt = s.now()
-		if err := store.save(current); err != nil {
+		superseded = session.State != "QUEUED"
+		session.UpdatedAt = s.now()
+		if err := s.Store.save(current); err != nil {
 			return fmt.Errorf("persist submitted job %s: %w", jobID, err)
 		}
-		created = detached(runtime)
+		created = detached(session)
 		return nil
 	})
 	return created, superseded, err
 }
 
-// cancelUnsavedJob gives back a job no record now names.
-func (s Service) cancelUnsavedJob(ctx context.Context, host, jobID string, saveErr error) error {
-	if _, err := s.Runner.Run(ctx, host, nil, "scancel", jobID); err != nil {
-		return fmt.Errorf("%w; compensation scancel failed: %v", saveErr, err)
+func (s Service) scancelWithOwnTimeout(host, jobID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
+	defer cancel()
+	_, err := s.Runner.Run(ctx, host, nil, "scancel", jobID)
+	return err
+}
+
+func (s Service) cancelUnsavedJob(host, jobID string, saveErr error) error {
+	if err := s.scancelWithOwnTimeout(host, jobID); err != nil {
+		return fmt.Errorf("%w; compensation scancel failed: %w", saveErr, err)
 	}
 	return fmt.Errorf("%w; job was cancelled", saveErr)
 }
 
-// cancelSupersededJob cancels a job its record has already moved past. Stop may
-// win while sbatch is in flight, before a job ID exists, so the cancellation
-// happens before Create returns rather than at a later poll.
-func (s Service) cancelSupersededJob(host, runtimeID, jobID string) (*Runtime, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
-	_, cancelErr := s.Runner.Run(ctx, host, nil, "scancel", jobID)
-	cancel()
+func (s Service) cancelSupersededJob(host, sessionID, jobID string) (*Session, error) {
 	diagnostic := ""
-	if cancelErr != nil {
-		diagnostic = cancelErr.Error()
+	if cancelErr := s.scancelWithOwnTimeout(host, jobID); cancelErr != nil {
+		diagnostic = boundedSessionError(cancelErr)
 	}
-	var result *Runtime
-	err := s.Store.withLock(func(store Store, current *state) error {
-		runtime := current.Runtimes[runtimeID]
-		if runtime == nil {
+	var result *Session
+	err := s.Store.withLock(func(current *state) error {
+		session := current.Sessions[sessionID]
+		if session == nil {
 			return nil
 		}
-		if runtime.JobID == jobID && runtime.State != "QUEUED" {
-			runtime.Error, runtime.UpdatedAt = diagnostic, s.now()
-			if err := store.save(current); err != nil {
+		if session.JobID == jobID && session.State != "QUEUED" {
+			session.Error, session.UpdatedAt = diagnostic, s.now()
+			if err := s.Store.save(current); err != nil {
 				return err
 			}
 		}
-		// A concurrent terminal update wins both persistence and the response:
-		// cancellation diagnostics never revive stale state.
-		result = detached(runtime)
+		result = detached(session)
 		return nil
 	})
 	return result, err
 }
 
-// Start submits a new allocation under a finished runtime's own identity and
-// settings, replacing its record rather than adding one beside it.
-func (s Service) Start(ctx context.Context, id string) (*Runtime, error) {
+func (s Service) start(ctx context.Context, id string) (*Session, error) {
 	auth, err := authn.TunnelAuthorizationFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	runtime, err := s.GetCached(id)
+	session, err := s.loadSession(id)
 	if err != nil {
 		return nil, err
 	}
-	if runtime.Owner != auth.Principal {
+	if session.Owner != auth.Principal {
 		return nil, errOwnerMismatch
 	}
-	if !terminalRuntime(runtime.State) {
-		return nil, errRuntimeRunning
+	if !terminalSession(session.State) {
+		return nil, errSessionRunning
 	}
-	// The record naming this tunnel is about to be replaced.
-	if runtime.Tunnel.ID != "" {
-		if err := s.releaseAllocationTunnel(auth, runtime.ID, runtime.Generation, runtime.Tunnel); err != nil {
+	if session.Tunnel.ID != "" {
+		if err := s.releaseSessionTunnel(auth, session.ID, session.Generation, session.Tunnel); err != nil {
 			return nil, err
 		}
 	}
-	// Create replaces the record in place, so what the previous generation did
-	// is kept here or nowhere.
-	if err := s.RecordRun(runtime); err != nil {
+	if err := s.freezeRun(session); err != nil {
 		return nil, err
 	}
-	s.Logs.Forget(id)
-	s.Metrics.Forget(id)
-	return s.Create(ctx, CreateRequest{
-		ID: id, relaunch: true, SSHHost: runtime.SSHHost, Account: runtime.Account,
-		Partition: runtime.Partition, RootFolder: runtime.RootFolder, Resources: runtime.Resources,
+	return s.create(ctx, createRequest{
+		ID: id, relaunch: true, SSHHost: session.SSHHost, Account: session.Account,
+		Partition: session.Partition, RootFolder: session.RootFolder, Resources: session.Resources,
 	})
 }
 
-func (s Service) Stop(ctx context.Context, id string) (*Runtime, error) {
+func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 	auth, err := authn.TunnelAuthorizationFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var snapshot Runtime
-	if err := s.Store.withLock(func(store Store, current *state) error {
-		runtime := current.Runtimes[id]
-		if runtime == nil {
-			return errRuntimeNotFound
+	var snapshot Session
+	var alreadyStopped bool
+	if err := s.Store.withLock(func(current *state) error {
+		session := current.Sessions[id]
+		if session == nil {
+			return errSessionNotFound
 		}
-		if runtime.Owner != auth.Principal {
+		if session.Owner != auth.Principal {
 			return errOwnerMismatch
 		}
-		if !terminalRuntime(runtime.State) {
-			runtime.State, runtime.Error, runtime.UpdatedAt = "STOPPING", "", s.now()
-			if err := store.save(current); err != nil {
+		alreadyStopped = terminalSession(session.State)
+		if !alreadyStopped {
+			session.State, session.Error, session.UpdatedAt = "STOPPING", "", s.now()
+			if err := s.Store.save(current); err != nil {
 				return err
 			}
 		}
-		snapshot = *runtime
+		snapshot = *session
 		return nil
 	}); err != nil {
 		return nil, err
 	}
-	s.runtimeStatus(id, "Stopping runtime")
-	managementErr := s.releaseAllocationTunnel(auth, snapshot.ID, snapshot.Generation, snapshot.Tunnel)
+	if !alreadyStopped {
+		s.sessionStatus(id, "Stopping session")
+	}
+	managementErr := s.releaseSessionTunnel(auth, snapshot.ID, snapshot.Generation, snapshot.Tunnel)
 	candidate := snapshot
 	var narration []string
-	if reconcile(snapshot.State) {
-		s.runtimeStatus(id, "Requesting scheduler cancellation")
-		// Stop observes the scheduler through the refresher's own batched round,
-		// so the two can never disagree about what it said.
+	if reconcilable(snapshot.State) {
+		s.sessionStatus(id, "Requesting scheduler cancellation")
 		stopCtx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
-		candidates, lines := s.reconcileSnapshots(stopCtx, []Runtime{snapshot})
+		candidates, lines := s.reconcileSnapshots(stopCtx, []Session{snapshot})
 		cancel()
 		candidate, narration = candidates[0], lines[0]
 		if candidate.Error != "" {
-			s.runtimeStatus(id, "Runtime stop is pending")
+			s.sessionStatus(id, "Session stop is pending")
 		}
 	}
-	var result *Runtime
-	err = s.Store.withLock(func(store Store, current *state) error {
-		runtime := current.Runtimes[id]
-		if runtime == nil {
-			return errRuntimeNotFound
+	var result *Session
+	err = s.Store.withLock(func(current *state) error {
+		session := current.Sessions[id]
+		if session == nil {
+			return errSessionNotFound
 		}
-		s.narrateReconciled(runtime, &snapshot, narration)
-		changed := mergeReconciled(runtime, &snapshot, &candidate, s.now())
-		if managementErr == nil && runtime.Generation == snapshot.Generation && runtime.Tunnel.ID == snapshot.Tunnel.ID {
-			runtime.Tunnel = TunnelMetadata{}
-			runtime.UpdatedAt = s.now()
+		s.narrateReconciled(session, &snapshot, narration)
+		changed := mergeReconciled(session, &snapshot, &candidate, s.now())
+		if session.Generation == snapshot.Generation && session.Tunnel.ID == snapshot.Tunnel.ID {
+			if managementErr != nil {
+				session.Error = boundedSessionError(managementErr)
+				session.UpdatedAt = s.now()
+				changed = true
+			} else if snapshot.Tunnel.ID != "" {
+				session.Tunnel = tunnelMetadata{}
+				session.UpdatedAt = s.now()
+				changed = true
+			}
+		}
+		if session.State == "STOPPED" && !alreadyStopped {
+			s.sessionStatus(id, "Session stopped")
+		}
+		frozen, freezeErr := s.freezeIfTerminal(current, session)
+		if frozen {
 			changed = true
 		}
 		if changed {
-			if err := store.save(current); err != nil {
+			if err := s.Store.save(current); err != nil {
 				return err
 			}
 		}
-		result = detached(runtime)
-		return nil
+		result = detached(session)
+		return freezeErr
 	})
-	if err == nil && result != nil && result.State == "STOPPED" {
-		s.runtimeStatus(id, "Runtime stopped")
-	}
-	return result, errors.Join(managementErr, err)
+	return result, err
 }
 
-// Delete removes an allocation the owner is finished with. Stop is the only path
-// that releases job, tunnel and credentials in the right order, so a live
-// allocation is stopped first and dropped only once the job is confirmed gone.
-func (s Service) Delete(ctx context.Context, id string) (*Runtime, error) {
-	stopped, err := s.Stop(ctx, id)
+func (s Service) forgetSessionBuffers(id string) {
+	s.Logs.Forget(id)
+	s.Metrics.Forget(id)
+}
+
+func (s Service) forgetUnpersistedBuffers(id string) {
+	if _, err := s.loadSession(id); errors.Is(err, errSessionNotFound) {
+		s.forgetSessionBuffers(id)
+	}
+}
+
+func (s Service) delete(ctx context.Context, id string) (*Session, error) {
+	stopped, err := s.stop(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if stopped == nil || !terminalRuntime(stopped.State) {
-		return nil, apierr.New("runtime_not_stopped", "runtime is still stopping; delete it once the scheduler has released the job", http.StatusConflict)
+	if stopped == nil || !terminalSession(stopped.State) {
+		return nil, apierr.New("session_not_stopped", "session is still stopping; delete it once the scheduler has released the job", http.StatusConflict)
 	}
 	auth, err := authn.TunnelAuthorizationFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	var deleted *Runtime
-	if err := s.Store.withLock(func(store Store, current *state) error {
-		runtime := current.Runtimes[id]
-		if runtime == nil {
-			return errRuntimeNotFound
+	var deleted *Session
+	if err := s.Store.withLock(func(current *state) error {
+		session := current.Sessions[id]
+		if session == nil {
+			return errSessionNotFound
 		}
-		if runtime.Owner != auth.Principal {
+		if session.Owner != auth.Principal {
 			return errOwnerMismatch
 		}
-		if !terminalRuntime(runtime.State) {
-			return apierr.New("runtime_not_stopped", "runtime is no longer stopped", http.StatusConflict)
+		if !terminalSession(session.State) {
+			return apierr.New("session_not_stopped", "session is no longer stopped", http.StatusConflict)
 		}
-		deleted = detached(runtime)
-		recordRun(current, s.runOf(runtime))
-		delete(current.Runtimes, id)
-		return store.save(current)
+		deleted = detached(session)
+		delete(current.Sessions, id)
+		return s.Store.save(current)
 	}); err != nil {
 		return nil, err
 	}
-	s.Logs.Forget(id)
-	s.Metrics.Forget(id)
-	return deleted, s.Credentials.Delete(id, deleted.Generation)
+	return deleted, nil
 }
 
-func (s Service) prepareRuntime(ctx context.Context, request CreateRequest) (_ *preparedRuntime, resultErr error) {
-	request, err := assignRuntimeID(request)
+func (s Service) prepareSession(ctx context.Context, request createRequest) (_ *preparedSession, resultErr error) {
+	request, err := assignSessionID(request)
 	if err != nil {
 		return nil, err
 	}
-	s.runtimeStatus(request.ID, "Preparing runtime")
+	s.sessionStatus(request.ID, "Preparing session")
 	defer func() {
 		if resultErr != nil {
-			status := "Runtime preparation failed"
+			status := "Session preparation failed"
 			if apierr.For(resultErr).Code == "ssh_authentication_required" {
 				status = "Interactive SSH login required"
 			}
-			s.runtimeStatus(request.ID, status)
+			s.sessionStatus(request.ID, status)
 		}
 	}()
-	resource, err := s.Discover(ctx, request.SSHHost)
+	resource, err := s.discover(ctx, request.SSHHost)
 	if err != nil {
-		return nil, fmt.Errorf("discover runtime resource: %w", err)
+		return nil, fmt.Errorf("discover session resource: %w", err)
 	}
 	if request.Account != "" && !slices.Contains(resource.Accounts, request.Account) {
-		return nil, apierr.New("invalid_account", "Slurm account was not discovered for this host", 400)
+		return nil, apierr.New("invalid_account", "Slurm account was not discovered for this host", http.StatusBadRequest)
 	}
 	if err := validatePartitionResources(resource.Partitions, request.Partition, request.Resources); err != nil {
 		return nil, err
 	}
-	privateRoot := pathpkg.Join(resource.HomeDir, defaultRuntimeBase, request.ID)
+	privateRoot := pathpkg.Join(resource.HomeDir, defaultSessionBase, request.ID)
 	if !safeRemotePath(privateRoot) {
-		return nil, errors.New("resolved private runtime path is unsafe")
+		return nil, errors.New("resolved private session path is unsafe")
 	}
 	workspaceRoot, err := s.resolveWorkspaceRoot(ctx, request.SSHHost, resource.HomeDir, request.RootFolder)
 	if err != nil {
@@ -421,136 +495,137 @@ func (s Service) prepareRuntime(ctx context.Context, request CreateRequest) (_ *
 	if err := validateWorkspacePrivateLayout(resource.HomeDir, workspaceRoot, privateRoot, request.ID, request.RootFolder); err != nil {
 		return nil, err
 	}
-	runtime := Runtime{
-		RuntimeResponse: RuntimeResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources},
+	session := Session{
+		sessionResponse: sessionResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources},
 		PrivateRoot:     privateRoot, WorkspaceRoot: workspaceRoot,
 	}
-	s.runtimeStatus(request.ID, "Runtime preparation complete")
-	linkspan := resolveRemoteExecutable(s.effectiveConfig().LinkspanPath, resource.HomeDir)
-	return &preparedRuntime{request: request, runtime: runtime, script: buildScript(runtime, linkspan), home: resource.HomeDir, linkspan: linkspan}, nil
+	s.sessionStatus(request.ID, "Session preparation complete")
+	linkspan := resolveRemoteExecutable(s.linkspanPath(), resource.HomeDir)
+	return &preparedSession{session: session, script: buildScript(session, linkspan), home: resource.HomeDir, linkspan: linkspan}, nil
 }
 
-func assignRuntimeID(request CreateRequest) (CreateRequest, error) {
-	if err := validateCreate(&request); err != nil {
-		return request, err
+func (s Service) resolveWorkspaceRoot(ctx context.Context, alias, home, expression string) (string, error) {
+	if !validWorkspaceExpression(expression) || !safeRemotePath(home) {
+		return "", invalidRootFolder("workspace expression is invalid")
 	}
-	if request.ID == "" {
-		sum := sha256.Sum256([]byte(request.IdempotencyKey))
-		request.ID = "rt-" + hex.EncodeToString(sum[:6])
+	base, suffix := home, ""
+	switch {
+	case homeRootExpression(expression):
+	case strings.HasPrefix(expression, "/"):
+		base = expression
+	case strings.HasPrefix(expression, "~/"):
+		suffix = strings.TrimPrefix(expression, "~/")
+	case workspaceVar.MatchString(expression):
+		match := workspaceVar.FindStringSubmatch(expression)
+		name := match[1]
+		if name == "" {
+			name = match[2]
+		}
+		suffix = match[3]
+		if name != "HOME" {
+			output, err := s.Runner.Run(ctx, alias, nil, "printenv", name)
+			if err != nil {
+				return "", invalidRootFolder("workspace environment variable " + name + " is unavailable")
+			}
+			base, err = oneRemotePath(output)
+			if err != nil {
+				return "", invalidRootFolder("workspace environment variable " + name + " must contain one absolute safe path")
+			}
+		}
+	default:
+		suffix = expression
 	}
-	if !idPattern.MatchString(request.ID) {
-		return request, apierr.New("invalid_runtime_id", "runtime ID must match rt-[a-f0-9]{12}", 400)
+	resolved := base
+	if suffix != "" {
+		resolved = pathpkg.Join(base, suffix)
 	}
-	return request, nil
+	if !safeRemotePath(resolved) {
+		return "", invalidRootFolder("workspace resolves to an unsafe path")
+	}
+	return resolved, nil
 }
 
-func sameCreateRequest(runtime *Runtime, request CreateRequest) bool {
-	return runtime.SSHHost == request.SSHHost && runtime.Account == request.Account && runtime.Partition == request.Partition && runtime.RootFolder == request.RootFolder && runtime.Resources == request.Resources
-}
-
-// ListCached returns the persisted inventory without scheduler or endpoint I/O,
-// so a read answers immediately and reconciliation catches up behind it.
-func (s Service) ListCached() ([]Runtime, error) {
-	var result []Runtime
-	err := s.Store.withLock(func(_ Store, current *state) error {
-		result = sortedRuntimeCopies(current)
+func (s Service) loadSessions() ([]Session, error) {
+	var result []Session
+	err := s.Store.withLock(func(current *state) error {
+		result = sortedSessionCopies(current)
 		return nil
 	})
 	return result, err
 }
 
-// ReconcileAll refreshes every active runtime and conditionally merges the
-// result, so concurrent create/stop updates cannot be overwritten by stale I/O.
-func (s Service) ReconcileAll(ctx context.Context) error {
-	snapshots, err := s.ListCached()
+func (s Service) reconcileAll(ctx context.Context) error {
+	snapshots, err := s.loadSessions()
 	if err != nil {
 		return err
 	}
 	candidates, narration := s.reconcileSnapshots(ctx, snapshots)
-	// A canceled refresh has no authoritative result, so it must not even enter
-	// the merge lock.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.Store.withLock(func(store Store, current *state) error {
+	return s.Store.withLock(func(current *state) error {
 		changed := false
 		for i := range snapshots {
-			runtime := current.Runtimes[snapshots[i].ID]
-			s.narrateReconciled(runtime, &snapshots[i], narration[i])
-			if !mergeReconciled(runtime, &snapshots[i], &candidates[i], s.now()) {
+			session := current.Sessions[snapshots[i].ID]
+			s.narrateReconciled(session, &snapshots[i], narration[i])
+			if !mergeReconciled(session, &snapshots[i], &candidates[i], s.now()) {
 				continue
 			}
 			changed = true
-			// The first observation of a terminal state is the last moment the
-			// allocation's own window and narration still describe it. Both move
-			// into the run and are dropped here: what a runtime that is no longer
-			// running said belongs to its run, not to its card.
-			if terminalRuntime(runtime.State) && recordRun(current, s.runOf(runtime)) {
-				s.Metrics.Forget(runtime.ID)
-				s.Logs.Forget(runtime.ID)
-			}
+			_, _ = s.freezeIfTerminal(current, session)
 		}
 		if changed {
-			return store.save(current)
+			return s.Store.save(current)
 		}
 		return nil
 	})
 }
 
-func (s Service) GetCached(id string) (*Runtime, error) {
-	var result *Runtime
-	err := s.Store.withLock(func(_ Store, current *state) error {
-		runtime := current.Runtimes[id]
-		if runtime == nil {
-			return errRuntimeNotFound
+func (s Service) loadSession(id string) (*Session, error) {
+	var result *Session
+	err := s.Store.withLock(func(current *state) error {
+		session := current.Sessions[id]
+		if session == nil {
+			return errSessionNotFound
 		}
-		result = detached(runtime)
+		result = detached(session)
 		return nil
 	})
 	return result, err
 }
 
-func terminalRuntime(state string) bool {
-	return state == "STOPPED" || state == "FAILED"
-}
-
-func reconcile(state string) bool {
-	return state == "SUBMITTING" || state == "QUEUED" || state == "STARTING" || state == "READY" || state == "STOPPING"
-}
-
-func setRuntimeNode(runtime *Runtime, value string) {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "(null)" || value == "None assigned" || !nodePattern.MatchString(value) {
-		return
-	}
-	runtime.Node = value
-}
-
-// abandonSubmitIntent undoes a runtime that will never reach the scheduler. A
-// stop that arrived meanwhile keeps its outcome, and a relaunch keeps its card.
-func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Runtime, relaunched bool) error {
-	compensateErr := s.releaseAllocationTunnel(auth, intent.ID, intent.Generation, intent.Tunnel)
-	stateErr := s.Store.withLock(func(store Store, current *state) error {
-		currentRuntime := current.Runtimes[intent.ID]
-		if currentRuntime == nil || currentRuntime.Generation != intent.Generation || currentRuntime.JobName != intent.JobName || currentRuntime.JobID != "" {
+func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Session, relaunched bool) error {
+	compensateErr := s.releaseSessionTunnel(auth, intent.ID, intent.Generation, intent.Tunnel)
+	deleted := false
+	stateErr := s.Store.withLock(func(current *state) error {
+		currentSession := current.Sessions[intent.ID]
+		if currentSession == nil || currentSession.Generation != intent.Generation || currentSession.JobName != intent.JobName || currentSession.JobID != "" {
 			return nil
 		}
 		next := ""
 		switch {
-		case currentRuntime.State == "SUBMITTING" && !relaunched:
-			delete(current.Runtimes, intent.ID)
-		case currentRuntime.State == "SUBMITTING":
+		case currentSession.State == "SUBMITTING" && !relaunched:
+			delete(current.Sessions, intent.ID)
+			deleted = true
+		case currentSession.State == "SUBMITTING":
 			next = "FAILED"
-		case currentRuntime.State == "STOPPING":
+		case currentSession.State == "STOPPING":
 			next = "STOPPED"
 		default:
 			return nil
 		}
 		if next != "" {
-			currentRuntime.State, currentRuntime.Tunnel = next, TunnelMetadata{}
-			currentRuntime.Error, currentRuntime.UpdatedAt = boundedOptionalRuntimeError(compensateErr), s.now()
+			currentSession.State, currentSession.Tunnel = next, tunnelMetadata{}
+			sessionError := ""
+			if compensateErr != nil {
+				sessionError = boundedSessionError(compensateErr)
+			}
+			currentSession.Error, currentSession.UpdatedAt = sessionError, s.now()
 		}
-		return store.save(current)
+		return s.Store.save(current)
 	})
+	if stateErr == nil && deleted {
+		s.forgetSessionBuffers(intent.ID)
+	}
 	return errors.Join(compensateErr, stateErr)
 }

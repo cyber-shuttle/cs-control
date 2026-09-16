@@ -1,3 +1,7 @@
+// Runs the real gateway against real OpenSSH. Off by default, needs a host named by LIVE_SSH_ALIAS.
+//
+//	dialAuthAlias
+//	TestLiveRealOpenSSHReachesReady
 package gateway
 
 import (
@@ -13,8 +17,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Runs the real gateway against real OpenSSH. Off by default: it needs a host
-// this machine can already reach.
+func dialAuthAlias(t *testing.T, serverURL, alias string) *websocket.Conn {
+	t.Helper()
+	header := http.Header{"Origin": {serverURL}}
+	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/api/v1/ssh/" + alias + "/auth"
+	connection, response, err := websocket.DefaultDialer.Dial(url, header)
+	if err != nil {
+		t.Fatalf("open auth websocket: %v (%v)", err, response)
+	}
+	_ = response.Body.Close()
+	return connection
+}
+
 func TestLiveRealOpenSSHReachesReady(t *testing.T) {
 	alias := os.Getenv("LIVE_SSH_ALIAS")
 	if alias == "" {
@@ -22,9 +36,9 @@ func TestLiveRealOpenSSHReachesReady(t *testing.T) {
 	}
 	home, _ := os.UserHomeDir()
 	runner := sshexec.Runner{
-		Hosts:      sshconfig.Config{UserPath: home + "/.ssh/config", SystemPath: "/etc/ssh/ssh_config"},
-		ControlDir: t.TempDir(),
-		Timeout:    30 * time.Second,
+		Hosts:            sshconfig.Config{UserPath: home + "/.ssh/config"},
+		ControlNamespace: t.TempDir(),
+		Timeout:          30 * time.Second,
 	}
 	manager := NewSSHAuthManager(runner)
 	defer manager.Close()
@@ -32,7 +46,7 @@ func TestLiveRealOpenSSHReachesReady(t *testing.T) {
 	defer server.Close()
 
 	connection := dialAuthAlias(t, server.URL, alias)
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	deadline := time.Now().Add(60 * time.Second)
 	ready := false
 	for time.Now().Before(deadline) {
@@ -50,15 +64,4 @@ func TestLiveRealOpenSSHReachesReady(t *testing.T) {
 		}
 	}
 	t.Fatal("no readiness before the deadline")
-}
-
-func dialAuthAlias(t *testing.T, serverURL, alias string) *websocket.Conn {
-	t.Helper()
-	header := http.Header{"Authorization": {"Bearer service-token-service-token-1234"}, "Origin": {serverURL}}
-	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/api/v1/ssh/" + alias + "/auth"
-	connection, response, err := websocket.DefaultDialer.Dial(url, header)
-	if err != nil {
-		t.Fatalf("open auth websocket: %v (%v)", err, response)
-	}
-	return connection
 }

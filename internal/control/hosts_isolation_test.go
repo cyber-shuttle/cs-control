@@ -1,3 +1,11 @@
+// Every caller has their own host configuration and nothing else.
+// One principal's aliases are invisible to another, and each gets its own private config file.
+//
+//	handlerAs
+//	hostRequest
+//	hostNames
+//	isolatedHostService
+//	Test*
 package control
 
 import (
@@ -9,15 +17,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
+	"github.com/cyber-shuttle/cs-control/internal/sshexec"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
-// handlerAs serves requests whose caller is always principal.
-func handlerAs(t *testing.T, service Service, principal authn.Principal) (*HTTPAPI, http.Handler) {
+func handlerAs(t *testing.T, service Service, principal authn.Principal) http.Handler {
 	t.Helper()
-	api := NewHTTPHandler(service, nil)
+	api := NewHTTPHandler(service, noopAuth{})
 	handler, err := authn.NewOAuthBoundary(api, oauthValidatorFunc(func(context.Context, string) (authn.Principal, error) {
 		return principal, nil
 	}), []string{mixedOwnerOrigin})
@@ -26,13 +37,15 @@ func handlerAs(t *testing.T, service Service, principal authn.Principal) (*HTTPA
 		t.Fatal(err)
 	}
 	t.Cleanup(api.Close)
-	return api, handler
+	return handler
 }
 
-func hostRequest(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
+func hostRequest(t *testing.T, handler http.Handler, method, path, body string, ifNoneMatch ...string) *httptest.ResponseRecorder {
 	t.Helper()
-	var reader *strings.Reader = strings.NewReader(body)
-	request := httptest.NewRequest(method, path, reader)
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	for _, etag := range ifNoneMatch {
+		request.Header.Set("If-None-Match", etag)
+	}
 	request.Header.Set("Origin", mixedOwnerOrigin)
 	request.Header.Set("Authorization", "Bearer delegated-token")
 	request.Header.Set(authn.ControlIdentityHeader, testIdentityToken)
@@ -51,9 +64,7 @@ func hostNames(t *testing.T, handler http.Handler) []string {
 		t.Fatalf("host list = %d %s", response.Code, response.Body.String())
 	}
 	var list sshconfig.HostList
-	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &list))
 	names := make([]string, 0, len(list.Hosts))
 	for _, host := range list.Hosts {
 		names = append(names, host.Name)
@@ -68,12 +79,10 @@ func isolatedHostService(t *testing.T) Service {
 	return service
 }
 
-// The whole point of the per-caller host store: an alias one principal adds is
-// invisible to every other, and the account this daemon runs as has no standing.
 func TestSSHHostsAreIsolatedPerPrincipal(t *testing.T) {
 	service := isolatedHostService(t)
-	_, mine := handlerAs(t, service, testPrincipal)
-	_, theirs := handlerAs(t, service, otherTestPrincipal)
+	mine := handlerAs(t, service, testPrincipal)
+	theirs := handlerAs(t, service, otherTestPrincipal)
 
 	if got := hostNames(t, mine); len(got) != 0 {
 		t.Fatalf("a caller with no hosts of their own was shown %v", got)
@@ -90,8 +99,6 @@ func TestSSHHostsAreIsolatedPerPrincipal(t *testing.T) {
 		t.Fatalf("another principal was shown a host that is not theirs: %v", got)
 	}
 
-	// The same alias name is free for another caller, and editing or deleting it
-	// reaches only their own entry.
 	if code := hostRequest(t, theirs, http.MethodPost, "/api/v1/ssh", `{"name":"delta","command":"ssh you@other.example.edu"}`).Code; code != http.StatusCreated {
 		t.Fatalf("a name another principal already used was refused: %d", code)
 	}
@@ -103,11 +110,9 @@ func TestSSHHostsAreIsolatedPerPrincipal(t *testing.T) {
 	}
 }
 
-// Each caller's configuration is a private file of its own, and ssh is pointed
-// at it by name so an alias cannot resolve through anyone else's.
 func TestEachPrincipalGetsItsOwnPrivateConfigFile(t *testing.T) {
 	service := isolatedHostService(t)
-	_, mine := handlerAs(t, service, testPrincipal)
+	mine := handlerAs(t, service, testPrincipal)
 	if code := hostRequest(t, mine, http.MethodPost, "/api/v1/ssh", `{"name":"delta","command":"ssh me@login.example.edu"}`).Code; code != http.StatusCreated {
 		t.Fatal("add failed")
 	}
@@ -118,15 +123,28 @@ func TestEachPrincipalGetsItsOwnPrivateConfigFile(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("the caller's own configuration was not written: %v", err)
 	}
-	// The subject is an identifier from another system and never becomes a path.
 	if strings.Contains(path, testPrincipal.Subject) {
 		t.Fatalf("the principal's subject leaked into the path: %q", path)
 	}
 	if service.forPrincipal(testPrincipal).Runner.Hosts.UserPath != path {
 		t.Fatal("the scoped runner does not name the caller's own configuration")
 	}
-	// Two principals never share a file, and so never share a control master.
 	if service.hostConfigPath(otherTestPrincipal) == path {
 		t.Fatal("two principals resolved to one configuration")
+	}
+}
+
+func TestForPrincipalFailsClosedWithoutAHostsDirectory(t *testing.T) {
+	ssh, _, commandLog := fakeSSH(t)
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	if service.Config.HostsDir != "" {
+		t.Fatal("test assumes an unconfigured HostsDir")
+	}
+	scoped := service.forPrincipal(testPrincipal)
+	if _, _, err := scoped.Runner.RunOutput(context.Background(), "delta", nil, "true"); apierr.For(err).Code != "ssh_host_not_found" {
+		t.Fatalf("an unconfigured HostsDir did not fail closed: %v", err)
+	}
+	if _, statErr := os.Stat(commandLog); statErr == nil {
+		t.Fatal("a scoped runner without isolation ran a remote command")
 	}
 }

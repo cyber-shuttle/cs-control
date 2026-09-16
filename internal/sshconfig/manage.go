@@ -1,3 +1,13 @@
+// The only part of the caller's per-principal config file this package writes: entries fenced between
+// blockBegin and blockEnd. Everything outside that block is read, never rewritten.
+// ParseCommand turns a pasted ssh command line into the Host that reproduces it.
+//
+//	blockBegin, blockEnd, valuePattern, allowedOptions*
+//	Config, blockBounds, firstField
+//	managedStanza
+//	errUnmanaged, invalid, option, stanza, ParseCommand
+//	rewrite
+//	replaceStanza, Add, Remove, Update
 package sshconfig
 
 import (
@@ -14,19 +24,13 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/safeio"
 )
 
-// Entries this package writes live between these markers. Everything outside is
-// the user's own: read, never rewritten, and not removable through the API.
 const (
 	blockBegin = "# >>> cybershuttle managed >>>"
 	blockEnd   = "# <<< cybershuttle managed <<<"
 )
 
-// A directive value reaches an ssh argument vector, so it carries no whitespace,
-// quoting or line break.
 var valuePattern = regexp.MustCompile(`^[A-Za-z0-9_@%:./+=,~-]{1,256}$`)
 
-// Only how a connection authenticates or keeps itself alive. Anything that runs a
-// local program or includes more configuration is absent by intent.
 var allowedOptions = map[string]string{
 	"proxyjump":                "ProxyJump",
 	"stricthostkeychecking":    "StrictHostKeyChecking",
@@ -48,12 +52,80 @@ var allowedOptions = map[string]string{
 	"requesttty":               "RequestTTY",
 }
 
+func blockBounds(lines []string) (int, int) {
+	begin := -1
+	for index, line := range lines {
+		switch strings.TrimSpace(line) {
+		case blockBegin:
+			begin = index
+		case blockEnd:
+			if begin >= 0 {
+				return begin, index
+			}
+		}
+	}
+	return -1, -1
+}
+
+func firstField(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func managedStanza(lines []string, alias string) (int, int, bool) {
+	begin, end := blockBounds(lines)
+	for index := begin + 1; begin >= 0 && index < end; index++ {
+		fields := strings.Fields(lines[index])
+		if len(fields) != 2 || !strings.EqualFold(fields[0], "Host") || fields[1] != alias {
+			continue
+		}
+		stop := index + 1
+		for stop < end && !strings.EqualFold(firstField(lines[stop]), "Host") {
+			stop++
+		}
+		return index, stop, true
+	}
+	return 0, 0, false
+}
+
+func errUnmanaged(alias string) error {
+	return apierr.New("ssh_host_not_managed", fmt.Sprintf("%s is not an alias this API manages", alias), http.StatusConflict)
+}
+
 func invalid(message string) error {
 	return apierr.New("invalid_ssh_command", message, http.StatusBadRequest)
 }
 
-// ParseCommand turns the ssh command a user knows works into the host entry
-// that reproduces it, so the alias they later select connects the same way.
+func option(key, value string) (string, error) {
+	if !valuePattern.MatchString(value) {
+		return "", invalid(fmt.Sprintf("The %s value carries characters an ssh config cannot hold.", key))
+	}
+	return key + " " + value, nil
+}
+
+func stanza(host Host) []string {
+	lines := []string{"Host " + host.Name}
+	if host.Hostname != "" {
+		lines = append(lines, "  HostName "+host.Hostname)
+	}
+	if host.User != "" {
+		lines = append(lines, "  User "+host.User)
+	}
+	if host.Port != 0 && host.Port != 22 {
+		lines = append(lines, "  Port "+strconv.Itoa(host.Port))
+	}
+	if host.IdentityFile != "" {
+		lines = append(lines, "  IdentityFile "+host.IdentityFile)
+	}
+	for _, directive := range host.ExtraDirectives {
+		lines = append(lines, "  "+strings.TrimSpace(directive))
+	}
+	return lines
+}
+
 func ParseCommand(name, command string) (Host, error) {
 	if !ValidAlias(name) {
 		return Host{}, ErrInvalidAlias
@@ -162,15 +234,42 @@ func ParseCommand(name, command string) (Host, error) {
 	return host, nil
 }
 
-func option(key, value string) (string, error) {
-	if !valuePattern.MatchString(value) {
-		return "", invalid(fmt.Sprintf("The %s value carries characters an ssh config cannot hold.", key))
+func (c Config) rewrite(mutate func([]string) ([]string, error)) error {
+	path := c.UserPath
+	if path == "" {
+		return errors.New("user SSH config path is required")
 	}
-	return key + " " + value, nil
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var lines []string
+	if text := strings.TrimSuffix(string(data), "\n"); text != "" || len(data) > 0 {
+		lines = strings.Split(text, "\n")
+	}
+	updated, err := mutate(lines)
+	if err != nil {
+		return err
+	}
+	return safeio.ReplaceFile(path, []byte(strings.Join(updated, "\n")+"\n"))
 }
 
-// Add writes the entry into the managed block, creating the block when this is
-// the first one. An alias the user already declares is never overwritten.
+func (c Config) replaceStanza(alias string, replacement []string) error {
+	if !ValidAlias(alias) {
+		return ErrInvalidAlias
+	}
+	return c.rewrite(func(lines []string) ([]string, error) {
+		start, stop, ok := managedStanza(lines, alias)
+		if !ok {
+			return nil, errUnmanaged(alias)
+		}
+		return append(lines[:start:start], append(replacement, lines[stop:]...)...), nil
+	})
+}
+
 func (c Config) Add(host Host) error {
 	if !ValidAlias(host.Name) {
 		return ErrInvalidAlias
@@ -197,120 +296,6 @@ func (c Config) Add(host Host) error {
 	})
 }
 
-// Remove deletes an entry this package wrote. A host the user declares
-// elsewhere in their configuration is reported rather than rewritten.
 func (c Config) Remove(alias string) error { return c.replaceStanza(alias, nil) }
 
-// Update rewrites a managed entry to what the pasted command now says. The
-// alias is the entry being edited, so it keeps both its name and its place in
-// the block.
 func (c Config) Update(host Host) error { return c.replaceStanza(host.Name, stanza(host)) }
-
-func (c Config) replaceStanza(alias string, replacement []string) error {
-	if !ValidAlias(alias) {
-		return ErrInvalidAlias
-	}
-	return c.rewrite(func(lines []string) ([]string, error) {
-		start, stop, ok := managedStanza(lines, alias)
-		if !ok {
-			return nil, errUnmanaged(alias)
-		}
-		return append(lines[:start:start], append(replacement, lines[stop:]...)...), nil
-	})
-}
-
-// managedStanza bounds alias's entry inside the managed block: its Host line
-// through to the line before the next Host, so both callers splice the same
-// span.
-func managedStanza(lines []string, alias string) (int, int, bool) {
-	begin, end := blockBounds(lines)
-	for index := begin + 1; begin >= 0 && index < end; index++ {
-		fields := strings.Fields(lines[index])
-		if len(fields) != 2 || !strings.EqualFold(fields[0], "Host") || fields[1] != alias {
-			continue
-		}
-		stop := index + 1
-		for stop < end && !strings.EqualFold(firstField(lines[stop]), "Host") {
-			stop++
-		}
-		return index, stop, true
-	}
-	return 0, 0, false
-}
-
-func errUnmanaged(alias string) error {
-	return apierr.New("ssh_host_not_managed", fmt.Sprintf("%s comes from your own SSH configuration; edit it there.", alias), http.StatusConflict)
-}
-
-func firstField(line string) string {
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
-
-func stanza(host Host) []string {
-	lines := []string{"Host " + host.Name}
-	if host.Hostname != "" {
-		lines = append(lines, "  HostName "+host.Hostname)
-	}
-	if host.User != "" {
-		lines = append(lines, "  User "+host.User)
-	}
-	if host.Port != 0 && host.Port != 22 {
-		lines = append(lines, "  Port "+strconv.Itoa(host.Port))
-	}
-	if host.IdentityFile != "" {
-		lines = append(lines, "  IdentityFile "+host.IdentityFile)
-	}
-	for _, directive := range host.ExtraDirectives {
-		lines = append(lines, "  "+strings.TrimSpace(directive))
-	}
-	return lines
-}
-
-func blockBounds(lines []string) (int, int) {
-	begin := -1
-	for index, line := range lines {
-		switch strings.TrimSpace(line) {
-		case blockBegin:
-			begin = index
-		case blockEnd:
-			if begin >= 0 {
-				return begin, index
-			}
-		}
-	}
-	return -1, -1
-}
-
-// rewrite replaces the user's config atomically, so a failed write leaves nothing
-// half-written behind.
-func (c Config) rewrite(mutate func([]string) ([]string, error)) error {
-	path := c.UserPath
-	if path == "" {
-		return errors.New("user SSH config path is required")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	var lines []string
-	if text := strings.TrimSuffix(string(data), "\n"); text != "" || len(data) > 0 {
-		lines = strings.Split(text, "\n")
-	}
-	updated, err := mutate(lines)
-	if err != nil {
-		return err
-	}
-	// A dotfiles-managed config is commonly a symlink, and the atomic replace
-	// refuses one, so write through to the file the link names.
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	}
-	return safeio.ReplaceFile(path, []byte(strings.Join(updated, "\n")+"\n"), nil)
-}

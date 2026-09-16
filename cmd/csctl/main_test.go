@@ -1,7 +1,12 @@
+// Tests that serve validates before it listens, stays behind the OAuth boundary, and parses its flags correctly.
+//
+//	TestServeValidatesOriginsBeforeListening, TestServeComponentsAlwaysApplyOAuthBoundary
+//	TestCLIAcceptsOnlyServeHelpAndVersion
 package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 	"net/http"
@@ -9,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/cyber-shuttle/cs-control/internal/control"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
 func TestServeValidatesOriginsBeforeListening(t *testing.T) {
@@ -35,11 +41,9 @@ func TestServeValidatesOriginsBeforeListening(t *testing.T) {
 
 func TestServeComponentsAlwaysApplyOAuthBoundary(t *testing.T) {
 	const allowedOrigin = "https://workspace.example.edu"
-	service := control.Service{Store: control.Store{Dir: t.TempDir()}, Logs: control.NewRuntimeLogs()}
+	service := control.Service{Store: control.Store{Dir: t.TempDir()}, Logs: control.NewSessionLogs()}
 	components, err := newServeComponents(service, []string{allowedOrigin}, "https://login.microsoftonline.com/tenant/")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	defer components.close()
 
 	missing := httptest.NewRequest(http.MethodGet, "/api/v1/ssh/delta/auth", nil)
@@ -49,19 +53,30 @@ func TestServeComponentsAlwaysApplyOAuthBoundary(t *testing.T) {
 	missing.Header.Set("Sec-WebSocket-Protocol", "cybershuttle.v1")
 	missingResponse := httptest.NewRecorder()
 	components.handler.ServeHTTP(missingResponse, missing)
-	if missingResponse.Code != http.StatusBadRequest {
-		t.Fatalf("production handler without bearer = %d", missingResponse.Code)
-	}
+	testutil.Equal(t, missingResponse.Code, http.StatusBadRequest, "production handler without bearer")
 
 	hostile := httptest.NewRequest(http.MethodGet, "/api/v1/ssh/delta/auth", nil)
 	hostile.Header.Set("Origin", "https://evil.example")
 	hostile.Header.Set("Connection", "Upgrade")
 	hostile.Header.Set("Upgrade", "websocket")
-	hostile.Header.Set("Sec-WebSocket-Protocol", "cybershuttle.v1, cybershuttle.bearer.not-valid***")
+	hostile.Header.Set("Sec-WebSocket-Protocol", "cybershuttle.v1")
 	hostileResponse := httptest.NewRecorder()
 	components.handler.ServeHTTP(hostileResponse, hostile)
 	if hostileResponse.Code != http.StatusForbidden {
-		t.Fatalf("production handler hostile origin = %d", hostileResponse.Code)
+		t.Fatalf("a disallowed origin was not refused before the subprotocol was even read: %d", hostileResponse.Code)
+	}
+
+	access := base64.RawURLEncoding.EncodeToString([]byte("not-a-real-access-token"))
+	identity := base64.RawURLEncoding.EncodeToString([]byte("not-a-real-identity-token"))
+	invalidToken := httptest.NewRequest(http.MethodGet, "/api/v1/ssh/delta/auth", nil)
+	invalidToken.Header.Set("Origin", allowedOrigin)
+	invalidToken.Header.Set("Connection", "Upgrade")
+	invalidToken.Header.Set("Upgrade", "websocket")
+	invalidToken.Header.Set("Sec-WebSocket-Protocol", "cybershuttle.v1, bearer."+access+", identity."+identity)
+	invalidTokenResponse := httptest.NewRecorder()
+	components.handler.ServeHTTP(invalidTokenResponse, invalidToken)
+	if invalidTokenResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("a well-formed but bogus bearer protocol = %d, want 401 from the subprotocol path", invalidTokenResponse.Code)
 	}
 }
 
@@ -71,18 +86,9 @@ func TestCLIAcceptsOnlyServeHelpAndVersion(t *testing.T) {
 			t.Errorf("%q is part of the CLI but was refused: %v", command, err)
 		}
 	}
-	for _, command := range []string{"status", "runtime", "login", "ssh"} {
+	for _, command := range []string{"status", "session", "login", "ssh"} {
 		if err := run(context.Background(), []string{command}); err == nil {
-			t.Errorf("%q was accepted; runtime and SSH operations go through the API, not argv", command)
+			t.Errorf("%q was accepted; session and SSH operations go through the API, not argv", command)
 		}
-	}
-}
-
-func TestGlobalFlagsMustPrecedeTheCommand(t *testing.T) {
-	if err := run(context.Background(), []string{"-linkspan", "/opt/linkspan", "version"}); err != nil {
-		t.Errorf("a global flag before the command was refused: %v", err)
-	}
-	if err := run(context.Background(), []string{"version", "-linkspan", "/opt/linkspan"}); err == nil {
-		t.Error("a global flag after the command was accepted")
 	}
 }

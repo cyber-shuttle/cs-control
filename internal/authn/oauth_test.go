@@ -1,3 +1,11 @@
+// Tests the OAuth boundary's origins, its two credential channels, redirect and claim rejection, and poll headers.
+//
+//	testIdentityToken, testPrincipal, oauthValidatorFunc, testBaseURL, oauthCredentialsValidatorFunc
+//	browserWebSocketProtocols, browserUpgradeRequest
+//	TestOAuthBoundaryExactOriginsBearerAndNative, TestOAuthBoundaryWebSocketSubprotocolBearer
+//	TestOAuthBoundaryWebSocketRejectsHeaderCredentialChannels, TestOAuthValidatorAcceptsEncryptedDevTunnelsAccessToken
+//	TestOAuthValidatorDoesNotFollowBearerToUntrustedRedirect, TestOAuthValidatorRejectsUnvalidatedClaimsAndRedacts
+//	TestOAuthBoundaryConditionalPollHeaders
 package authn
 
 import (
@@ -12,23 +20,21 @@ import (
 	"testing"
 
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
-	"github.com/cyber-shuttle/cs-control/internal/httpx"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
-
-func testBaseURL(t *testing.T, raw string) *url.URL {
-	t.Helper()
-	base, err := httpx.ParseBaseURL(raw, "test base URL")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return base
-}
 
 const testIdentityToken = "signed-test-identity-token"
 
 var testPrincipal = Principal{Subject: "test-owner", Tenant: "test-tenant"}
 
 type oauthValidatorFunc func(context.Context, string) (Principal, error)
+
+func testBaseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	base, err := devtunnel.ParseBaseURL(raw, "test base URL")
+	testutil.Check(t, err)
+	return base
+}
 
 func (f oauthValidatorFunc) Validate(ctx context.Context, credentials OAuthCredentials) (Principal, error) {
 	return f(ctx, credentials.AccessToken)
@@ -38,6 +44,10 @@ type oauthCredentialsValidatorFunc func(context.Context, OAuthCredentials) (Prin
 
 func (f oauthCredentialsValidatorFunc) Validate(ctx context.Context, credentials OAuthCredentials) (Principal, error) {
 	return f(ctx, credentials)
+}
+
+func browserWebSocketProtocols(token string) string {
+	return ControlWebSocketProtocol + ", " + WebSocketBearerPrefix + base64.RawURLEncoding.EncodeToString([]byte(token)) + ", " + WebSocketIdentityPrefix + base64.RawURLEncoding.EncodeToString([]byte(testIdentityToken))
 }
 
 func browserUpgradeRequest(token string) *http.Request {
@@ -70,12 +80,10 @@ func TestOAuthBoundaryExactOriginsBearerAndNative(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	handler, err := NewOAuthBoundary(next, validator, []string{"https://workspace.example.edu", "http://127.0.0.1:8045"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 
 	for _, origin := range []string{"https://workspace.example.edu", "http://127.0.0.1:8045"} {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/runtimes", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
 		req.Header.Set("Origin", origin)
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set(ControlIdentityHeader, testIdentityToken)
@@ -86,7 +94,7 @@ func TestOAuthBoundaryExactOriginsBearerAndNative(t *testing.T) {
 		}
 	}
 
-	native := httptest.NewRequest(http.MethodGet, "/api/v1/runtimes", nil)
+	native := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 	native.Header.Set("Authorization", "Bearer "+token)
 	native.Header.Set(ControlIdentityHeader, testIdentityToken)
 	native.AddCookie(&http.Cookie{Name: "cs_session", Value: "ignored"})
@@ -96,10 +104,6 @@ func TestOAuthBoundaryExactOriginsBearerAndNative(t *testing.T) {
 	if rr.Code != http.StatusNoContent || rr.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("native code=%d headers=%v", rr.Code, rr.Header())
 	}
-}
-
-func browserWebSocketProtocols(token string) string {
-	return ControlWebSocketProtocol + ", " + WebSocketBearerPrefix + base64.RawURLEncoding.EncodeToString([]byte(token)) + ", " + WebSocketIdentityPrefix + base64.RawURLEncoding.EncodeToString([]byte(testIdentityToken))
 }
 
 func TestOAuthBoundaryWebSocketSubprotocolBearer(t *testing.T) {
@@ -127,14 +131,10 @@ func TestOAuthBoundaryWebSocketSubprotocolBearer(t *testing.T) {
 	})
 	handler, err := NewOAuthBoundary(next, oauthValidatorFunc(func(_ context.Context, got string) (Principal, error) {
 		validatorCalls++
-		if got != token {
-			t.Fatalf("validated token = %q", got)
-		}
+		testutil.Equal(t, got, token, "validated token")
 		return testPrincipal, nil
 	}), []string{"https://workspace.example.edu"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	request := browserUpgradeRequest(token)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -160,9 +160,7 @@ func TestOAuthBoundaryWebSocketRejectsHeaderCredentialChannels(t *testing.T) {
 		calls++
 		return testPrincipal, nil
 	}), []string{"https://workspace.example.edu"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	request := browserUpgradeRequest(token)
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set(ControlIdentityHeader, testIdentityToken)
@@ -186,9 +184,7 @@ func TestOAuthValidatorAcceptsEncryptedDevTunnelsAccessToken(t *testing.T) {
 	}))
 	defer server.Close()
 	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client())
-	if err := validator.ValidateAccess(context.Background(), token); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, validator.ValidateAccess(context.Background(), token))
 	if !called {
 		t.Fatal("Dev Tunnels validation endpoint was not called")
 	}
@@ -231,8 +227,6 @@ func TestOAuthValidatorRejectsUnvalidatedClaimsAndRedacts(t *testing.T) {
 	}
 }
 
-// The runtime poll's ETag is only usable cross-origin if the browser is allowed
-// to read the header and to send it back on the next request.
 func TestOAuthBoundaryConditionalPollHeaders(t *testing.T) {
 	const origin = "https://workspace.example.edu"
 	validator := oauthValidatorFunc(func(context.Context, string) (Principal, error) { return testPrincipal, nil })
@@ -241,11 +235,9 @@ func TestOAuthBoundaryConditionalPollHeaders(t *testing.T) {
 		w.WriteHeader(http.StatusNotModified)
 	})
 	handler, err := NewOAuthBoundary(next, validator, []string{origin})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 
-	preflight := httptest.NewRequest(http.MethodOptions, "/api/v1/runtimes", nil)
+	preflight := httptest.NewRequest(http.MethodOptions, "/api/v1/sessions", nil)
 	preflight.Header.Set("Origin", origin)
 	preflight.Header.Set("Access-Control-Request-Method", http.MethodGet)
 	preflight.Header.Set("Access-Control-Request-Headers", "authorization,if-none-match,"+strings.ToLower(ControlIdentityHeader))
@@ -258,7 +250,7 @@ func TestOAuthBoundaryConditionalPollHeaders(t *testing.T) {
 		t.Fatalf("Allow-Headers = %q", rr.Header().Get("Access-Control-Allow-Headers"))
 	}
 
-	actual := httptest.NewRequest(http.MethodGet, "/api/v1/runtimes", nil)
+	actual := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 	actual.Header.Set("Origin", origin)
 	actual.Header.Set("Authorization", "Bearer token-value")
 	actual.Header.Set(ControlIdentityHeader, testIdentityToken)

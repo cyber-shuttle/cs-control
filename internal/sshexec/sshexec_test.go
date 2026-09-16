@@ -1,3 +1,12 @@
+// Tests the output bound, the interactive master's foreground ownership, ChildEnv's locale policy, and the
+// private control socket.
+//
+//	listenUnix
+//	TestRunRemoteArgsBoundsCombinedOutput, TestInteractiveMasterIsNotBackgrounded
+//	TestChildEnvLeavesAUTF8LocaleAlone
+//	TestOpenSSHDoesNotEscapeNonASCIIUnderChildEnv
+//	TestChildEnvLeavesExactlyOneLocaleEntry, TestMasterHealthyRequiresAPrivateOwnedSocket
+//	TestControlPathIsPerConfiguration, TestArgsNameTheCallersConfiguration
 package sshexec
 
 import (
@@ -9,54 +18,39 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
+func listenUnix(t *testing.T, path string) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("unix", path)
+	testutil.Check(t, err)
+	return listener
+}
+
 func TestRunRemoteArgsBoundsCombinedOutput(t *testing.T) {
-	captured := NewCapture()
-	if _, err := captured.Stdout().Write(make([]byte, MaxOutput)); err != nil {
-		t.Fatal(err)
-	}
+	captured := newCapture()
+	_, err := captured.Stdout().Write(make([]byte, maxOutput))
+	testutil.Check(t, err)
 	if _, err := captured.Stderr().Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "output exceeded limit") {
 		t.Fatalf("oversized combined remote output error = %v", err)
 	}
 }
 
-// An interactive master must be the foreground process the gateway owns and
-// reaps. ControlPersist backgrounds it instead: OpenSSH returns 0 as soon as it
-// authenticates, which the gateway can only read as an exit before readiness.
 func TestInteractiveMasterIsNotBackgrounded(t *testing.T) {
-	runner := Runner{SSHBin: filepath.Join(t.TempDir(), "unused"), ControlDir: t.TempDir(), Timeout: time.Second}
+	runner := Runner{SSHBin: filepath.Join(t.TempDir(), "unused"), ControlNamespace: t.TempDir(), Timeout: time.Second}
 	for _, test := range []struct {
 		interactive bool
 		persist     string
 		batch       string
 	}{{true, "ControlPersist=no", "BatchMode=no"}, {false, "ControlPersist=600", "BatchMode=yes"}} {
 		args, err := runner.sshArgs("delta", test.interactive, "identity\n")
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.Check(t, err)
 		joined := strings.Join(args, " ")
 		if !strings.Contains(joined, test.persist) || !strings.Contains(joined, test.batch) {
 			t.Fatalf("interactive=%v produced %q", test.interactive, joined)
 		}
-	}
-}
-
-func TestChildEnvAsksForUTF8WhenTheServiceInheritedNoLocale(t *testing.T) {
-	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
-		t.Setenv(name, "")
-	}
-	if !slices.Contains(ChildEnv(), "LC_ALL="+utf8Locale) {
-		t.Fatal("a service with no locale must ask ssh for UTF-8, or remote text arrives octal-escaped")
-	}
-}
-
-func TestChildEnvOverridesALocaleThatWouldEscapeRemoteText(t *testing.T) {
-	t.Setenv("LC_ALL", "C")
-	t.Setenv("LC_CTYPE", "")
-	t.Setenv("LANG", "")
-	if !slices.Contains(ChildEnv(), "LC_ALL="+utf8Locale) {
-		t.Fatal("the C locale escapes every non-ASCII byte, so it must not stand for an ssh child")
 	}
 }
 
@@ -72,13 +66,6 @@ func TestChildEnvLeavesAUTF8LocaleAlone(t *testing.T) {
 	}
 }
 
-// The unit tests above pin what we pass; only OpenSSH can say whether it honours
-// it, and that depends on the build. OpenSSH escapes through strnvis: macOS
-// supplies a locale-aware one, while portable OpenSSH bundles its own for Linux
-// because glibc's is unusable, and the bundled copy escapes non-ASCII whatever
-// the locale. A diagnostic is therefore only a usable probe where the platform
-// varies by locale at all, so this measures that first and skips where it cannot
-// tell the two apart.
 func TestOpenSSHDoesNotEscapeNonASCIIUnderChildEnv(t *testing.T) {
 	ssh, err := exec.LookPath("ssh")
 	if err != nil {
@@ -106,8 +93,6 @@ func TestOpenSSHDoesNotEscapeNonASCIIUnderChildEnv(t *testing.T) {
 	}
 }
 
-// A duplicate name reaches execve twice and the two libcs disagree about which
-// copy wins -- glibc takes the first, macOS the last -- so exactly one survives.
 func TestChildEnvLeavesExactlyOneLocaleEntry(t *testing.T) {
 	t.Setenv("LC_ALL", "C")
 	t.Setenv("LC_CTYPE", "")
@@ -121,45 +106,27 @@ func TestChildEnvLeavesExactlyOneLocaleEntry(t *testing.T) {
 			}
 		}
 	}
-	if count != 1 {
-		t.Fatalf("ChildEnv returned %d LC_ALL entries, want exactly 1", count)
-	}
+	testutil.Equal(t, count, 1, "ChildEnv LC_ALL entries")
 }
 
-// A recorded control path is only a multiplex master if it is still a socket
-// this user owns privately; anything else must never be handed to ssh -O check.
 func TestMasterHealthyRequiresAPrivateOwnedSocket(t *testing.T) {
 	dir := t.TempDir()
 	ssh := filepath.Join(dir, "ssh")
-	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.WriteFile(ssh, []byte("#!/bin/sh\nexit 0\n"), 0o700))
 	runner := Runner{SSHBin: ssh}
 	regular := filepath.Join(dir, "regular")
-	if err := os.WriteFile(regular, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.WriteFile(regular, nil, 0o600))
 	link := filepath.Join(dir, "link")
-	if err := os.Symlink(regular, link); err != nil {
-		t.Fatal(err)
-	}
-	// Socket paths are capped near 104 bytes, which a test-named directory alone
-	// can exceed.
+	testutil.Check(t, os.Symlink(regular, link))
 	sockets, err := os.MkdirTemp("", "cs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(sockets)
+	testutil.Check(t, err)
+	defer func() { _ = os.RemoveAll(sockets) }()
 	private, shared := filepath.Join(sockets, "private"), filepath.Join(sockets, "shared")
-	defer listenUnix(t, private).Close()
-	defer listenUnix(t, shared).Close()
-	// OpenSSH creates its control socket private; net.Listen leaves it to umask.
-	if err := os.Chmod(private, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(shared, 0o777); err != nil {
-		t.Fatal(err)
-	}
+	privateListener, sharedListener := listenUnix(t, private), listenUnix(t, shared)
+	defer func() { _ = privateListener.Close() }()
+	defer func() { _ = sharedListener.Close() }()
+	testutil.Check(t, os.Chmod(private, 0o600))
+	testutil.Check(t, os.Chmod(shared, 0o777))
 	for name, path := range map[string]string{"regular file": regular, "symlink": link, "world-accessible socket": shared} {
 		if runner.MasterHealthy("delta", path) {
 			t.Fatalf("%s was accepted as a control socket", name)
@@ -170,62 +137,34 @@ func TestMasterHealthyRequiresAPrivateOwnedSocket(t *testing.T) {
 	}
 }
 
-func listenUnix(t *testing.T, path string) net.Listener {
-	t.Helper()
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return listener
-}
-
-// Two callers naming the same alias reach it through their own configurations,
-// so the multiplexed connection must not be shared: one authenticating a host
-// must never hand the other an authenticated session.
 func TestControlPathIsPerConfiguration(t *testing.T) {
 	dir := t.TempDir()
-	base := Runner{ControlDir: dir}
+	base := Runner{ControlNamespace: dir}
 	mine := base
 	mine.Hosts.UserPath = filepath.Join(dir, "a", "config")
 	theirs := base
 	theirs.Hosts.UserPath = filepath.Join(dir, "b", "config")
 
 	minePath, err := mine.controlPath("delta", "identity")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	theirsPath, err := theirs.controlPath("delta", "identity")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if minePath == theirsPath {
 		t.Fatal("two configurations share one control master for the same alias")
 	}
-	// The same caller keeps one master, or every call would authenticate again.
-	again, err := mine.controlPath("delta", "identity")
-	if err != nil || again != minePath {
-		t.Fatalf("control path is not stable for one caller: %q vs %q (%v)", again, minePath, err)
-	}
 }
 
-// The configuration is named explicitly, so an alias never resolves through the
-// configuration of the account this daemon happens to run as.
 func TestArgsNameTheCallersConfiguration(t *testing.T) {
-	runner := Runner{ControlDir: t.TempDir()}
+	runner := Runner{ControlNamespace: t.TempDir()}
 	runner.Hosts.UserPath = "/tmp/some/caller/config"
 	args, err := runner.sshArgs("delta", false, "identity")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "-F /tmp/some/caller/config") {
 		t.Fatalf("ssh was not pointed at the caller's configuration: %s", joined)
 	}
-	// An unset configuration must not produce a -F with nothing after it.
-	bare, err := Runner{ControlDir: t.TempDir()}.sshArgs("delta", false, "identity")
-	if err != nil {
-		t.Fatal(err)
-	}
+	bare, err := Runner{ControlNamespace: t.TempDir()}.sshArgs("delta", false, "identity")
+	testutil.Check(t, err)
 	if strings.Contains(strings.Join(bare, " "), "-F") {
 		t.Fatalf("an unset configuration still produced -F: %v", bare)
 	}

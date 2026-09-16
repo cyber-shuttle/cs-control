@@ -1,6 +1,11 @@
-// Package httpx holds the outbound-HTTP primitives every subsystem that talks
-// to an external identity or tunnel service needs: a bounded client, a bounded
-// body read, and the URL policy those services' base URLs must satisfy.
+// Package httpx holds the outbound-HTTP primitives every external-service caller needs.
+// UserAgent identifies the binary to the services it calls; the composition root sets it once at startup.
+// A GuardedClient's Authorization header survives an allowed redirect, since Go itself preserves it across
+// a same-origin hop; every allowed predicate a caller passes must therefore stay same-origin.
+//
+//	UserAgent, BoundedClient, SameOriginRedirect, GuardedClient
+//	Do
+//	NewRequest, GetJSON
 package httpx
 
 import (
@@ -9,32 +14,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
-
-	"github.com/cyber-shuttle/cs-control/internal/apierr"
 )
 
-const userAgent = "cs-control/0.1.0"
+var UserAgent = "cs-control"
 
-// ParseBaseURL accepts only a bare http(s) origin with an optional path -- no
-// credentials, query or fragment -- so a base URL cannot smuggle parameters into
-// every request built from it. subject names it in errors.
-func ParseBaseURL(raw, subject string) (*url.URL, error) {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil ||
-		parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
-		return nil, fmt.Errorf("%s is invalid", subject)
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	return parsed, nil
-}
-
-// BoundedClient copies client with a timeout no longer than fallback, so a
-// hung external service can never hold a request goroutine open indefinitely.
 func BoundedClient(client *http.Client, fallback time.Duration) *http.Client {
 	if client == nil {
 		client = http.DefaultClient
@@ -46,15 +32,27 @@ func BoundedClient(client *http.Client, fallback time.Duration) *http.Client {
 	return &bounded
 }
 
-// Do sends request and returns its body alongside the status, leaving status
-// interpretation to the caller. An oversized body is rejected rather than
-// truncated, so a partial response is never parsed as a whole one.
+func SameOriginRedirect(from, to *url.URL) bool {
+	return from != nil && to != nil && to.User == nil && from.Scheme == to.Scheme && from.Host == to.Host
+}
+
+func GuardedClient(client *http.Client, fallback time.Duration, allowed func(from, to *url.URL) bool) *http.Client {
+	bounded := BoundedClient(client, fallback)
+	bounded.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if len(via) >= 5 || len(via) == 0 || !allowed(via[0].URL, request.URL) {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+	return bounded
+}
+
 func Do(client *http.Client, request *http.Request, limit int64) ([]byte, int, error) {
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return nil, response.StatusCode, err
@@ -65,23 +63,19 @@ func Do(client *http.Client, request *http.Request, limit int64) ([]byte, int, e
 	return body, response.StatusCode, nil
 }
 
-// NewRequest builds an outbound request with this process's standard headers and
-// its bearer when one is supplied, so the user agent and the Accept and
-// Authorization policy exist in one place.
 func NewRequest(ctx context.Context, method, endpoint, bearer string, body io.Reader) (*http.Request, error) {
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("User-Agent", UserAgent)
 	if bearer != "" {
 		request.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	return request, nil
 }
 
-// GetJSON decodes a bounded successful JSON response into destination.
 func GetJSON(ctx context.Context, client *http.Client, endpoint, bearer string, limit int64, destination any) error {
 	request, err := NewRequest(ctx, http.MethodGet, endpoint, bearer, nil)
 	if err != nil {
@@ -95,21 +89,4 @@ func GetJSON(ctx context.Context, client *http.Client, endpoint, bearer string, 
 		return fmt.Errorf("HTTP %d", status)
 	}
 	return json.Unmarshal(body, destination)
-}
-
-// WriteJSON renders value as the whole response body. Every control response is
-// no-store: a browser or proxy must never retain runtime state or a token.
-func WriteJSON(writer http.ResponseWriter, status int, value any) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(value)
-}
-
-func WriteError(writer http.ResponseWriter, err error) {
-	api := apierr.For(err)
-	if api.Message != err.Error() {
-		log.Printf("unclassified error: %v", err)
-	}
-	WriteJSON(writer, api.Status, apierr.Envelope{Error: api})
 }

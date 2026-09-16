@@ -1,8 +1,11 @@
+// Tests host connectivity against an ssh stub that refuses every remote command with an authentication denial.
+//
+//	sshRefusingAuthentication
+//	Test*
 package control
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,16 +26,14 @@ fi
 echo "tester@delta: Permission denied (publickey,keyboard-interactive)." >&2
 exit 255
 `
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeScript(t, path, script)
 	return path
 }
 
 func TestHostTestReportsAnOwedLoginAsOKFalseWithoutFailingTheCall(t *testing.T) {
-	service := Service{Runner: sshexec.Runner{SSHBin: sshRefusingAuthentication(t), Timeout: 5 * time.Second}}
+	service := Service{Runner: sshexec.Runner{SSHBin: sshRefusingAuthentication(t), Timeout: 5 * time.Second}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
 
-	result, err := service.TestHost(context.Background(), "delta")
+	result, err := service.testHost(context.Background(), "delta")
 
 	if err != nil {
 		t.Fatalf("a host that only owes a login is a reportable state, not a failed call: %v", err)
