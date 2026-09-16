@@ -2,17 +2,22 @@
 // It is the only subsystem that touches that file, and it never runs ssh.
 // The write path is narrower than the read path: only entries fenced between blockBegin and blockEnd are ever
 // rewritten; everything outside that block is read, never touched. ParseCommand turns a pasted ssh command
-// line into the Host that reproduces it.
+// line into the Host that reproduces it. Uploaded login keys sit in KeyDir; a host assigned one carries
+// its path as IdentityFile with IdentitiesOnly, so ssh offers nothing else.
 //
-//	blockBegin, blockEnd, safeNamePattern, valuePattern, allowedOptions*, ErrInvalidAlias
-//	Host, HostList, Config
+//	blockBegin, blockEnd, identitiesOnly, safeNamePattern, valuePattern, allowedOptions*
+//	ErrInvalidAlias, ErrInvalidKeyName, ErrKeyNotFound
+//	Host, HostList, Key, KeyList, Config
 //	firstField, blockBounds, stanzaEnd, managedStanza, parseFile
 //	errUnmanaged, invalid, validText, option, stanza
-//	SafeName, ValidAlias, List, ParseCommand
+//	publicKeyOf, readKey
+//	SafeName, ValidAlias, ValidKeyName, List, ParseCommand
 //	rewrite, replaceStanza, Add, Remove, Update
+//	ListKeys, PutKey, RemoveKey, WithKey, AssignKey
 package sshconfig
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
@@ -25,11 +30,13 @@ import (
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/safeio"
+	"golang.org/x/crypto/ssh"
 )
 
 const (
-	blockBegin = "# >>> cybershuttle managed >>>"
-	blockEnd   = "# <<< cybershuttle managed <<<"
+	blockBegin     = "# >>> cybershuttle managed >>>"
+	blockEnd       = "# <<< cybershuttle managed <<<"
+	identitiesOnly = "IdentitiesOnly yes"
 )
 
 var safeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -59,12 +66,17 @@ var allowedOptions = map[string]string{
 
 var ErrInvalidAlias = apierr.New("invalid_ssh_alias", "invalid SSH alias", 400)
 
+var ErrInvalidKeyName = apierr.New("invalid_ssh_key_name", "invalid SSH key name", http.StatusBadRequest)
+
+var ErrKeyNotFound = apierr.New("ssh_key_not_found", "SSH key is not stored", http.StatusNotFound)
+
 type Host struct {
 	Name            string   `json:"name"`
 	Hostname        string   `json:"hostname,omitempty"`
 	User            string   `json:"user,omitempty"`
 	Port            int      `json:"port,omitempty"`
 	IdentityFile    string   `json:"identityFile,omitempty"`
+	Key             string   `json:"key,omitempty"`
 	ExtraDirectives []string `json:"extraDirectives"`
 	Managed         bool     `json:"managed"`
 }
@@ -73,8 +85,19 @@ type HostList struct {
 	Hosts []Host `json:"hosts"`
 }
 
+type Key struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+type KeyList struct {
+	Keys []Key `json:"keys"`
+}
+
 type Config struct {
 	UserPath string
+	KeyDir   string
 }
 
 func firstField(line string) string {
@@ -224,11 +247,39 @@ func stanza(host Host) []string {
 	return lines
 }
 
+// An encrypted OpenSSH key still exposes its public half, so a passphrase-protected upload is accepted and the
+// passphrase is asked for at login like any other prompt.
+func publicKeyOf(private []byte) (ssh.PublicKey, error) {
+	signer, err := ssh.ParsePrivateKey(private)
+	if err == nil {
+		return signer.PublicKey(), nil
+	}
+	var locked *ssh.PassphraseMissingError
+	if errors.As(err, &locked) && locked.PublicKey != nil {
+		return locked.PublicKey, nil
+	}
+	return nil, apierr.New("invalid_ssh_key", "The file is not an SSH private key.", http.StatusBadRequest)
+}
+
+func readKey(path string) (Key, error) {
+	private, err := os.ReadFile(path)
+	if err != nil {
+		return Key{}, err
+	}
+	public, err := publicKeyOf(private)
+	if err != nil {
+		return Key{}, err
+	}
+	return Key{Name: filepath.Base(path), Type: public.Type(), Fingerprint: ssh.FingerprintSHA256(public)}, nil
+}
+
 func SafeName(value string, max int) bool {
 	return len(value) > 0 && len(value) <= max && safeNamePattern.MatchString(value)
 }
 
 func ValidAlias(value string) bool { return SafeName(value, 128) }
+
+func ValidKeyName(value string) bool { return SafeName(value, 64) && !strings.HasSuffix(value, ".pub") }
 
 func (c Config) List() ([]Host, error) {
 	parsed, err := parseFile(c.UserPath)
@@ -237,6 +288,9 @@ func (c Config) List() ([]Host, error) {
 	}
 	hosts := map[string]Host{}
 	for _, host := range parsed {
+		if c.KeyDir != "" && filepath.Dir(host.IdentityFile) == c.KeyDir {
+			host.Key = filepath.Base(host.IdentityFile)
+		}
 		hosts[host.Name] = host
 	}
 	result := make([]Host, 0, len(hosts))
@@ -422,3 +476,100 @@ func (c Config) Add(host Host) error {
 func (c Config) Remove(alias string) error { return c.replaceStanza(alias, nil) }
 
 func (c Config) Update(host Host) error { return c.replaceStanza(host.Name, stanza(host)) }
+
+func (c Config) ListKeys() ([]Key, error) {
+	if c.KeyDir == "" {
+		return []Key{}, nil
+	}
+	entries, err := os.ReadDir(c.KeyDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	keys := []Key{}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !ValidKeyName(entry.Name()) {
+			continue
+		}
+		key, err := readKey(filepath.Join(c.KeyDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+func (c Config) PutKey(name string, private []byte) (Key, error) {
+	if !ValidKeyName(name) {
+		return Key{}, ErrInvalidKeyName
+	}
+	if c.KeyDir == "" {
+		return Key{}, errors.New("SSH key directory is required")
+	}
+	public, err := publicKeyOf(private)
+	if err != nil {
+		return Key{}, err
+	}
+	if err := os.MkdirAll(c.KeyDir, 0o700); err != nil {
+		return Key{}, err
+	}
+	private = append(bytes.TrimRight(private, "\r\n"), '\n')
+	if err := safeio.ReplaceFile(filepath.Join(c.KeyDir, name), private); err != nil {
+		return Key{}, err
+	}
+	return Key{Name: name, Type: public.Type(), Fingerprint: ssh.FingerprintSHA256(public)}, nil
+}
+
+// Removing a key also unassigns it, so no host is left naming a file that is gone.
+func (c Config) RemoveKey(name string) error {
+	if !ValidKeyName(name) {
+		return ErrInvalidKeyName
+	}
+	if c.KeyDir == "" {
+		return ErrKeyNotFound
+	}
+	if err := os.Remove(filepath.Join(c.KeyDir, name)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrKeyNotFound
+		}
+		return err
+	}
+	hosts, err := c.List()
+	if err != nil {
+		return err
+	}
+	for _, host := range hosts {
+		if host.Managed && host.Key == name {
+			if err := c.Update(c.WithKey(host, "")); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (c Config) WithKey(host Host, name string) Host {
+	host.Key = name
+	host.IdentityFile = ""
+	host.ExtraDirectives = slices.DeleteFunc(slices.Clone(host.ExtraDirectives), func(directive string) bool {
+		return strings.EqualFold(strings.Join(strings.Fields(directive), " "), identitiesOnly)
+	})
+	if name != "" {
+		host.IdentityFile = filepath.Join(c.KeyDir, name)
+		host.ExtraDirectives = append(host.ExtraDirectives, identitiesOnly)
+	}
+	return host
+}
+
+func (c Config) AssignKey(host Host, name string) (Host, error) {
+	if name == "" {
+		return host, nil
+	}
+	if !ValidKeyName(name) {
+		return Host{}, ErrInvalidKeyName
+	}
+	if _, err := os.Stat(filepath.Join(c.KeyDir, name)); c.KeyDir == "" || err != nil {
+		return Host{}, ErrKeyNotFound
+	}
+	return c.WithKey(host, name), nil
+}

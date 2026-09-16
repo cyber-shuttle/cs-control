@@ -10,11 +10,13 @@
 //	hostConfigDirName, detached
 //	addHostRequest
 //	hostTest
-//	addHost
+//	hostWithKey, addHost
 //	updateHostRequest
 //	updateHost
 //	removeHost
 //	testHost
+//	addKeyRequest
+//	addKey
 package control
 
 import (
@@ -225,6 +227,9 @@ func (s Service) sshConfig() sshconfig.Config { return s.Runner.Hosts }
 func (s Service) forPrincipal(principal authn.Principal) Service {
 	scoped := s
 	scoped.Runner.Hosts = sshconfig.Config{UserPath: s.hostConfigPath(principal)}
+	if s.Config.HostsDir != "" {
+		scoped.Runner.Hosts.KeyDir = filepath.Join(filepath.Dir(scoped.Runner.Hosts.UserPath), "keys")
+	}
 	return scoped
 }
 
@@ -245,6 +250,7 @@ func (s Service) linkspanPath() string {
 type addHostRequest struct {
 	Name    string `json:"name"`
 	Command string `json:"command"`
+	Key     string `json:"key"`
 }
 
 type hostTest struct {
@@ -253,8 +259,16 @@ type hostTest struct {
 	Message string `json:"message"`
 }
 
+func (s Service) hostWithKey(alias, command, key string) (sshconfig.Host, error) {
+	host, err := sshconfig.ParseCommand(alias, command)
+	if err != nil {
+		return host, err
+	}
+	return s.sshConfig().AssignKey(host, key)
+}
+
 func (s Service) addHost(request addHostRequest) (sshconfig.Host, error) {
-	host, err := sshconfig.ParseCommand(strings.TrimSpace(request.Name), request.Command)
+	host, err := s.hostWithKey(strings.TrimSpace(request.Name), request.Command, request.Key)
 	if err != nil {
 		return sshconfig.Host{}, err
 	}
@@ -267,10 +281,11 @@ func (s Service) addHost(request addHostRequest) (sshconfig.Host, error) {
 
 type updateHostRequest struct {
 	Command string `json:"command"`
+	Key     string `json:"key"`
 }
 
 func (s Service) updateHost(alias string, request updateHostRequest) (sshconfig.Host, error) {
-	host, err := sshconfig.ParseCommand(alias, request.Command)
+	host, err := s.hostWithKey(alias, request.Command, request.Key)
 	if err != nil {
 		return sshconfig.Host{}, err
 	}
@@ -360,4 +375,13 @@ func (s Store) save(current *state) error {
 		return err
 	}
 	return safeio.ReplaceFile(filepath.Join(s.Dir, "state.json"), append(data, '\n'))
+}
+
+type addKeyRequest struct {
+	Name       string `json:"name"`
+	PrivateKey string `json:"privateKey"`
+}
+
+func (s Service) addKey(request addKeyRequest) (sshconfig.Key, error) {
+	return s.sshConfig().PutKey(strings.TrimSpace(request.Name), []byte(request.PrivateKey))
 }

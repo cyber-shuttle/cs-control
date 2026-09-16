@@ -5,6 +5,14 @@ Notable changes to CyberShuttle Control. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Stored login keys. `GET`, `POST /api/v1/keys` and `DELETE /api/v1/keys/{name}` list, upload and remove a
+  caller's private keys, held under their own hosts directory at mode `0600`. A host add or update takes a
+  `key` name; the host then carries the key as its `IdentityFile` with `IdentitiesOnly yes`, so every login,
+  test, discovery and session on that host uses it. The host answers with `key`, and deleting a key unassigns
+  it from the hosts that carried it.
+
 ### Changed
 
 - **Generation is seq.** A session's attempt counter is a plain integer: `seq` replaces the random

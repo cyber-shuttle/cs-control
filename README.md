@@ -119,6 +119,7 @@ a compute node. The batch script redirects the job's stdout and stderr to
 - `state.json` — non-secret scheduler, session and tunnel metadata
 - `credentials/` — the per-seq Dev Tunnel connect token and Jupyter token, mode `0600`
 - `hosts/<principal>/config` — each caller's own managed SSH host entries, mode `0600`
+- `hosts/<principal>/keys/<name>` — login keys the caller uploaded, mode `0600`
 
 Each caller's SSH host entries live in their own `hosts/<principal>/config` inside a managed block; the API
 never reads or writes `~/.ssh/config` for the account `csctl` runs as.

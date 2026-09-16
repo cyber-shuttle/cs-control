@@ -5,7 +5,7 @@
 //	maxRequestBody, sshAuthRoute
 //	route, requireUpgrade, writeOrError, answer, caller, requestPrincipal, sessionsOwnedBy, decodeJSON, routedSessionID
 //	httpAPI
-//	listHosts, addHost, updateHost
+//	listHosts, addHost, updateHost, listKeys, addKey
 //	validateSession
 //	createSession
 //	sessionAction
@@ -177,6 +177,19 @@ func updateHost(service Service, request *http.Request) (sshconfig.Host, error) 
 	return service.updateHost(request.PathValue("alias"), update)
 }
 
+func listKeys(service Service, _ *http.Request) (sshconfig.KeyList, error) {
+	keys, err := service.sshConfig().ListKeys()
+	return sshconfig.KeyList{Keys: keys}, err
+}
+
+func addKey(service Service, request *http.Request) (sshconfig.Key, error) {
+	var add addKeyRequest
+	if err := decodeJSON(request, &add); err != nil {
+		return sshconfig.Key{}, err
+	}
+	return service.addKey(add)
+}
+
 func (a *httpAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
 	service, err := a.callerService(request)
 	if err != nil {
@@ -294,6 +307,11 @@ func (a *httpAPI) mux() *http.ServeMux {
 		"/api/v1/ssh": {http.MethodGet: caller(a, http.StatusOK, listHosts), http.MethodPost: caller(a, http.StatusCreated, addHost)},
 		"/api/v1/ssh/{alias}": {http.MethodPut: caller(a, http.StatusOK, updateHost), http.MethodDelete: caller(a, http.StatusOK, func(service Service, request *http.Request) (sshconfig.Host, error) {
 			return service.removeHost(request.PathValue("alias"))
+		})},
+		"/api/v1/keys": {http.MethodGet: caller(a, http.StatusOK, listKeys), http.MethodPost: caller(a, http.StatusCreated, addKey)},
+		"/api/v1/keys/{name}": {http.MethodDelete: caller(a, http.StatusOK, func(service Service, request *http.Request) (sshconfig.Key, error) {
+			name := request.PathValue("name")
+			return sshconfig.Key{Name: name}, service.sshConfig().RemoveKey(name)
 		})},
 		"/api/v1/ssh/{alias}/auth": {http.MethodGet: requireUpgrade("SSH authentication requires a WebSocket", a.sshAuth)},
 		"/api/v1/ssh/{alias}/slurm": {http.MethodGet: caller(a, http.StatusOK, func(service Service, request *http.Request) (resource, error) {

@@ -99,7 +99,9 @@ another. `managed` marks the entries this API wrote, which are the only ones it 
 }
 ```
 
-`hostname`, `user`, `port` and `identityFile` are omitted when unset.
+`hostname`, `user`, `port`, `identityFile` and `key` are omitted when unset. `key` names a stored login key
+(below) the host is assigned; its `identityFile` is then that key's path and `extraDirectives` carries
+`IdentitiesOnly yes`.
 
 ### `POST /api/v1/ssh` → 201
 
@@ -107,8 +109,11 @@ The body is the `ssh` command the user already knows works; the server parses it
 configuration text. `name` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`.
 
 ```json
-{ "name": "delta", "command": "ssh -i ~/.ssh/id_ed25519 -J bastion alice@login.delta.example.edu" }
+{ "name": "delta", "command": "ssh -J bastion alice@login.delta.example.edu", "key": "delta-key" }
 ```
+
+`key` is optional: the name of a stored login key to use for this host, which replaces any `-i` in the
+command. A name that is not stored is `ssh_key_not_found`.
 
 The alias is the caller's own, so a name another principal already uses is free. `-p`, `-i`, `-l`, `-J`, `-o`
 and one `[user@]host` target are understood. `-o` is limited to an allowlist
@@ -123,10 +128,11 @@ changed is corrected without losing its alias. The body is the same pasted comma
 is parsed by the same rules; the alias comes from the path, so an edit cannot rename what it edits.
 
 ```json
-{ "command": "ssh -p 2222 -i ~/.ssh/id_ed25519 -J bastion alice@login2.delta.example.edu" }
+{ "command": "ssh -p 2222 -J bastion alice@login2.delta.example.edu", "key": "delta-key" }
 ```
 
-The response is the resulting host. An alias outside the managed block is `ssh_host_not_managed`.
+`key` is as on `POST`; an empty or absent `key` unassigns the one the host had. The response is the resulting
+host. An alias outside the managed block is `ssh_host_not_managed`.
 
 ### `DELETE /api/v1/ssh/{alias}` → 200
 
@@ -163,6 +169,38 @@ remote home directory. Abandoning the request cancels the remote process group.
 
 A partition appears once per node configuration, so the same name can repeat with different capacities; a
 request has to fit at least one of them.
+
+## Login keys
+
+A stored key is a private key the caller uploaded, held under their own hosts directory at mode `0600`, that a
+host is assigned by name. Each caller's keys are their own, as their hosts are. A passphrase-protected key is
+accepted; the passphrase is asked for at login like any other prompt.
+
+### `GET /api/v1/keys` → 200
+
+```json
+{ "keys": [{ "name": "delta-key", "type": "ssh-ed25519", "fingerprint": "SHA256:..." }] }
+```
+
+### `POST /api/v1/keys` → 201
+
+`name` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$` and does not end in `.pub`; a name already stored is
+replaced. `privateKey` is the file's text. Anything that does not parse as a private key is `invalid_ssh_key`.
+
+```json
+{ "name": "delta-key", "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\n..." }
+```
+
+The response is the stored key as `GET` lists it.
+
+### `DELETE /api/v1/keys/{name}` → 200
+
+Removes the key, and unassigns it from every managed host that carried it. A name that is not stored is
+`ssh_key_not_found`.
+
+```json
+{ "name": "delta-key" }
+```
 
 ### `GET /api/v1/ssh/{alias}/auth` (WebSocket)
 
