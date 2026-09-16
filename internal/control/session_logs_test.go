@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -75,9 +76,9 @@ func sameLogLine(line sessionLogLine, stream, text string) bool {
 	return line.Stream == stream && line.Text == text && !line.At.IsZero()
 }
 
-func remoteSessionLogTail(t *testing.T, home, id, generation string) string {
+func remoteSessionLogTail(t *testing.T, home, id string, seq int) string {
 	t.Helper()
-	cmd := exec.Command("sh", "-s", "--", "csctl-session-log-tail", id, generation)
+	cmd := exec.Command("sh", "-s", "--", "csctl-session-log-tail", id, strconv.Itoa(seq))
 	cmd.Stdin = strings.NewReader(sessionLogTailScript)
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	output, err := cmd.Output()
@@ -313,10 +314,9 @@ func TestReadRemoteSessionTailsUsesFixedArgumentsAndParsesStreams(t *testing.T) 
 		Logs:   NewSessionLogs(),
 	}
 
-	generationOne, generationTwo := "g-1111111111111111", "g-2222222222222222"
 	tails, err := service.readRemoteSessionTails(context.Background(), "alpha", []sessionLogTarget{
-		{id: sessionLogIDOne, generation: generationOne},
-		{id: sessionLogIDTwo, generation: generationTwo},
+		{id: sessionLogIDOne, seq: 1},
+		{id: sessionLogIDTwo, seq: 2},
 	})
 	testutil.Check(t, err)
 	if tails[sessionLogIDOne].stdout != "first\n\x1b[31msecond\x1b[0m\n" || tails[sessionLogIDTwo].stderr != "warning\rnext\n" {
@@ -349,11 +349,11 @@ func TestCollectStartingSessionLogsBatchesPerHostAndSkipsTerminalSessions(t *tes
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Config: Config{HostsDir: filepath.Join(t.TempDir(), "hosts")}, Logs: NewSessionLogs()}
 	registerTestHosts(t, service, authn.Principal{}, "alpha")
 	sessions := []Session{
-		{sessionResponse: sessionResponse{ID: "s-000000000001", Generation: "g-0000000000000001", SSHHost: "alpha", State: "STARTING"}},
-		{sessionResponse: sessionResponse{ID: "s-000000000002", Generation: "g-0000000000000002", SSHHost: "alpha", State: "STARTING"}},
-		{sessionResponse: sessionResponse{ID: "s-000000000003", Generation: "g-0000000000000003", SSHHost: "alpha", State: "STARTING"}},
-		{sessionResponse: sessionResponse{ID: "s-000000000004", Generation: "g-0000000000000004", SSHHost: "alpha", State: "STARTING"}},
-		{sessionResponse: sessionResponse{ID: "s-000000000005", Generation: "g-0000000000000005", SSHHost: "alpha", State: "STARTING"}},
+		{sessionResponse: sessionResponse{ID: "s-000000000001", Seq: 1, SSHHost: "alpha", State: "STARTING"}},
+		{sessionResponse: sessionResponse{ID: "s-000000000002", Seq: 2, SSHHost: "alpha", State: "STARTING"}},
+		{sessionResponse: sessionResponse{ID: "s-000000000003", Seq: 3, SSHHost: "alpha", State: "STARTING"}},
+		{sessionResponse: sessionResponse{ID: "s-000000000004", Seq: 4, SSHHost: "alpha", State: "STARTING"}},
+		{sessionResponse: sessionResponse{ID: "s-000000000005", Seq: 5, SSHHost: "alpha", State: "STARTING"}},
 		{sessionResponse: sessionResponse{ID: "s-000000000006", SSHHost: "alpha", State: "READY"}},
 		{sessionResponse: sessionResponse{ID: "s-000000000007", SSHHost: "alpha", State: "FAILED"}},
 	}
@@ -402,20 +402,20 @@ func TestSessionLogsMergeRemoteReplacesTheStoredTailAndKeepsNarration(t *testing
 	}
 }
 
-func TestSessionLogTailScriptIsScopedByGeneration(t *testing.T) {
+func TestSessionLogTailScriptIsScopedBySeq(t *testing.T) {
 	home := t.TempDir()
 	logDir := filepath.Join(home, ".cybershuttle", "logs")
 	testutil.Check(t, os.MkdirAll(logDir, 0o700))
-	id, oldGeneration, newGeneration := "s-abcdefabcdef", "g-1111111111111111", "g-2222222222222222"
-	testutil.Check(t, os.WriteFile(filepath.Join(logDir, sessionLogBasename(id, oldGeneration)+".out"), []byte("finished run output\n"), 0o600))
+	id, oldSeq, newSeq := "s-abcdefabcdef", 1, 2
+	testutil.Check(t, os.WriteFile(filepath.Join(logDir, sessionLogBasename(id, oldSeq)+".out"), []byte("finished run output\n"), 0o600))
 
-	if got := remoteSessionLogTail(t, home, id, newGeneration); got != "" {
-		t.Fatalf("relaunch read the finished generation's log: %q", got)
+	if got := remoteSessionLogTail(t, home, id, newSeq); got != "" {
+		t.Fatalf("relaunch read the finished seq's log: %q", got)
 	}
 
-	testutil.Check(t, os.WriteFile(filepath.Join(logDir, sessionLogBasename(id, newGeneration)+".out"), []byte("new run output\n"), 0o600))
-	if got := remoteSessionLogTail(t, home, id, newGeneration); got != "new run output\n" {
-		t.Fatalf("new generation log = %q", got)
+	testutil.Check(t, os.WriteFile(filepath.Join(logDir, sessionLogBasename(id, newSeq)+".out"), []byte("new run output\n"), 0o600))
+	if got := remoteSessionLogTail(t, home, id, newSeq); got != "new run output\n" {
+		t.Fatalf("new seq log = %q", got)
 	}
 }
 
@@ -428,12 +428,12 @@ func TestSessionLogTailScriptWorstCaseStaysUnderTheRemoteOutputCap(t *testing.T)
 	args := []string{"csctl-session-log-tail"}
 	for i := 0; i < maxSessionLogCollections; i++ {
 		id := fmt.Sprintf("s-%012x", i)
-		generation := fmt.Sprintf("g-%016x", i)
+		seq := i + 1
 		for _, suffix := range []string{"out", "err"} {
-			path := filepath.Join(logDir, sessionLogBasename(id, generation)+"."+suffix)
+			path := filepath.Join(logDir, sessionLogBasename(id, seq)+"."+suffix)
 			testutil.Check(t, os.WriteFile(path, huge, 0o600))
 		}
-		args = append(args, id, generation)
+		args = append(args, id, strconv.Itoa(seq))
 	}
 	cmd := exec.Command("sh", append([]string{"-s", "--"}, args...)...)
 	cmd.Stdin = strings.NewReader(sessionLogTailScript)

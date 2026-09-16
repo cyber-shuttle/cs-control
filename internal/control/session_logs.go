@@ -23,6 +23,7 @@ import (
 	"errors"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -81,7 +82,7 @@ shift
 [ $(( $# % 2 )) -eq 0 ]
 while [ "$#" -gt 0 ]; do
   csctl_session_id=$1
-  csctl_generation=$2
+  csctl_seq=$2
   shift 2
   case "$csctl_session_id" in
     s-????????????) ;;
@@ -90,19 +91,16 @@ while [ "$#" -gt 0 ]; do
   case "${csctl_session_id#s-}" in
     *[!a-f0-9]*) exit 64 ;;
   esac
-  case "$csctl_generation" in
-    g-????????????????) ;;
-    *) exit 64 ;;
+  case "$csctl_seq" in
+    ''|*[!0-9]*) exit 64 ;;
   esac
-  case "${csctl_generation#g-}" in
-    *[!a-f0-9]*) exit 64 ;;
-  esac
+  [ "$csctl_seq" -ge 1 ] || exit 64
   for csctl_stream in stdout stderr; do
     case "$csctl_stream" in
       stdout) csctl_suffix=out ;;
       stderr) csctl_suffix=err ;;
     esac
-    csctl_log_path=$HOME/.cybershuttle/logs/$csctl_session_id-$csctl_generation.$csctl_suffix
+    csctl_log_path=$HOME/.cybershuttle/logs/$csctl_session_id-$csctl_seq.$csctl_suffix
     printf '` + sessionLogMarkerPrefix + `|%s|%s\n' "$csctl_session_id" "$csctl_stream"
     if [ -f "$csctl_log_path" ] && [ ! -L "$csctl_log_path" ]; then
       tail -n 100 -- "$csctl_log_path" | tail -c 16384 | od -An -v -tx1 | tr -d ' \n'
@@ -118,8 +116,8 @@ type remoteSessionTail struct {
 }
 
 type sessionLogTarget struct {
-	id         string
-	generation string
+	id  string
+	seq int
 }
 
 var (
@@ -318,11 +316,11 @@ func (s Service) readRemoteSessionTails(ctx context.Context, host string, target
 	args := []string{"sh", "-s", "--", "csctl-session-log-tail"}
 	requested := make(map[string]bool, len(targets))
 	for _, target := range targets {
-		if !idPattern.MatchString(target.id) || !generationPattern.MatchString(target.generation) || requested[target.id] {
+		if !idPattern.MatchString(target.id) || target.seq < 1 || requested[target.id] {
 			return nil, errors.New("session log tail ID is invalid")
 		}
 		requested[target.id] = true
-		args = append(args, target.id, target.generation)
+		args = append(args, target.id, strconv.Itoa(target.seq))
 	}
 	output, err := s.Runner.Run(ctx, host, strings.NewReader(sessionLogTailScript), args...)
 	if err != nil {
@@ -359,7 +357,7 @@ func (s Service) collectStartingSessionLogs(ctx context.Context, sessions []Sess
 	starting := make([]Session, 0, len(sessions))
 	for _, session := range sessions {
 		if session.State == "STARTING" && idPattern.MatchString(session.ID) &&
-			generationPattern.MatchString(session.Generation) && sshconfig.ValidAlias(session.SSHHost) {
+			session.Seq >= 1 && sshconfig.ValidAlias(session.SSHHost) {
 			starting = append(starting, session)
 		}
 	}
@@ -376,7 +374,7 @@ func (s Service) collectStartingSessionLogs(ctx context.Context, sessions []Sess
 	for _, scope := range sortedScopes(byScope) {
 		targets := make([]sessionLogTarget, len(byScope[scope]))
 		for i, session := range byScope[scope] {
-			targets[i] = sessionLogTarget{id: session.ID, generation: session.Generation}
+			targets[i] = sessionLogTarget{id: session.ID, seq: session.Seq}
 		}
 		for chunk := range slices.Chunk(targets, maxSessionLogCollections) {
 			if ctx.Err() != nil {

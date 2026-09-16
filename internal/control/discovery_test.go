@@ -109,7 +109,7 @@ func TestDiscoverBoundsBothSSHInvocationsTogether(t *testing.T) {
 	if _, err := service.discover(context.Background(), "delta"); err == nil {
 		t.Fatal("a hanging host was discovered")
 	}
-	if elapsed := time.Since(started); elapsed > timeout+300*time.Millisecond {
+	if elapsed := time.Since(started); elapsed > 3*timeout/2 {
 		t.Fatalf("discovery took %s, which is both timeouts rather than one", elapsed)
 	}
 }

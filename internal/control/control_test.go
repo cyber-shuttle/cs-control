@@ -4,7 +4,7 @@
 //	fakeSSH
 //	testService
 //	newTestCreateRequest
-//	assertScriptRedirectsToTheSessionsGenerationLog
+//	assertScriptRedirectsToTheSessionsSeqLog
 //	Test*
 package control
 
@@ -202,14 +202,14 @@ func newTestCreateRequest() createRequest {
 	return createRequest{ID: "s-012345abcdef", IdempotencyKey: "request-one", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}}
 }
 
-func assertScriptRedirectsToTheSessionsGenerationLog(t *testing.T, scriptLog string, session *Session) {
+func assertScriptRedirectsToTheSessionsSeqLog(t *testing.T, scriptLog string, session *Session) {
 	t.Helper()
-	if session.Generation == "" {
-		t.Fatal("session has no generation")
+	if session.Seq == 0 {
+		t.Fatal("session has no seq")
 	}
 	script, err := os.ReadFile(scriptLog)
 	testutil.Check(t, err)
-	expected := `"$LOG_DIR/` + sessionLogBasename(session.ID, session.Generation) + `.out"`
+	expected := `"$LOG_DIR/` + sessionLogBasename(session.ID, session.Seq) + `.out"`
 	if !strings.Contains(string(script), expected) {
 		t.Fatalf("submitted script does not redirect to %q, the basename the tail script later reads:\n%s", expected, script)
 	}
@@ -337,7 +337,7 @@ func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 	}
 }
 
-func TestSubmittedScriptLogPathMatchesTheGenerationTheTailReads(t *testing.T) {
+func TestSubmittedScriptLogPathMatchesTheSeqTheTailReads(t *testing.T) {
 	ssh, scriptLog, _ := fakeSSH(t)
 	t.Setenv("FAKE_SCANCEL_LOG", filepath.Join(t.TempDir(), "cancellations"))
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
@@ -345,7 +345,7 @@ func TestSubmittedScriptLogPathMatchesTheGenerationTheTailReads(t *testing.T) {
 
 	session, err := service.create(testTunnelContext(), newTestCreateRequest())
 	testutil.Check(t, err)
-	assertScriptRedirectsToTheSessionsGenerationLog(t, scriptLog, session)
+	assertScriptRedirectsToTheSessionsSeqLog(t, scriptLog, session)
 
 	t.Setenv("FAKE_SESSION_STDOUT", "Linkspan started\n")
 	_, err = reconciledList(context.Background(), service)
@@ -354,10 +354,10 @@ func TestSubmittedScriptLogPathMatchesTheGenerationTheTailReads(t *testing.T) {
 	testutil.Check(t, err)
 	relaunched, err := service.start(testTunnelContext(), session.ID)
 	testutil.Check(t, err)
-	if relaunched.Generation == session.Generation {
-		t.Fatalf("relaunch reused the prior generation %q", relaunched.Generation)
+	if relaunched.Seq == session.Seq {
+		t.Fatalf("relaunch reused the prior seq %d", relaunched.Seq)
 	}
-	assertScriptRedirectsToTheSessionsGenerationLog(t, scriptLog, relaunched)
+	assertScriptRedirectsToTheSessionsSeqLog(t, scriptLog, relaunched)
 }
 
 func TestCreateIsIdempotent(t *testing.T) {
@@ -458,7 +458,7 @@ func TestDeleteRemovesATerminalSessionAndItsCredential(t *testing.T) {
 	setTestSessionMetadata(&session)
 	session.State = "FAILED"
 	putSessions(t, service, session)
-	testutil.Check(t, service.Credentials.Put(session.ID, session.Generation, credential()))
+	testutil.Check(t, service.Credentials.Put(session.ID, session.Seq, credential()))
 	service.Logs.Append(session.ID, "starting", service.now())
 
 	deleted, err := service.delete(testTunnelContext(), session.ID)
@@ -472,8 +472,8 @@ func TestDeleteRemovesATerminalSessionAndItsCredential(t *testing.T) {
 			t.Fatalf("deleted session is still listed: %#v", remaining)
 		}
 	}
-	if _, err := service.Credentials.Get(session.ID, session.Generation); err == nil {
-		t.Fatal("delete left the generation credential on disk")
+	if _, err := service.Credentials.Get(session.ID, session.Seq); err == nil {
+		t.Fatal("delete left the seq credential on disk")
 	}
 	if _, ok := service.Logs.Tail(session.ID); ok {
 		t.Fatal("delete left the session log tail in memory")
@@ -540,4 +540,35 @@ func TestStopOnAnAlreadyStoppedSessionChangesNothing(t *testing.T) {
 	if second.Error != first.Error {
 		t.Fatalf("a second stop on an already-stopped session changed Error: %q -> %q", first.Error, second.Error)
 	}
+}
+
+func TestCreateDoesNotHoldStoreLockDuringTunnelCreate(t *testing.T) {
+	service := testService(t)
+	manager := service.Tunnels.(*testTunnelManager)
+	manager.createStarted = make(chan struct{})
+	manager.createBlock = make(chan struct{})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.create(testTunnelContext(), newTestCreateRequest())
+		done <- err
+	}()
+
+	select {
+	case <-manager.createStarted:
+	case <-time.After(time.Second):
+		t.Fatal("tunnel create was never reached")
+	}
+
+	lockAvailable := make(chan error, 1)
+	go func() { lockAvailable <- service.Store.withLock(func(*state) error { return nil }) }()
+	select {
+	case err := <-lockAvailable:
+		testutil.Check(t, err)
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("state lock was held during blocked tunnel create")
+	}
+
+	close(manager.createBlock)
+	testutil.Check(t, <-done)
 }

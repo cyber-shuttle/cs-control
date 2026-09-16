@@ -37,7 +37,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/apihttp"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
@@ -107,22 +106,22 @@ func serveSSHRoute(auth *SSHAuthManager) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		segments := strings.Split(strings.Trim(strings.TrimPrefix(request.URL.Path, "/api/v1/"), "/"), "/")
 		if len(segments) != 3 || segments[0] != "ssh" {
-			apihttp.WriteError(writer, apierr.New("not_found", "route not found", 404))
+			apierr.WriteError(writer, apierr.New("not_found", "route not found", 404))
 			return
 		}
 		switch segments[2] {
 		case "auth":
 			if request.Method != http.MethodGet || request.Header.Get("Upgrade") == "" {
-				apihttp.WriteError(writer, apierr.New("upgrade_required", "SSH authentication requires a WebSocket", 426))
+				apierr.WriteError(writer, apierr.New("upgrade_required", "SSH authentication requires a WebSocket", 426))
 				return
 			}
 			if auth == nil {
-				apihttp.WriteError(writer, apierr.New("service_stopping", "SSH authentication service is stopping", 503))
+				apierr.WriteError(writer, apierr.New("service_stopping", "SSH authentication service is stopping", 503))
 				return
 			}
 			auth.ServeWebSocket(writer, request, segments[1], auth.runner)
 		default:
-			apihttp.WriteError(writer, apierr.New("not_found", "route not found", 404))
+			apierr.WriteError(writer, apierr.New("not_found", "route not found", 404))
 		}
 	})
 }

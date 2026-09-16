@@ -5,9 +5,9 @@
 //	createTunnelBody, createTunnelPort, tunnelAccessControl, tunnelAccessEntry, tunnelOptions, tunnelResponse,
 //	tunnelPortResponse
 //	isAPIHost, safeRedirect, newClientForBase, isPublicHost, validatePublicURI,
-//	validTunnelProtocol, validateTunnelPorts, safeError, validToken
+//	validTunnelProtocol, validateTunnelPorts, validToken
 //	createTunnelPorts, ParseBaseURL, ParseProductionBaseURL, NewClient
-//	GuardedClient, SafeError, ValidToken, ValidatePublicURI
+//	GuardedClient, ValidToken, ValidatePublicURI
 //	ValidID, ValidClusterID
 package devtunnel
 
@@ -34,7 +34,6 @@ const (
 	APIVersion = "2023-09-27-preview"
 
 	maxDevTunnelBody      int64 = 64 << 10
-	maxDevTunnelError           = 2048
 	maxTunnelURI                = 2048
 	maxTunnelPorts              = 256
 	maxPortForwardingURIs       = 16
@@ -214,16 +213,6 @@ func validateTunnelPorts(values []tunnelPortResponse) ([]PortRecord, error) {
 	return ports, nil
 }
 
-func safeError(operation string, err error, secrets ...string) error {
-	message := operation + ": " + err.Error()
-	for _, secret := range secrets {
-		if secret != "" {
-			message = strings.ReplaceAll(message, secret, "[redacted]")
-		}
-	}
-	return errors.New(apierr.TruncateUTF8(message, maxDevTunnelError))
-}
-
 func validToken(token string) bool {
 	return token != "" && len(token) <= MaxToken && !strings.ContainsAny(token, " \t\r\n\x00")
 }
@@ -255,10 +244,18 @@ func (m *client) tunnelURL(tunnelID, clusterID string, includeTokens, includePor
 	return &endpoint
 }
 
-func (m *client) doRecord(request *http.Request, token, expectedID string, requireTokens bool) (Record, error) {
+func (m *client) do(request *http.Request, token, action string) ([]byte, int, error) {
 	body, status, err := httpx.Do(m.client, request, maxDevTunnelBody)
 	if err != nil {
-		return Record{}, safeError("request Dev Tunnel", err, token)
+		return nil, 0, apierr.Redact(action, err, token)
+	}
+	return body, status, nil
+}
+
+func (m *client) doRecord(request *http.Request, token, expectedID string, requireTokens bool) (Record, error) {
+	body, status, err := m.do(request, token, "request Dev Tunnel")
+	if err != nil {
+		return Record{}, err
 	}
 	if status < 200 || status >= 300 {
 		return Record{}, fmt.Errorf("Dev Tunnel request failed: HTTP %d", status)
@@ -339,9 +336,9 @@ func (m *client) Delete(ctx context.Context, req DeleteRequest) error {
 	if err != nil {
 		return err
 	}
-	_, status, err := httpx.Do(m.client, request, maxDevTunnelBody)
+	_, status, err := m.do(request, req.OAuthToken, "delete Dev Tunnel")
 	if err != nil {
-		return safeError("delete Dev Tunnel", err, req.OAuthToken)
+		return err
 	}
 	if status == http.StatusNotFound || status >= 200 && status < 300 {
 		return nil
@@ -377,10 +374,6 @@ func NewClient(baseURL string, httpClient *http.Client) (*client, error) {
 
 func GuardedClient(client *http.Client, fallback time.Duration) *http.Client {
 	return httpx.GuardedClient(client, fallback, safeRedirect)
-}
-
-func SafeError(operation string, err error, secrets ...string) error {
-	return safeError(operation, err, secrets...)
 }
 
 func ValidToken(token string) bool { return validToken(token) }

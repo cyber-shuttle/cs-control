@@ -1,8 +1,8 @@
-// One creator-owned Dev Tunnel per session generation, declaring both control and Jupyter ports at creation.
-// Ports are derived from the session ID and generation, so they can be bound before the job starts.
+// One creator-owned Dev Tunnel per session seq, declaring both control and Jupyter ports at creation.
+// Ports are derived from the session ID and seq, so they can be bound before the job starts.
 // createSessionTunnel and releaseSessionTunnel are always used together to compensate a partial create.
 //
-//	newGeneration, sessionTunnelID, newJupyterToken
+//	sessionTunnelID, newJupyterToken
 //	portPair, sessionPorts
 //	sessionTunnelDurationSeconds
 //	sessionPortURI
@@ -19,10 +19,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,17 +32,9 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
 )
 
-func newGeneration() (string, error) {
-	var value [8]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", err
-	}
-	return "g-" + hex.EncodeToString(value[:]), nil
-}
-
-func sessionTunnelID(sessionID, generation string) (string, error) {
-	value := sessionID + "-" + generation
-	if !idPattern.MatchString(sessionID) || !generationPattern.MatchString(generation) || !devtunnel.ValidID(value) {
+func sessionTunnelID(sessionID string, seq int) (string, error) {
+	value := sessionID + "-" + strconv.Itoa(seq)
+	if !idPattern.MatchString(sessionID) || seq < 1 || !devtunnel.ValidID(value) {
 		return "", errors.New("session tunnel identity is invalid")
 	}
 	return value, nil
@@ -58,8 +50,8 @@ func newJupyterToken() (string, error) {
 
 type portPair struct{ control, jupyter uint16 }
 
-func sessionPorts(sessionID, generation string) portPair {
-	sum := sha256.Sum256([]byte(sessionID + "/" + generation))
+func sessionPorts(sessionID string, seq int) portPair {
+	sum := sha256.Sum256([]byte(sessionID + "/" + strconv.Itoa(seq)))
 	base := 20000 + int(binary.BigEndian.Uint16(sum[:2]))%20000
 	return portPair{control: uint16(base), jupyter: uint16(base + 1)}
 }
@@ -96,12 +88,12 @@ type tunnelEndpoint struct {
 }
 
 func (s Service) sessionEndpoint(ctx context.Context, session Session, number uint16) (tunnelEndpoint, error) {
-	if s.Tunnels == nil || !idPattern.MatchString(session.ID) || !generationPattern.MatchString(session.Generation) {
+	if s.Tunnels == nil || !idPattern.MatchString(session.ID) || session.Seq < 1 {
 		return tunnelEndpoint{}, errors.New("the session is not addressable")
 	}
-	credential, err := s.Credentials.Get(session.ID, session.Generation)
+	credential, err := s.Credentials.Get(session.ID, session.Seq)
 	if err != nil {
-		return tunnelEndpoint{}, errors.New("this session generation has no stored credential")
+		return tunnelEndpoint{}, errors.New("this session seq has no stored credential")
 	}
 	record, err := s.Tunnels.Get(ctx, devtunnel.GetRequest{AccessToken: credential.ConnectToken, TunnelID: session.Tunnel.ID, ClusterID: session.Tunnel.ClusterID})
 	if err != nil {
@@ -124,31 +116,27 @@ func (s Service) sessionAccess(ctx context.Context, session Session) (*sessionAc
 	if session.State != "READY" {
 		return unavailable("the session is " + strings.ToLower(session.State))
 	}
-	endpoint, err := s.sessionEndpoint(ctx, session, sessionPorts(session.ID, session.Generation).jupyter)
+	endpoint, err := s.sessionEndpoint(ctx, session, sessionPorts(session.ID, session.Seq).jupyter)
 	if err != nil {
 		return unavailable(err.Error())
 	}
 	return &sessionAccessResponse{
-		SessionID: session.ID, Generation: session.Generation, ExpiresAt: endpoint.expiresAt,
+		SessionID: session.ID, Seq: session.Seq, ExpiresAt: endpoint.expiresAt,
 		Jupyter: sessionJupyterAccess{URI: endpoint.uri, Token: endpoint.credential.JupyterToken},
 	}, nil
 }
 
-func (s Service) createSessionTunnel(ctx context.Context, session *Session, auth authn.TunnelAuthorization) (devtunnel.Record, string, error) {
+func (s Service) createSessionTunnel(ctx context.Context, session *Session, auth authn.TunnelAuthorization, seq int) (devtunnel.Record, string, error) {
 	if s.Tunnels == nil || s.Credentials.Dir == "" {
 		return devtunnel.Record{}, "", errors.New("Dev Tunnel lifecycle dependencies are unavailable")
 	}
-	generation, err := newGeneration()
-	if err != nil {
-		return devtunnel.Record{}, "", err
-	}
-	tunnelID, err := sessionTunnelID(session.ID, generation)
+	tunnelID, err := sessionTunnelID(session.ID, seq)
 	if err != nil {
 		return devtunnel.Record{}, "", err
 	}
 	requestedAt := s.now().UTC()
 	durationSeconds := sessionTunnelDurationSeconds(session.Resources.WallMinutes)
-	ports := sessionPorts(session.ID, generation)
+	ports := sessionPorts(session.ID, seq)
 	record, err := s.Tunnels.Create(ctx, devtunnel.CreateRequest{
 		OAuthToken: auth.OAuthToken, TunnelID: tunnelID, DurationSeconds: durationSeconds,
 		Ports: []devtunnel.PortSpec{
@@ -157,39 +145,39 @@ func (s Service) createSessionTunnel(ctx context.Context, session *Session, auth
 		},
 	})
 	if err != nil {
-		createErr := devtunnel.SafeError("create session Dev Tunnel", err, auth.OAuthToken)
-		cleanupErr := s.releaseSessionTunnel(auth, session.ID, generation, tunnelMetadata{ID: tunnelID})
+		createErr := apierr.Redact("create session Dev Tunnel", err, auth.OAuthToken)
+		cleanupErr := s.releaseSessionTunnel(auth, session.ID, seq, tunnelMetadata{ID: tunnelID})
 		return devtunnel.Record{}, "", errors.Join(createErr, cleanupErr)
 	}
 	if record.ID != tunnelID || !devtunnel.ValidClusterID(record.ClusterID) || !devtunnel.ValidToken(record.HostToken) || !devtunnel.ValidToken(record.ConnectToken) || !record.ExpiresAt.After(requestedAt) {
-		cleanupErr := s.releaseSessionTunnel(auth, session.ID, generation, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID})
+		cleanupErr := s.releaseSessionTunnel(auth, session.ID, seq, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID})
 		return devtunnel.Record{}, "", errors.Join(errors.New("created Dev Tunnel metadata is invalid"), cleanupErr)
 	}
 	jupyterToken, err := newJupyterToken()
 	if err != nil {
-		return devtunnel.Record{}, "", errors.Join(err, s.releaseSessionTunnel(auth, session.ID, generation, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
+		return devtunnel.Record{}, "", errors.Join(err, s.releaseSessionTunnel(auth, session.ID, seq, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
 	}
 	candidate := *session
-	candidate.Generation = generation
-	candidate.JobName = jobName(session.ID, generation)
+	candidate.Seq = seq
+	candidate.JobName = jobName(session.ID, seq)
 	candidate.Owner = auth.Principal
 	candidate.Tunnel = tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID, ExpiresAt: record.ExpiresAt.UTC()}
 	credential := credentialstore.Credential{ConnectToken: record.ConnectToken, JupyterToken: jupyterToken}
-	if err := s.Credentials.Put(session.ID, generation, credential); err != nil {
-		return devtunnel.Record{}, "", errors.Join(err, s.releaseSessionTunnel(auth, session.ID, generation, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
+	if err := s.Credentials.Put(session.ID, seq, credential); err != nil {
+		return devtunnel.Record{}, "", errors.Join(err, s.releaseSessionTunnel(auth, session.ID, seq, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
 	}
 	*session = candidate
 	return record, jupyterToken, nil
 }
 
-func (s Service) releaseSessionTunnel(auth authn.TunnelAuthorization, sessionID, generation string, tunnel tunnelMetadata) error {
+func (s Service) releaseSessionTunnel(auth authn.TunnelAuthorization, sessionID string, seq int, tunnel tunnelMetadata) error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
 	defer cancel()
 	var deleteErr error
 	if s.Tunnels != nil && tunnel.ID != "" {
 		if err := s.Tunnels.Delete(ctx, devtunnel.DeleteRequest{OAuthToken: auth.OAuthToken, TunnelID: tunnel.ID, ClusterID: tunnel.ClusterID}); err != nil {
-			deleteErr = devtunnel.SafeError("compensate session Dev Tunnel", err, auth.OAuthToken)
+			deleteErr = apierr.Redact("compensate session Dev Tunnel", err, auth.OAuthToken)
 		}
 	}
-	return errors.Join(deleteErr, s.Credentials.Delete(sessionID, generation))
+	return errors.Join(deleteErr, s.Credentials.Delete(sessionID, seq))
 }

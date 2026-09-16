@@ -5,7 +5,6 @@
 //	MicrosoftOAuthValidator
 //	oidcMetadata, oidcKeySet, cachedOIDCKeys, oidcRefreshCall, oidcValidator, idTokenHeader, idTokenClaims
 //	makeOIDCValidator, newOIDCValidator, parseSignedIDToken, verifyIDTokenSignature
-//	waitOIDCRefresh
 //	NewMicrosoftOAuthValidator
 package authn
 
@@ -97,7 +96,7 @@ func makeOIDCValidator(authority *url.URL, clientID string, client *http.Client,
 	if !validIdentityValue(clientID) {
 		return nil, errors.New("OAuth client ID is invalid")
 	}
-	bounded := httpx.GuardedClient(client, defaultOAuthTimeout, httpx.SameOriginRedirect)
+	bounded := httpx.GuardedClient(client, oauthRequestTimeout, httpx.SameOriginRedirect)
 	return &oidcValidator{authority: authority, clientID: clientID, client: bounded, production: production, now: time.Now}, nil
 }
 
@@ -118,8 +117,8 @@ func parseSignedIDToken(token string) (idTokenHeader, idTokenClaims, string, []b
 		return header, claims, "", nil, errors.New("token format")
 	}
 	decodeJSON := func(encoded string, destination any) error {
-		decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
-		if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != encoded {
+		decoded, ok := canonicalBase64URL(encoded)
+		if !ok {
 			return errors.New("token encoding")
 		}
 		if err := json.Unmarshal(decoded, destination); err != nil {
@@ -133,8 +132,8 @@ func parseSignedIDToken(token string) (idTokenHeader, idTokenClaims, string, []b
 	if err := decodeJSON(parts[1], &claims); err != nil {
 		return header, claims, "", nil, err
 	}
-	signature, err := base64.RawURLEncoding.Strict().DecodeString(parts[2])
-	if err != nil || base64.RawURLEncoding.EncodeToString(signature) != parts[2] || len(signature) == 0 {
+	signature, ok := canonicalBase64URL(parts[2])
+	if !ok || len(signature) == 0 {
 		return header, claims, "", nil, errors.New("token signature")
 	}
 	return header, claims, parts[0] + "." + parts[1], signature, nil
@@ -189,15 +188,6 @@ func (v *oidcValidator) validateClaims(claims idTokenClaims, configuredIssuer st
 	return nil
 }
 
-func waitOIDCRefresh(ctx context.Context, call *oidcRefreshCall) error {
-	select {
-	case <-ctx.Done():
-		return errors.New("OIDC signing-key refresh was canceled")
-	case <-call.done:
-		return nil
-	}
-}
-
 func (v *oidcValidator) refreshCallLocked() (*oidcRefreshCall, bool) {
 	if v.refresh != nil {
 		return v.refresh, false
@@ -211,8 +201,10 @@ func (v *oidcValidator) awaitRefresh(ctx context.Context, call *oidcRefreshCall,
 	if start {
 		go v.runRefresh(call)
 	}
-	if err := waitOIDCRefresh(ctx, call); err != nil {
-		return cachedOIDCKeys{}, err
+	select {
+	case <-ctx.Done():
+		return cachedOIDCKeys{}, errors.New("OIDC signing-key refresh was canceled")
+	case <-call.done:
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()

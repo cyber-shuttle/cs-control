@@ -1,7 +1,7 @@
-// One generation's Dev Tunnel connect token and Jupyter identity token, held as one file per generation.
+// One seq's Dev Tunnel connect token and Jupyter identity token, held as one file per seq.
 // It is never persisted anywhere else, and never returned except to the session's owner.
 //
-//	sessionIDPattern, generationPattern
+//	sessionIDPattern
 //	maxCredentialSize
 //	Credential
 //	validJupyterToken
@@ -18,17 +18,15 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
-	"github.com/cyber-shuttle/cs-control/internal/apihttp"
+	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-control/internal/safeio"
 )
 
-var (
-	sessionIDPattern  = regexp.MustCompile(`^s-[a-f0-9]{12}$`)
-	generationPattern = regexp.MustCompile(`^g-[a-f0-9]{16}$`)
-)
+var sessionIDPattern = regexp.MustCompile(`^s-[a-f0-9]{12}$`)
 
 const maxCredentialSize = 64 << 10
 
@@ -53,17 +51,17 @@ type Store struct {
 	Dir string
 }
 
-func (s Store) Put(sessionID, generation string, credential Credential) error {
-	location, err := s.path(sessionID, generation)
+func (s Store) Put(sessionID string, seq int, credential Credential) error {
+	location, err := s.path(sessionID, seq)
 	if err != nil {
 		return err
 	}
 	if !validCredential(credential) {
-		return errors.New("generation credential is invalid")
+		return errors.New("seq credential is invalid")
 	}
 	encoded, err := json.Marshal(credential)
 	if err != nil {
-		return errors.New("encode generation credential")
+		return errors.New("encode seq credential")
 	}
 	if err := safeio.EnsurePrivateDir(s.Dir); err != nil {
 		return err
@@ -71,8 +69,8 @@ func (s Store) Put(sessionID, generation string, credential Credential) error {
 	return safeio.ReplaceFile(location, encoded)
 }
 
-func (s Store) Get(sessionID, generation string) (Credential, error) {
-	location, err := s.path(sessionID, generation)
+func (s Store) Get(sessionID string, seq int) (Credential, error) {
+	location, err := s.path(sessionID, seq)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -84,14 +82,14 @@ func (s Store) Get(sessionID, generation string) (Credential, error) {
 		return Credential{}, err
 	}
 	var credential Credential
-	if err := apihttp.DecodeStrict(bytes.NewReader(data), &credential); err != nil || !validCredential(credential) {
+	if err := apierr.DecodeStrict(bytes.NewReader(data), &credential); err != nil || !validCredential(credential) {
 		return Credential{}, errors.New("stored credential is invalid")
 	}
 	return credential, nil
 }
 
-func (s Store) Delete(sessionID, generation string) error {
-	location, err := s.path(sessionID, generation)
+func (s Store) Delete(sessionID string, seq int) error {
+	location, err := s.path(sessionID, seq)
 	if err != nil {
 		return err
 	}
@@ -107,9 +105,9 @@ func (s Store) Delete(sessionID, generation string) error {
 	return nil
 }
 
-func (s Store) path(sessionID, generation string) (string, error) {
-	if !filepath.IsAbs(s.Dir) || !sessionIDPattern.MatchString(sessionID) || !generationPattern.MatchString(generation) {
+func (s Store) path(sessionID string, seq int) (string, error) {
+	if !filepath.IsAbs(s.Dir) || !sessionIDPattern.MatchString(sessionID) || seq < 1 {
 		return "", errors.New("credential store identity is invalid")
 	}
-	return filepath.Join(s.Dir, sessionID+"-"+generation+".token"), nil
+	return filepath.Join(s.Dir, sessionID+"-"+strconv.Itoa(seq)+".token"), nil
 }

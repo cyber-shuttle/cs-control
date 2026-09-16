@@ -1,5 +1,5 @@
 // Create revalidates the script it is about to submit, which is identical to validate's script except for
-// the log redirect: validate has no generation yet, so it uses the empty-generation placeholder basename.
+// the log redirect: validate has no seq yet, so it uses the placeholder-seq basename.
 // A validation failure persists and submits nothing; no pre-persistence failure, including one from the
 // tunnel provider, leaves a log buffer behind.
 //
@@ -36,13 +36,13 @@ func TestCreateRevalidatesExactScriptBeforeSubmit(t *testing.T) {
 	if err != nil || string(validated) != validatedResult.Script {
 		t.Fatalf("create revalidation differs from the original validation: %v", err)
 	}
-	submittedBasename := sessionLogBasename(created.ID, created.Generation)
-	validatedBasename := sessionLogBasename(created.ID, "")
+	submittedBasename := sessionLogBasename(created.ID, created.Seq)
+	validatedBasename := sessionLogBasename(created.ID, 0)
 	if !strings.Contains(string(submitted), submittedBasename) {
-		t.Fatalf("submitted script does not redirect to the created session's generation log:\n%s", submitted)
+		t.Fatalf("submitted script does not redirect to the created session's seq log:\n%s", submitted)
 	}
 	if !strings.Contains(string(validated), validatedBasename) {
-		t.Fatalf("validation script does not use the pre-generation placeholder log path:\n%s", validated)
+		t.Fatalf("validation script does not use the pre-seq placeholder log path:\n%s", validated)
 	}
 	if strings.ReplaceAll(string(submitted), submittedBasename, "placeholder") != strings.ReplaceAll(string(validated), validatedBasename, "placeholder") {
 		t.Fatalf("submitted and validated scripts differ beyond the log path:\nsubmitted:\n%s\nvalidated:\n%s", submitted, validated)

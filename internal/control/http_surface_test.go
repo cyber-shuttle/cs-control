@@ -1,20 +1,39 @@
 // The HTTP surface's own tests: every route the mux must dispatch, and the shared strict JSON body decoding.
 //
+//	mixedOwnerOrigin, otherTestPrincipal, mixedOwnerSession
 //	Test*
 package control
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
+	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
+
+const mixedOwnerOrigin = "https://workspace.example.edu"
+
+var otherTestPrincipal = authn.Principal{Subject: "other-owner", Tenant: "test-tenant"}
+
+func mixedOwnerSession(id string, owner authn.Principal) Session {
+	session := pendingSession(id, "alpha", "101")
+	session.State = "FAILED"
+	setTestSessionMetadata(&session)
+	session.Owner = owner
+	return session
+}
 
 func TestHTTPRouteSurfaceRetainsRequiredControlOperations(t *testing.T) {
 	configDir := t.TempDir()
@@ -89,5 +108,77 @@ func TestRequestBodiesRefuseUnknownFieldsTrailingDataAndOversizeBodies(t *testin
 	var target payload
 	if err := decodeJSON(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"a"}`)), &target); err != nil || target.Name != "a" {
 		t.Errorf("a well-formed body was refused: %v", err)
+	}
+}
+
+func TestSessionPublicJSONContractIsNarrow(t *testing.T) {
+	value := sessionResponse{
+		ID: "s-012345abcdef", Seq: 1,
+		State: "READY", SSHHost: "delta", Account: "project-a", Partition: "cpu",
+		RootFolder: "$HOME/project", Resources: resources{Cores: 2, MemoryMB: 4096, WallMinutes: 60},
+		CreatedAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), StartedAt: time.Date(2030, 1, 1, 0, 0, 30, 0, time.UTC), UpdatedAt: time.Date(2030, 1, 1, 0, 1, 0, 0, time.UTC),
+	}
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	testutil.Check(t, err)
+	encoded = append(encoded, '\n')
+	fixture, err := os.ReadFile("testdata/session-contract.json")
+	testutil.Check(t, err)
+	if !bytes.Equal(encoded, fixture) {
+		t.Fatalf("contract fixture differs from actual JSON\nactual:\n%s\nfixture:\n%s", encoded, fixture)
+	}
+	for _, forbidden := range []string{"owner", "tunnel", "token", "privateRoot", "workspaceRoot", "jupyter", "jobId", "jobName", "node"} {
+		if strings.Contains(strings.ToLower(string(fixture)), strings.ToLower(forbidden)) {
+			t.Fatalf("public session fixture contains private field %q: %s", forbidden, fixture)
+		}
+	}
+}
+
+func TestSessionListDropsAnotherOwnersSessionsAndLogs(t *testing.T) {
+	service := testService(t)
+	owned := mixedOwnerSession("s-111111111111", testPrincipal)
+	other := mixedOwnerSession("s-222222222222", otherTestPrincipal)
+	putSessions(t, service, owned, other)
+	service.Logs.Append(owned.ID, "owned-log-line", service.now())
+	service.Logs.Append(other.ID, "other-owner-log-line", service.now())
+
+	handler := handlerAs(t, service, testPrincipal)
+
+	response := hostRequest(t, handler, http.MethodGet, "/api/v1/sessions", "")
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != mixedOwnerOrigin {
+		t.Fatalf("allowed origin = %q, want %q", got, mixedOwnerOrigin)
+	}
+	body := response.Body.String()
+	var list sessionList
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &list) != nil {
+		t.Fatalf("session list = %d %s", response.Code, body)
+	}
+	if len(list.Sessions) != 1 || list.Sessions[0].ID != owned.ID {
+		t.Fatalf("session list did not narrow to the owner: %s", body)
+	}
+	if len(list.Logs) != 1 || list.Logs[0].SessionID != owned.ID {
+		t.Fatalf("log tails did not narrow to the owner: %s", body)
+	}
+	for _, expected := range []string{owned.ID, "owned-log-line"} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("owner poll omitted %q: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{other.ID, "other-owner-log-line"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("owner poll exposed %q: %s", forbidden, body)
+		}
+	}
+	repeat := hostRequest(t, handler, http.MethodGet, "/api/v1/sessions", "", response.Header().Get("ETag"))
+	if repeat.Code != http.StatusNotModified || repeat.Body.Len() != 0 {
+		t.Fatalf("unchanged poll = %d %s", repeat.Code, repeat.Body.String())
+	}
+
+	otherItem := hostRequest(t, handler, http.MethodGet, "/api/v1/sessions/"+other.ID, "")
+	if otherItem.Code != http.StatusForbidden || !strings.Contains(otherItem.Body.String(), `"code":"session_owner_mismatch"`) {
+		t.Fatalf("other-owner item = %d %s", otherItem.Code, otherItem.Body.String())
+	}
+	missingItem := hostRequest(t, handler, http.MethodGet, "/api/v1/sessions/s-333333333333", "")
+	if missingItem.Code != http.StatusNotFound || !strings.Contains(missingItem.Body.String(), `"code":"session_not_found"`) {
+		t.Fatalf("missing item = %d %s", missingItem.Code, missingItem.Body.String())
 	}
 }

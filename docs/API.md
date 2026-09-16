@@ -197,9 +197,9 @@ is refused with `ssh_authentication_in_progress`.
 ### `POST /api/v1/sessions/validate` → 200
 
 Builds the candidate batch script and runs `sbatch --test-only` with it. This is the review step: the script it
-returns is identical to the one create submits, except for the log redirect. No generation exists yet at
-validation time, so the returned script's log path carries an empty generation; create rebuilds the script
-with the real generation once one is assigned, before submitting it.
+returns is identical to the one create submits, except for the log redirect. No seq exists yet at
+validation time, so the returned script's log path carries a placeholder seq of `0`; create rebuilds the script
+with the real seq once one is assigned, before submitting it.
 
 Request:
 
@@ -244,7 +244,7 @@ The response is one session record, which is also the item shape everywhere else
 ```json
 {
   "id": "s-012345abcdef",
-  "generation": "g-0123456789abcdef",
+  "seq": 1,
   "state": "READY",
   "sshHost": "delta",
   "account": "project-a",
@@ -257,8 +257,8 @@ The response is one session record, which is also the item shape everywhere else
 }
 ```
 
-`id` names the session, the durable record; `generation` names the Slurm job currently serving it. A session
-outlives its jobs -- `start` takes a new generation under the same `id` -- so `generation` is what ties this
+`id` names the session, the durable record; `seq` names the Slurm job currently serving it. A session
+outlives its jobs -- `start` takes the next seq under the same `id` -- so `seq` is what ties this
 record to one particular run.
 
 `state` is one of `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, `FAILED`; `READY` means
@@ -302,7 +302,7 @@ One session record. A session owned by another principal is `session_owner_misma
 
 ### `POST /api/v1/sessions/{id}/start` → 200
 
-Runs a terminal session again under the same identity: a new generation, a new tunnel, a new job. A session
+Runs a terminal session again under the same identity: the next seq, a new tunnel, a new job. A session
 that is not terminal is `session_running`.
 
 ### `POST /api/v1/sessions/{id}/stop` → 200
@@ -324,7 +324,7 @@ tunnel expiration, not the value recorded at creation.
 ```json
 {
   "sessionId": "s-012345abcdef",
-  "generation": "g-0123456789abcdef",
+  "seq": 1,
   "expiresAt": "2030-01-01T01:00:00Z",
   "jupyter": { "uri": "https://31001.use.devtunnels.ms", "token": "<43-character token>" }
 }
@@ -361,7 +361,7 @@ with an empty window rather than an error.
 
 ### `GET /api/v1/sessions/history` → 200
 
-What this caller's finished sessions did, newest first and bounded. A run is named by the generation that
+What this caller's finished sessions did, newest first and bounded. A run is named by the seq that
 ran it, so relaunching a session leaves the previous run behind rather than overwriting it, and deleting the
 session record does not remove the runs it accumulated.
 
@@ -370,7 +370,7 @@ session record does not remove the runs it accumulated.
   "runs": [
     {
       "sessionId": "s-012345abcdef",
-      "generation": "g-0123456789abcdef",
+      "seq": 1,
       "sshHost": "delta",
       "partition": "cpu",
       "rootFolder": "$HOME/project",

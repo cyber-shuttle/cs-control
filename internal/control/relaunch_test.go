@@ -7,6 +7,7 @@ package control
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -43,13 +44,13 @@ func TestStartRunsTheFinishedSessionOnTheSameSession(t *testing.T) {
 	if started.ID != created.ID {
 		t.Fatalf("run again took a new identity: %s -> %s", created.ID, started.ID)
 	}
-	if started.State != "QUEUED" || started.Generation == terminal.Generation || started.Node != "" {
+	if started.State != "QUEUED" || started.Seq == terminal.Seq || started.Node != "" {
 		t.Fatalf("unexpected relaunched session: %#v", started)
 	}
 	if !started.CreatedAt.Equal(terminal.CreatedAt) || !started.UpdatedAt.After(terminal.UpdatedAt) {
 		t.Fatalf("relaunch must keep the session's creation time and move it forward: %#v", started.sessionResponse)
 	}
-	if len(tunnels.deletes) != 1 || tunnels.deletes[0].TunnelID != created.ID+"-"+terminal.Generation {
+	if len(tunnels.deletes) != 1 || tunnels.deletes[0].TunnelID != created.ID+"-"+strconv.Itoa(terminal.Seq) {
 		t.Fatalf("the finished run's tunnel was not released: %#v", tunnels.deletes)
 	}
 	sessions, err := service.loadSessions()
@@ -107,7 +108,7 @@ func TestStartReportsCredentialCleanupFailureInsteadOfRelaunching(t *testing.T) 
 	retire(t, service, created.ID)
 	if err := service.Store.withLock(func(current *state) error {
 		stored := current.Sessions[created.ID]
-		stored.Generation, stored.Tunnel = "not-a-generation", tunnelMetadata{}
+		stored.Seq, stored.Tunnel = -1, tunnelMetadata{}
 		return service.Store.save(current)
 	}); err != nil {
 		t.Fatal(err)
@@ -119,7 +120,7 @@ func TestStartReportsCredentialCleanupFailureInsteadOfRelaunching(t *testing.T) 
 
 	sessions, err := service.loadSessions()
 	testutil.Check(t, err)
-	if len(sessions) != 1 || sessions[0].Generation != "not-a-generation" {
+	if len(sessions) != 1 || sessions[0].Seq != -1 {
 		t.Fatalf("start silently dropped the unfrozen run and relaunched: %#v", sessions)
 	}
 }

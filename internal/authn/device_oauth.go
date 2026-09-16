@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/apihttp"
 	"github.com/cyber-shuttle/cs-control/internal/httpx"
 )
 
@@ -34,7 +33,6 @@ const (
 	deviceGrantType          = "urn:ietf:params:oauth:grant-type:device_code"
 	maxDeviceBrokerEntries   = 256
 	maxDeviceResponse        = 64 << 10
-	deviceRequestTimeout     = 15 * time.Second
 	deviceStartInterval      = time.Second
 	maxDevicePollInterval    = 60 * time.Second
 )
@@ -95,7 +93,7 @@ var devicePollOutcomes = map[string]pollOutcome{
 }
 
 func writeDeviceError(w http.ResponseWriter, status int, code, message string) {
-	apihttp.WriteError(w, apierr.New(code, message, status))
+	apierr.WriteError(w, apierr.New(code, message, status))
 }
 
 func validDeviceAuthorization(deviceCode, userCode, verificationURI string, expiresIn, interval int64) bool {
@@ -124,7 +122,7 @@ func NewDeviceCodeBroker(authority string, allowedOrigins []string, client *http
 	if err != nil {
 		return nil, err
 	}
-	bounded := httpx.BoundedClient(client, deviceRequestTimeout)
+	bounded := httpx.BoundedClient(client, oauthRequestTimeout)
 	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	ctx, cancel := context.WithCancel(context.Background())
 	broker := &DeviceCodeBroker{
@@ -171,10 +169,8 @@ func (b *DeviceCodeBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeDeviceError(w, http.StatusForbidden, "preflight_not_allowed", "preflight is not allowed")
 			return
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(http.StatusNoContent)
+		writePreflightAllow(w, "POST, OPTIONS", "Content-Type")
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -218,7 +214,7 @@ func (b *DeviceCodeBroker) handleStart(w http.ResponseWriter, r *http.Request, o
 	b.mu.Unlock()
 
 	form := url.Values{"client_id": {DevTunnelsNativeClientID}, "scope": {devTunnelsDeviceScope}}
-	value, status, err := b.postForm(r.Context(), b.deviceEndpoint, form, deviceRequestTimeout)
+	value, status, err := b.postForm(r.Context(), b.deviceEndpoint, form, oauthRequestTimeout)
 	if err != nil || status < 200 || status >= 300 {
 		writeDeviceError(w, http.StatusBadGateway, "upstream_unavailable", "authorization service is unavailable")
 		return
@@ -253,7 +249,7 @@ func (b *DeviceCodeBroker) handleStart(w http.ResponseWriter, r *http.Request, o
 	}
 	b.entries[handle] = entry
 	b.mu.Unlock()
-	apihttp.WriteJSON(w, http.StatusOK, deviceStartResponse{Handle: handle, UserCode: result.UserCode, VerificationURI: result.VerificationURI, ExpiresInSeconds: result.ExpiresIn, IntervalSeconds: result.Interval})
+	apierr.WriteJSON(w, http.StatusOK, deviceStartResponse{Handle: handle, UserCode: result.UserCode, VerificationURI: result.VerificationURI, ExpiresInSeconds: result.ExpiresIn, IntervalSeconds: result.Interval})
 }
 
 func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, origin, handle string) {
@@ -319,7 +315,7 @@ func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, or
 func (b *DeviceCodeBroker) settle(w http.ResponseWriter, handle string, outcome pollOutcome) {
 	interval := b.finishPoll(handle, outcome.remove, outcome.slowDown)
 	if outcome.code == "" {
-		apihttp.WriteJSON(w, http.StatusAccepted, devicePollResponse{Status: "pending", IntervalSeconds: int64(interval / time.Second)})
+		apierr.WriteJSON(w, http.StatusAccepted, devicePollResponse{Status: "pending", IntervalSeconds: int64(interval / time.Second)})
 		return
 	}
 	writeDeviceError(w, outcome.status, outcome.code, outcome.message)
@@ -329,8 +325,8 @@ func (b *DeviceCodeBroker) postForm(parent context.Context, endpoint string, for
 	if maximum <= 0 {
 		return nil, 0, context.DeadlineExceeded
 	}
-	if maximum > deviceRequestTimeout {
-		maximum = deviceRequestTimeout
+	if maximum > oauthRequestTimeout {
+		maximum = oauthRequestTimeout
 	}
 	ctx, cancel := context.WithTimeout(parent, maximum)
 	defer cancel()
@@ -343,7 +339,7 @@ func (b *DeviceCodeBroker) postForm(parent context.Context, endpoint string, for
 }
 
 func (b *DeviceCodeBroker) deliverTokens(w http.ResponseWriter, handle, accessToken, idToken string, expiresIn int64) {
-	apihttp.WriteJSON(w, http.StatusOK, devicePollResponse{Status: "complete", AccessToken: accessToken, IDToken: idToken, ExpiresInSeconds: expiresIn})
+	apierr.WriteJSON(w, http.StatusOK, devicePollResponse{Status: "complete", AccessToken: accessToken, IDToken: idToken, ExpiresInSeconds: expiresIn})
 	b.finishPoll(handle, true, 0)
 }
 

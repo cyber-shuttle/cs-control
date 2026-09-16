@@ -82,7 +82,7 @@ func TestSamplerTickDoesNotPileUpRunStatsAndCloseWaitsForOneInFlight(t *testing.
 	t.Setenv("FAKE_RUN_STATS_OUTPUT", sacctRows)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{HostsDir: filepath.Join(t.TempDir(), "hosts")}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
 	registerTestHosts(t, service, testPrincipal, "delta")
-	run := runRecord{runResponse: runResponse{SessionID: "s-111111111111", Generation: "g-0000000000000001", SSHHost: "delta", EndedAt: service.now()}, Owner: testPrincipal}
+	run := runRecord{runResponse: runResponse{SessionID: "s-111111111111", Seq: 1, SSHHost: "delta", EndedAt: service.now()}, Owner: testPrincipal}
 	if err := service.Store.withLock(func(current *state) error {
 		current.Runs = []runRecord{run}
 		return service.Store.save(current)

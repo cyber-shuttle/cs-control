@@ -7,6 +7,14 @@ Notable changes to CyberShuttle Control. The format follows
 
 ### Changed
 
+- **Generation is seq.** A session's attempt counter is a plain integer: `seq` replaces the random
+  `generation` string (`g-<16 hex>`) everywhere it appeared -- the `seq` field on a session, a run and the
+  access response, remote log basenames (`<id>-<seq>`), and the Slurm job name (`cs-<id>-<seq>`). `seq` starts
+  at 1 on create and increments by 1 on every `start` under the same session id; the session record owns the
+  counter and nothing is randomly generated or pattern-validated anymore.
+
+  **Breaking.** The state file is version 7 and one from before is refused. `docs/API.md` examples and the
+  `generation` JSON field are updated to `seq`; a caller reading `generation` must read `seq` instead.
 - Preparation requires Linkspan 0.19.0 or newer, the release that reads the `tasks` workflow document, and
   refuses an older one before submitting; the `--tunnel-host-token` probe is gone with it. **Breaking** for a
   host holding an older Linkspan by hand.
@@ -43,7 +51,7 @@ Notable changes to CyberShuttle Control. The format follows
 - `GET /api/v1/sessions/{id}/metrics`: the last twenty CPU, memory and GPU samples, read from Linkspan over the
   control port of the job's own tunnel every five seconds.
 - `GET /api/v1/sessions/history`: what this caller's finished sessions did. A run is frozen when the
-  job ends, named by the generation that ran it, and outlives both the relaunch and the delete of the
+  job ends, named by the seq that ran it, and outlives both the relaunch and the delete of the
   session record it belonged to. Slurm's accounting — peak RSS, CPU and memory efficiency — is filled in as it flushes.
 
 ### Fixed

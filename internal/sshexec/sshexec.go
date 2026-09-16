@@ -3,11 +3,10 @@
 // Under an interactive master, ControlPersist is off, since persist backgrounds the master on authentication.
 //
 //	Runner, capture, captureStream
-//	killGroup, runCommand, newCapture
-//	ensurePrivateControlDirectory, authenticationRequired, utf8Request
-//	ChildEnv
+//	newCapture, ensurePrivateControlDirectory, authenticationRequired, utf8Request
+//	KillGroup, RunCommand, ChildEnv
 //	ShellQuote, FailureMessage, AuthenticationFailure, ClassifyFailure
-//	RunBounded, RemoveStaleControl, KillGroup, UnlockControl
+//	RunBounded, RemoveStaleControl, UnlockControl
 package sshexec
 
 import (
@@ -68,36 +67,6 @@ var authenticationMarkers = []string{
 
 var sshTerminateGrace = 500 * time.Millisecond
 
-func killGroup(cmd *exec.Cmd, exited <-chan struct{}) {
-	select {
-	case <-exited:
-		return
-	default:
-	}
-	if syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) != nil {
-		_ = cmd.Process.Kill()
-	}
-	<-exited
-}
-
-func runCommand(ctx context.Context, cmd *exec.Cmd) error {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = sshTerminateGrace
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	var waitErr error
-	done := make(chan struct{})
-	go func() { waitErr = cmd.Wait(); close(done) }()
-	select {
-	case <-done:
-		return waitErr
-	case <-ctx.Done():
-	}
-	killGroup(cmd, done)
-	return ctx.Err()
-}
-
 func newCapture() *capture {
 	c := &capture{remaining: maxOutput}
 	c.stdout.capture, c.stderr.capture = c, c
@@ -147,6 +116,36 @@ func (r Runner) Bin() string { return cmp.Or(r.SSHBin, "ssh") }
 
 func (r Runner) EffectiveTimeout() time.Duration { return cmp.Or(r.Timeout, 20*time.Second) }
 
+func KillGroup(cmd *exec.Cmd, exited <-chan struct{}) {
+	select {
+	case <-exited:
+		return
+	default:
+	}
+	if syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) != nil {
+		_ = cmd.Process.Kill()
+	}
+	<-exited
+}
+
+func RunCommand(ctx context.Context, cmd *exec.Cmd) error {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = sshTerminateGrace
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	var waitErr error
+	done := make(chan struct{})
+	go func() { waitErr = cmd.Wait(); close(done) }()
+	select {
+	case <-done:
+		return waitErr
+	case <-ctx.Done():
+	}
+	KillGroup(cmd, done)
+	return ctx.Err()
+}
+
 func ChildEnv() []string {
 	environment := os.Environ()
 	for _, name := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
@@ -194,6 +193,19 @@ func ClassifyFailure(alias, stderr string, err error) error {
 	return fmt.Errorf("ssh command failed: %s", message)
 }
 
+func (r Runner) configArgs(args []string) []string {
+	if r.Hosts.UserPath == "" {
+		return args
+	}
+	return append(args, "-F", r.Hosts.UserPath)
+}
+
+func (r Runner) command(args ...string) *exec.Cmd {
+	cmd := exec.Command(r.Bin(), args...)
+	cmd.Env = ChildEnv()
+	return cmd
+}
+
 func (r Runner) identity(ctx context.Context, alias string) (string, error) {
 	if !sshconfig.ValidAlias(alias) {
 		return "", sshconfig.ErrInvalidAlias
@@ -210,15 +222,11 @@ func (r Runner) identity(ctx context.Context, alias string) (string, error) {
 
 	ctx, cancel := context.WithTimeout(ctx, r.EffectiveTimeout())
 	defer cancel()
-	args := []string{"-G"}
-	if r.Hosts.UserPath != "" {
-		args = append(args, "-F", r.Hosts.UserPath)
-	}
-	cmd := exec.Command(r.Bin(), append(args, alias)...)
-	cmd.Env = ChildEnv()
+	args := r.configArgs([]string{"-G"})
+	cmd := r.command(append(args, alias)...)
 	captured := newCapture()
 	cmd.Stdout, cmd.Stderr = captured.Stdout(), captured.Stderr()
-	if err := runCommand(ctx, cmd); err != nil {
+	if err := RunCommand(ctx, cmd); err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("resolve effective SSH configuration: %w", ctx.Err())
 		}
@@ -296,9 +304,7 @@ func (r Runner) sshArgs(alias string, interactive bool, identity string) ([]stri
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 	}
-	if r.Hosts.UserPath != "" {
-		args = append(args, "-F", r.Hosts.UserPath)
-	}
+	args = r.configArgs(args)
 	if r.ControlNamespace != "" {
 		path, err := r.controlPath(alias, identity)
 		if err != nil {
@@ -323,12 +329,11 @@ func (r Runner) run(ctx context.Context, alias, identity string, stdin io.Reader
 	if err != nil {
 		return "", "", err
 	}
-	cmd := exec.Command(r.Bin(), append(args, strings.Join(quoted, " "))...)
-	cmd.Env = ChildEnv()
+	cmd := r.command(append(args, strings.Join(quoted, " "))...)
 	cmd.Stdin = stdin
 	captured := newCapture()
 	cmd.Stdout, cmd.Stderr = captured.Stdout(), captured.Stderr()
-	runErr := runCommand(ctx, cmd)
+	runErr := RunCommand(ctx, cmd)
 	if runErr != nil && ctx.Err() != nil {
 		runErr = ctx.Err()
 	}
@@ -376,9 +381,7 @@ func (r Runner) Command(ctx context.Context, alias string, remote ...string) (*e
 	if err != nil {
 		return nil, err
 	}
-	command := exec.Command(r.Bin(), append(args, remote...)...)
-	command.Env = ChildEnv()
-	return command, nil
+	return r.command(append(args, remote...)...), nil
 }
 
 func (r Runner) MasterHealthy(alias, path string) bool {
@@ -392,10 +395,7 @@ func (r Runner) MasterHealthy(alias, path string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.EffectiveTimeout())
 	defer cancel()
-	args := []string{"-S", path, "-O", "check"}
-	if r.Hosts.UserPath != "" {
-		args = append(args, "-F", r.Hosts.UserPath)
-	}
+	args := r.configArgs([]string{"-S", path, "-O", "check"})
 	cmd := exec.CommandContext(ctx, r.Bin(), append(args, alias)...)
 	cmd.Env = ChildEnv()
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
@@ -436,7 +436,7 @@ func (r Runner) AcquireControlLock(ctx context.Context, alias, path string) (*os
 func RunBounded(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
 	captured := newCapture()
 	cmd.Stdout, cmd.Stderr = captured.Stdout(), captured.Stderr()
-	err := runCommand(ctx, cmd)
+	err := RunCommand(ctx, cmd)
 	return captured.Stdout().String(), captured.Stderr().String(), err
 }
 
@@ -446,8 +446,6 @@ func RemoveStaleControl(path string) error {
 	}
 	return nil
 }
-
-func KillGroup(cmd *exec.Cmd, exited <-chan struct{}) { killGroup(cmd, exited) }
 
 func UnlockControl(lock *os.File) {
 	if lock != nil {

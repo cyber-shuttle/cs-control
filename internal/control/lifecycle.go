@@ -2,9 +2,15 @@
 // create persists a durable record first, then provisions and submits, so a poller sees progress as it happens.
 // A conclusive submission failure compensates through abandonSubmitIntent; an ambiguous one stays durable.
 //
-//	assignSessionID, sameCreateRequest, terminalSession, reconcilable, setSessionNode
+//	assignSessionID, sameCreateRequest, terminalSession, reconcilable, setSessionNode, buildSubmitIntent
+//	backgroundInterval, refreshTimeout
+//	sessionRefresher, newSessionRefresher
+//	tick
+//	Trigger
+//	Close
 //	Service
 //	validate, create
+//	claimCreateSlot, persistSubmitIntent
 //	reusableSession, validateForCreate, recordSubmittedJob, scancelWithOwnTimeout, cancelUnsavedJob, cancelSupersededJob
 //	start, stop, forgetSessionBuffers, forgetUnpersistedBuffers, delete
 //	prepareSession, resolveWorkspaceRoot
@@ -17,14 +23,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	pathpkg "path"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
-	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 )
 
@@ -60,6 +68,85 @@ func setSessionNode(session *Session, value string) {
 		return
 	}
 	session.Node = value
+}
+
+func buildSubmitIntent(prepared preparedSession, previous *Session, now time.Time) (Session, int) {
+	intent := prepared.session
+	intent.State, intent.CreatedAt, intent.UpdatedAt = "SUBMITTING", now, now
+	nextSeq := 1
+	if previous != nil {
+		intent.CreatedAt = previous.CreatedAt
+		nextSeq = previous.Seq + 1
+	}
+	return intent, nextSeq
+}
+
+const (
+	backgroundInterval = 30 * time.Second
+	refreshTimeout     = 60 * time.Second
+)
+
+type sessionRefresher struct {
+	reconcile func(context.Context) error
+	interval  time.Duration
+	timeout   time.Duration
+	ctx       context.Context
+	cancel    context.CancelFunc
+
+	mu        sync.Mutex
+	running   bool
+	completed time.Time
+	wg        sync.WaitGroup
+}
+
+func newSessionRefresher(reconcile func(context.Context) error, interval, background time.Duration) *sessionRefresher {
+	ctx, cancel := context.WithCancel(context.Background())
+	refresher := &sessionRefresher{reconcile: reconcile, interval: interval, timeout: refreshTimeout, ctx: ctx, cancel: cancel}
+	refresher.wg.Add(1)
+	go refresher.tick(background)
+	return refresher
+}
+
+func (r *sessionRefresher) tick(every time.Duration) {
+	defer r.wg.Done()
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			r.Trigger()
+		}
+	}
+}
+
+func (r *sessionRefresher) Trigger() {
+	r.mu.Lock()
+	switch {
+	case r.ctx.Err() != nil, r.running, time.Since(r.completed) < r.interval:
+		r.mu.Unlock()
+		return
+	}
+	r.running = true
+	r.wg.Add(1)
+	r.mu.Unlock()
+	go func() {
+		defer r.wg.Done()
+		ctx, cancel := context.WithTimeout(r.ctx, r.timeout)
+		defer cancel()
+		if err := r.reconcile(ctx); err != nil {
+			log.Printf("session reconciliation failed: %v", err)
+		}
+		r.mu.Lock()
+		r.running, r.completed = false, time.Now()
+		r.mu.Unlock()
+	}()
+}
+
+func (r *sessionRefresher) Close() {
+	r.cancel()
+	r.wg.Wait()
 }
 
 func (s Service) validate(ctx context.Context, request createRequest) (*validationResult, error) {
@@ -106,71 +193,22 @@ func (s Service) create(ctx context.Context, request createRequest) (_ *Session,
 		return nil, err
 	}
 
-	var intent Session
-	var record devtunnel.Record
-	var jupyterToken string
-	idempotent := false
-	var previous *Session
-	err = s.Store.withLock(func(current *state) error {
-		existing := current.Sessions[request.ID]
-		if existing != nil {
-			if existing.Owner != auth.Principal {
-				return errOwnerMismatch
-			}
-			if request.IdempotencyKey != "" {
-				if !sameCreateRequest(existing, request) {
-					return errIdempotencyConflict
-				}
-				intent = *existing
-				idempotent = true
-				return nil
-			}
-			if !request.relaunch {
-				return apierr.New("session_exists", "session ID already exists", http.StatusConflict)
-			}
-			if !terminalSession(existing.State) {
-				return errSessionRunning
-			}
-			snapshot := *existing
-			previous = &snapshot
-		}
-		return nil
-	})
+	idempotent, previous, err := s.claimCreateSlot(request, auth.Principal)
 	if err != nil {
 		return nil, err
 	}
-	if idempotent {
-		return &intent, nil
+	if idempotent != nil {
+		return idempotent, nil
 	}
 
-	now := s.now()
-	intent = prepared.session
-	intent.State, intent.CreatedAt, intent.UpdatedAt = "SUBMITTING", now, now
-	if previous != nil {
-		intent.CreatedAt = previous.CreatedAt
-	}
-	record, jupyterToken, err = s.createSessionTunnel(ctx, &intent, auth)
+	intent, nextSeq := buildSubmitIntent(*prepared, previous, s.now())
+	record, jupyterToken, err := s.createSessionTunnel(ctx, &intent, auth, nextSeq)
 	if err != nil {
 		return nil, err
 	}
 	prepared.script = buildScript(intent, prepared.linkspan)
-	err = s.Store.withLock(func(current *state) error {
-		existing := current.Sessions[request.ID]
-		same := existing == nil && previous == nil
-		if existing != nil && previous != nil {
-			same = existing.UpdatedAt.Equal(previous.UpdatedAt) && existing.State == previous.State && existing.Owner == previous.Owner
-		}
-		if !same {
-			return apierr.New("session_exists", "session ID already exists", http.StatusConflict)
-		}
-		current.Sessions[intent.ID] = &intent
-		if err := s.Store.save(current); err != nil {
-			return fmt.Errorf("persist submit intent: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, errors.Join(err, s.releaseSessionTunnel(auth, intent.ID, intent.Generation, intent.Tunnel))
+	if err := s.persistSubmitIntent(request.ID, previous, intent); err != nil {
+		return nil, errors.Join(err, s.releaseSessionTunnel(auth, intent.ID, intent.Seq, intent.Tunnel))
 	}
 
 	if err := s.provisionSession(ctx, request.SSHHost, intent, prepared.home, prepared.linkspan); err != nil {
@@ -208,6 +246,54 @@ func (s Service) create(ctx context.Context, request createRequest) (_ *Session,
 		created = replaced
 	}
 	return created, nil
+}
+
+func (s Service) claimCreateSlot(request createRequest, principal authn.Principal) (idempotent, previous *Session, err error) {
+	err = s.Store.withLock(func(current *state) error {
+		existing := current.Sessions[request.ID]
+		if existing == nil {
+			return nil
+		}
+		if existing.Owner != principal {
+			return errOwnerMismatch
+		}
+		if request.IdempotencyKey != "" {
+			if !sameCreateRequest(existing, request) {
+				return errIdempotencyConflict
+			}
+			snapshot := *existing
+			idempotent = &snapshot
+			return nil
+		}
+		if !request.relaunch {
+			return apierr.New("session_exists", "session ID already exists", http.StatusConflict)
+		}
+		if !terminalSession(existing.State) {
+			return errSessionRunning
+		}
+		snapshot := *existing
+		previous = &snapshot
+		return nil
+	})
+	return idempotent, previous, err
+}
+
+func (s Service) persistSubmitIntent(id string, previous *Session, intent Session) error {
+	return s.Store.withLock(func(current *state) error {
+		existing := current.Sessions[id]
+		same := existing == nil && previous == nil
+		if existing != nil && previous != nil {
+			same = existing.UpdatedAt.Equal(previous.UpdatedAt) && existing.State == previous.State && existing.Owner == previous.Owner
+		}
+		if !same {
+			return apierr.New("session_exists", "session ID already exists", http.StatusConflict)
+		}
+		current.Sessions[intent.ID] = &intent
+		if err := s.Store.save(current); err != nil {
+			return fmt.Errorf("persist submit intent: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s Service) reusableSession(request createRequest, principal authn.Principal) (*Session, error) {
@@ -322,7 +408,7 @@ func (s Service) start(ctx context.Context, id string) (*Session, error) {
 		return nil, errSessionRunning
 	}
 	if session.Tunnel.ID != "" {
-		if err := s.releaseSessionTunnel(auth, session.ID, session.Generation, session.Tunnel); err != nil {
+		if err := s.releaseSessionTunnel(auth, session.ID, session.Seq, session.Tunnel); err != nil {
 			return nil, err
 		}
 	}
@@ -365,7 +451,7 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 	if !alreadyStopped {
 		s.sessionStatus(id, "Stopping session")
 	}
-	managementErr := s.releaseSessionTunnel(auth, snapshot.ID, snapshot.Generation, snapshot.Tunnel)
+	managementErr := s.releaseSessionTunnel(auth, snapshot.ID, snapshot.Seq, snapshot.Tunnel)
 	candidate := snapshot
 	var narration []string
 	if reconcilable(snapshot.State) {
@@ -386,7 +472,7 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 		}
 		s.narrateReconciled(session, &snapshot, narration)
 		changed := mergeReconciled(session, &snapshot, &candidate, s.now())
-		if session.Generation == snapshot.Generation && session.Tunnel.ID == snapshot.Tunnel.ID {
+		if session.Seq == snapshot.Seq && session.Tunnel.ID == snapshot.Tunnel.ID {
 			if managementErr != nil {
 				session.Error = boundedSessionError(managementErr)
 				session.UpdatedAt = s.now()
@@ -595,11 +681,11 @@ func (s Service) loadSession(id string) (*Session, error) {
 }
 
 func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Session, relaunched bool) error {
-	compensateErr := s.releaseSessionTunnel(auth, intent.ID, intent.Generation, intent.Tunnel)
+	compensateErr := s.releaseSessionTunnel(auth, intent.ID, intent.Seq, intent.Tunnel)
 	deleted := false
 	stateErr := s.Store.withLock(func(current *state) error {
 		currentSession := current.Sessions[intent.ID]
-		if currentSession == nil || currentSession.Generation != intent.Generation || currentSession.JobName != intent.JobName || currentSession.JobID != "" {
+		if currentSession == nil || currentSession.Seq != intent.Seq || currentSession.JobName != intent.JobName || currentSession.JobID != "" {
 			return nil
 		}
 		next := ""

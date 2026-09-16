@@ -8,9 +8,17 @@
 //	sessionAccessResponse, sessionJupyterAccess, validationResult, preparedSession, commandResult, state
 //	Config, Store, Service
 //	hostConfigDirName, detached
+//	addHostRequest
+//	hostTest
+//	addHost
+//	updateHostRequest
+//	updateHost
+//	removeHost
+//	testHost
 package control
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,7 +42,7 @@ import (
 )
 
 const (
-	stateVersion           = 6
+	stateVersion           = 7
 	maxSessionError        = 4096
 	controlPortDescription = "cybershuttle-control"
 	jupyterPortDescription = "cybershuttle-jupyter"
@@ -42,7 +51,6 @@ const (
 
 var (
 	idPattern         = regexp.MustCompile(`^s-[a-f0-9]{12}$`)
-	generationPattern = regexp.MustCompile(`^g-[a-f0-9]{16}$`)
 	jobPattern        = regexp.MustCompile(`^[0-9]+$`)
 	remotePathPattern = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 	workspaceVar      = regexp.MustCompile(`^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})(?:/(.*))?$`)
@@ -95,7 +103,7 @@ type tunnelMetadata struct {
 
 type sessionResponse struct {
 	ID         string    `json:"id"`
-	Generation string    `json:"generation"`
+	Seq        int       `json:"seq"`
 	State      string    `json:"state"`
 	SSHHost    string    `json:"sshHost"`
 	Account    string    `json:"account,omitempty"`
@@ -133,10 +141,10 @@ func publicSessions(sessions []Session) []sessionResponse {
 }
 
 type sessionAccessResponse struct {
-	SessionID  string               `json:"sessionId"`
-	Generation string               `json:"generation"`
-	ExpiresAt  time.Time            `json:"expiresAt"`
-	Jupyter    sessionJupyterAccess `json:"jupyter"`
+	SessionID string               `json:"sessionId"`
+	Seq       int                  `json:"seq"`
+	ExpiresAt time.Time            `json:"expiresAt"`
+	Jupyter   sessionJupyterAccess `json:"jupyter"`
 }
 
 type sessionJupyterAccess struct {
@@ -232,6 +240,71 @@ func (s Service) linkspanPath() string {
 		return DefaultLinkspanPath
 	}
 	return s.Config.LinkspanPath
+}
+
+type addHostRequest struct {
+	Name    string `json:"name"`
+	Command string `json:"command"`
+}
+
+type hostTest struct {
+	Host    string `json:"host"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+}
+
+func (s Service) addHost(request addHostRequest) (sshconfig.Host, error) {
+	host, err := sshconfig.ParseCommand(strings.TrimSpace(request.Name), request.Command)
+	if err != nil {
+		return sshconfig.Host{}, err
+	}
+	if err := s.sshConfig().Add(host); err != nil {
+		return sshconfig.Host{}, err
+	}
+	host.Managed = true
+	return host, nil
+}
+
+type updateHostRequest struct {
+	Command string `json:"command"`
+}
+
+func (s Service) updateHost(alias string, request updateHostRequest) (sshconfig.Host, error) {
+	host, err := sshconfig.ParseCommand(alias, request.Command)
+	if err != nil {
+		return sshconfig.Host{}, err
+	}
+	if err := s.sshConfig().Update(host); err != nil {
+		return sshconfig.Host{}, err
+	}
+	host.Managed = true
+	return host, nil
+}
+
+func (s Service) removeHost(alias string) (sshconfig.Host, error) {
+	if err := s.sshConfig().Remove(alias); err != nil {
+		return sshconfig.Host{}, err
+	}
+	return sshconfig.Host{Name: alias, ExtraDirectives: []string{}}, nil
+}
+
+func (s Service) testHost(ctx context.Context, alias string) (hostTest, error) {
+	if !sshconfig.ValidAlias(alias) {
+		return hostTest{}, sshconfig.ErrInvalidAlias
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
+	defer cancel()
+	if _, err := s.Runner.Run(ctx, alias, nil, "true"); err != nil {
+		var classified *apierr.APIError
+		if errors.As(err, &classified) && classified.Code == "ssh_authentication_required" {
+			return hostTest{Host: alias, Message: "The host answered but wants an interactive login. Authenticate it first."}, nil
+		}
+		if ctx.Err() != nil {
+			return hostTest{Host: alias, Message: "The host did not answer in time."}, nil
+		}
+		return hostTest{Host: alias, Message: strings.TrimSpace(err.Error())}, nil
+	}
+	return hostTest{Host: alias, OK: true, Message: "Connected."}, nil
 }
 
 var (

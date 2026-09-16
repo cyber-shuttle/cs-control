@@ -108,7 +108,7 @@ Linkspan is the CyberShuttle agent that runs as the batch job's main process: it
 Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle`. `csctl` keeps a multiplexed OpenSSH connection to the
 login node open between operations and starts no other long-lived process there; the session itself runs on
 a compute node. The batch script redirects the job's stdout and stderr to
-`$HOME/.cybershuttle/logs/<session id>-<generation>.out` and `.err`; nothing prunes them. The flags and outputs
+`$HOME/.cybershuttle/logs/<session id>-<seq>.out` and `.err`; nothing prunes them. The flags and outputs
 `csctl` depends on are listed in
 [Linkspan's compatibility document](https://github.com/cyber-shuttle/linkspan/blob/main/docs/COMPATIBILITY.md).
 
@@ -117,7 +117,7 @@ a compute node. The batch script redirects the job's stdout and stderr to
 `~/.cybershuttle/control`, created and verified at mode `0700`:
 
 - `state.json` — non-secret scheduler, session and tunnel metadata
-- `credentials/` — the per-generation Dev Tunnel connect token and Jupyter token, mode `0600`
+- `credentials/` — the per-seq Dev Tunnel connect token and Jupyter token, mode `0600`
 - `hosts/<principal>/config` — each caller's own managed SSH host entries, mode `0600`
 
 Each caller's SSH host entries live in their own `hosts/<principal>/config` inside a managed block; the API

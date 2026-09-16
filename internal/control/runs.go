@@ -1,4 +1,4 @@
-// A run is the one durable trace a session leaves once it ends, named by the generation that ran it.
+// A run is the one durable trace a session leaves once it ends, named by the seq that ran it.
 // recordRun freezes a run the moment a session first reaches a terminal state.
 // completeRunStats then rides the sampling tick to fill in Slurm's accounting, which lands after the job ends.
 //
@@ -29,7 +29,7 @@ const maxRunRecords = 200
 
 type runResponse struct {
 	SessionID  string           `json:"sessionId"`
-	Generation string           `json:"generation"`
+	Seq        int              `json:"seq"`
 	SSHHost    string           `json:"sshHost"`
 	Account    string           `json:"account,omitempty"`
 	Partition  string           `json:"partition"`
@@ -184,8 +184,8 @@ func publicRuns(runs []runRecord) []runResponse {
 }
 
 func recordRun(current *state, record runRecord) bool {
-	if record.Generation == "" || slices.ContainsFunc(current.Runs, func(existing runRecord) bool {
-		return existing.SessionID == record.SessionID && existing.Generation == record.Generation
+	if record.Seq == 0 || slices.ContainsFunc(current.Runs, func(existing runRecord) bool {
+		return existing.SessionID == record.SessionID && existing.Seq == record.Seq
 	}) {
 		return false
 	}
@@ -200,7 +200,7 @@ func (s Service) runOf(session *Session) runRecord {
 	logTail, _ := s.Logs.Tail(session.ID)
 	return runRecord{
 		runResponse: runResponse{
-			SessionID: session.ID, Generation: session.Generation, SSHHost: session.SSHHost,
+			SessionID: session.ID, Seq: session.Seq, SSHHost: session.SSHHost,
 			Account: session.Account, Partition: session.Partition, RootFolder: session.RootFolder,
 			Resources:  session.Resources,
 			FinalState: session.State, Error: session.Error, StartedAt: session.StartedAt,
@@ -228,7 +228,7 @@ func (s Service) freezeIfTerminal(current *state, session *Session) (bool, error
 	if !terminalSession(session.State) {
 		return false, nil
 	}
-	if err := s.Credentials.Delete(session.ID, session.Generation); err != nil {
+	if err := s.Credentials.Delete(session.ID, session.Seq); err != nil {
 		session.State, session.Error = "STOPPING", "session cleanup pending: "+boundedSessionError(err)
 		return true, err
 	}
@@ -263,11 +263,11 @@ func (s Service) readRunStats(ctx context.Context, host, name string, startedAt 
 	return parseSacctUtil(strings.TrimSpace(output)), nil
 }
 
-func (s Service) attachRunStats(sessionID, generation string, stats runStats) error {
+func (s Service) attachRunStats(sessionID string, seq int, stats runStats) error {
 	return s.Store.withLock(func(current *state) error {
 		for index := range current.Runs {
 			run := &current.Runs[index]
-			if run.SessionID != sessionID || run.Generation != generation || run.Stats != nil {
+			if run.SessionID != sessionID || run.Seq != seq || run.Stats != nil {
 				continue
 			}
 			run.Stats = &stats
@@ -298,11 +298,11 @@ func (s Service) completeRunStats() {
 	}
 	for _, run := range due {
 		ctx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
-		stats, err := s.forPrincipal(run.Owner).readRunStats(ctx, run.SSHHost, jobName(run.SessionID, run.Generation), run.StartedAt)
+		stats, err := s.forPrincipal(run.Owner).readRunStats(ctx, run.SSHHost, jobName(run.SessionID, run.Seq), run.StartedAt)
 		cancel()
 		if err != nil || !stats.Complete() {
 			continue
 		}
-		_ = s.attachRunStats(run.SessionID, run.Generation, stats)
+		_ = s.attachRunStats(run.SessionID, run.Seq, stats)
 	}
 }
