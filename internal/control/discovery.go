@@ -1,15 +1,31 @@
+// One fixed shell program run once per host, framed behind markers so login banner noise cannot be mistaken
+// for content. It reads the remote username, Slurm accounts, sinfo partitions, and $HOME.
+// This process does not trust the host, so an unsafe or unparsable value is a refusal.
+//
+//	discoveryMarkerPrefix, markerUser, markerAccounts, markerPartitions, markerHome, markerDone, markerErrorUser,
+//	markerErrorAccounts, markerErrorPartitions, markerErrorHome
+//	discoveryScript
+//	leadingDigits, gresEntry
+//	parseAccounts
+//	parseGRES
+//	parsePartitions
+//	discoveryResult
+//	Service
+//	discover
 package control
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/cyber-shuttle/cs-control/internal/framed"
+	"github.com/cyber-shuttle/cs-control/internal/apierr"
+	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
@@ -26,8 +42,6 @@ const (
 	markerErrorHome       = discoveryMarkerPrefix + "ERROR_HOME__"
 )
 
-// discoveryScript is intentionally constant. No alias, username, path, or
-// other persisted value is interpolated into the remote shell program.
 const discoveryScript = `set -u
 LC_ALL=C
 LANG=C
@@ -65,71 +79,12 @@ var (
 	gresEntry     = regexp.MustCompile(`^(.+):([0-9]+)(?:\([^)]*\))?$`)
 )
 
-// discoveryResult reads the remote program's framed output. Every value it
-// returns comes from a host this process does not trust, so an unsafe or
-// unparsable one is a refusal rather than a resource.
-func discoveryResult(alias, output string) (Resource, error) {
-	for _, failure := range []struct{ marker, operation string }{
-		{markerErrorUser, "identify remote user"},
-		{markerErrorAccounts, "query Slurm allocation accounts"},
-		{markerErrorPartitions, "query Slurm partitions"},
-		{markerErrorHome, "read remote home directory"},
-	} {
-		if strings.Contains(output, failure.marker+"\n") {
-			return Resource{}, fmt.Errorf("remote discovery failed to %s", failure.operation)
-		}
-	}
-	sections, err := framed.Sections(output, discoveryMarkerPrefix, markerUser, markerAccounts, markerPartitions, markerHome, markerDone)
-	if err != nil {
-		return Resource{}, err
-	}
-	if strings.TrimSpace(sections[markerDone]) != "" {
-		return Resource{}, errors.New("discovery output continued past its final marker")
-	}
-	if username := strings.TrimSpace(sections[markerUser]); !namePattern.MatchString(username) {
-		return Resource{}, errors.New("remote username is unsafe")
-	}
-	home := strings.TrimSpace(sections[markerHome])
-	if !safeRemotePath(home) {
-		return Resource{}, errors.New("remote HOME is unsafe")
-	}
-	partitions, err := parsePartitions(sections[markerPartitions])
-	if err != nil {
-		return Resource{}, err
-	}
-	return Resource{Host: alias, Accounts: parseAccounts(sections[markerAccounts]), Partitions: partitions, HomeDir: home}, nil
-}
-
-// One fixed exec channel runs all discovery commands sequentially. The
-// ControlMaster established by OpenSSH remains reusable by later operations.
-func (s Service) Discover(ctx context.Context, alias string) (Resource, error) {
-	// Resolving the configuration and running the program each apply the
-	// runner's timeout, so the pair is bounded once here: a host that hangs at
-	// both must not hold the request for twice as long.
-	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
-	defer cancel()
-	stdout, stderr, runErr := s.Runner.RunOutput(ctx, alias, strings.NewReader(discoveryScript), "sh", "-s")
-	// A host that demanded credentials or never answered explains the failure
-	// better than the truncated output it produced on the way there.
-	if runErr != nil && (errors.Is(runErr, context.DeadlineExceeded) || sshexec.AuthenticationFailure(stderr)) {
-		return Resource{}, sshexec.ClassifyFailure(alias, stderr, runErr)
-	}
-	resource, err := discoveryResult(alias, stdout)
-	switch {
-	case runErr != nil && err != nil:
-		return Resource{}, fmt.Errorf("%w: %s", err, sshexec.FailureMessage(stderr, runErr))
-	case runErr != nil:
-		return Resource{}, sshexec.ClassifyFailure(alias, stderr, runErr)
-	}
-	return resource, err
-}
-
 func parseAccounts(output string) []string {
 	seen := map[string]bool{}
 	accounts := []string{}
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		account := strings.TrimSpace(strings.SplitN(line, "|", 2)[0])
-		if strings.EqualFold(account, "Account") || !namePattern.MatchString(account) || seen[account] {
+		if strings.EqualFold(account, "Account") || !sshconfig.SafeName(account, 64) || seen[account] {
 			continue
 		}
 		seen[account] = true
@@ -139,8 +94,40 @@ func parseAccounts(output string) []string {
 	return accounts
 }
 
-func parsePartitions(output string) ([]Partition, error) {
-	partitions := []Partition{}
+func parseGRES(value string) ([]gres, error) {
+	if value == "" || value == "(null)" {
+		return []gres{}, nil
+	}
+	var entries []string
+	start, depth := 0, 0
+	for i, char := range value {
+		switch char {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				entries = append(entries, strings.TrimSpace(value[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	entries = append(entries, strings.TrimSpace(value[start:]))
+	result := make([]gres, 0, len(entries))
+	for _, entry := range entries {
+		match := gresEntry.FindStringSubmatch(entry)
+		if match == nil {
+			return nil, fmt.Errorf("invalid GRES entry: %q", entry)
+		}
+		count, _ := strconv.Atoi(match[2])
+		result = append(result, gres{Name: match[1], Count: count})
+	}
+	return result, nil
+}
+
+func parsePartitions(output string) ([]partition, error) {
+	partitions := []partition{}
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -160,39 +147,59 @@ func parsePartitions(output string) ([]Partition, error) {
 		if err != nil {
 			return nil, err
 		}
-		partitions = append(partitions, Partition{Name: strings.TrimSuffix(strings.TrimSpace(parts[0]), "*"), CPUCount: cpus, MemoryMB: memory, GRES: gres})
+		partitions = append(partitions, partition{Name: strings.TrimSuffix(strings.TrimSpace(parts[0]), "*"), CPUCount: cpus, MemoryMB: memory, GRES: gres})
 	}
 	return partitions, nil
 }
 
-func parseGRES(value string) ([]GRES, error) {
-	if value == "" || value == "(null)" {
-		return []GRES{}, nil
-	}
-	var entries []string
-	start, depth := 0, 0
-	for i, char := range value {
-		switch char {
-		case '(':
-			depth++
-		case ')':
-			depth--
-		case ',':
-			if depth == 0 {
-				entries = append(entries, strings.TrimSpace(value[start:i]))
-				start = i + 1
-			}
+func discoveryResult(alias, output string) (resource, error) {
+	for _, failure := range []struct{ marker, operation string }{
+		{markerErrorUser, "identify remote user"},
+		{markerErrorAccounts, "query the accounts the remote user is associated with"},
+		{markerErrorPartitions, "query Slurm partitions"},
+		{markerErrorHome, "read remote home directory"},
+	} {
+		if strings.Contains(output, failure.marker+"\n") {
+			return resource{}, apierr.New("slurm_discovery_failed", "remote discovery failed to "+failure.operation, http.StatusBadGateway)
 		}
 	}
-	entries = append(entries, strings.TrimSpace(value[start:]))
-	result := make([]GRES, 0, len(entries))
-	for _, entry := range entries {
-		match := gresEntry.FindStringSubmatch(entry)
-		if match == nil {
-			return nil, fmt.Errorf("invalid GRES entry: %q", entry)
-		}
-		count, _ := strconv.Atoi(match[2])
-		result = append(result, GRES{Name: match[1], Count: count})
+	parsed, err := sections(output, discoveryMarkerPrefix, []string{markerUser, markerAccounts, markerPartitions, markerHome, markerDone})
+	if err != nil {
+		return resource{}, err
 	}
-	return result, nil
+	if strings.TrimSpace(parsed[markerDone]) != "" {
+		return resource{}, errors.New("discovery output continued past its final marker")
+	}
+	if username := strings.TrimSpace(parsed[markerUser]); !sshconfig.SafeName(username, 64) {
+		return resource{}, errors.New("remote username is unsafe")
+	}
+	home := strings.TrimSpace(parsed[markerHome])
+	if !safeRemotePath(home) {
+		return resource{}, errors.New("remote HOME is unsafe")
+	}
+	partitions, err := parsePartitions(parsed[markerPartitions])
+	if err != nil {
+		return resource{}, err
+	}
+	return resource{Host: alias, Accounts: parseAccounts(parsed[markerAccounts]), Partitions: partitions, HomeDir: home}, nil
+}
+
+func (s Service) discover(ctx context.Context, alias string) (resource, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.Runner.EffectiveTimeout())
+	defer cancel()
+	stdout, stderr, runErr := s.Runner.RunOutput(ctx, alias, strings.NewReader(discoveryScript), "sh", "-s")
+	if runErr != nil && (errors.Is(runErr, context.DeadlineExceeded) || sshexec.AuthenticationFailure(stderr)) {
+		return resource{}, sshexec.ClassifyFailure(alias, stderr, runErr)
+	}
+	discovered, err := discoveryResult(alias, stdout)
+	switch {
+	case runErr != nil && err != nil:
+		if classified := apierr.For(runErr); classified.Code != "internal_error" {
+			return resource{}, runErr
+		}
+		return resource{}, fmt.Errorf("%w: %s", err, sshexec.FailureMessage(stderr, runErr))
+	case runErr != nil:
+		return resource{}, sshexec.ClassifyFailure(alias, stderr, runErr)
+	}
+	return discovered, err
 }

@@ -1,3 +1,15 @@
+// The two things a session hands the scheduler: the constant batch script, and the workflow Linkspan runs.
+// Submission and validation share this file, since both run the identical script through sbatch.
+// A refusal from Slurm itself is an answer, not a failed call, but an ambiguous outcome may still be queued.
+//
+//	submissionError, ambiguousSubmission
+//	sessionWorkflowPath, minutesToWalltime, jobName, sessionLogBasename
+//	validationMessage, buildValidationResult
+//	buildScript
+//	sessionWorkflow
+//	Error, Unwrap
+//	Service
+//	submitSessionScript, validateScript
 package control
 
 import (
@@ -8,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
@@ -21,54 +34,22 @@ func ambiguousSubmission(err error) bool {
 	return errors.As(err, &submit) && submit.ambiguous
 }
 
-func (s Service) submitRuntimeScript(ctx context.Context, host string, runtime Runtime, script, jupyterToken, hostToken string) (string, error) {
-	jobName := runtime.JobName
-	// The allocation identity, the job name included, is only known once the
-	// tunnel exists, so it rides the command line alongside the tokens and
-	// leaves the reviewed script byte-identical to the one Slurm validated.
-	ports := allocationPorts(runtime.ID, runtime.Generation)
-	// Linkspan starts Jupyter Server with the token it inherits, so the workflow
-	// that asks for it names no token and nothing secret is written down.
-	export := fmt.Sprintf("--export=ALL,JUPYTER_TOKEN=%s,CS_TUNNEL_HOST_TOKEN=%s,CS_CONTROL_PORT=%d,CS_TUNNEL_ID=%s,CS_TUNNEL_CLUSTER=%s",
-		jupyterToken, hostToken, ports.control, runtime.Tunnel.ID, runtime.Tunnel.ClusterID)
-	outText, errText, runErr := s.Runner.RunOutput(ctx, host, strings.NewReader(script), "sbatch", "--job-name="+jobName, export, "--parsable")
-	if runErr != nil {
-		message := sshexec.FailureMessage(errText, runErr)
-		for _, secret := range []string{jupyterToken, hostToken} {
-			if secret != "" {
-				message = strings.ReplaceAll(message, secret, "[redacted]")
-			}
-		}
-		// Anything but a refusal sbatch itself reported leaves the submission
-		// unresolved: the job may already be queued.
-		var exit *exec.ExitError
-		ambiguous := !errors.As(runErr, &exit) || exit.ExitCode() == 255
-		return "", &submissionError{cause: fmt.Errorf("submit %s failed: %s", jobName, message), ambiguous: ambiguous}
-	}
-	jobID := strings.SplitN(strings.TrimSpace(outText), ";", 2)[0]
-	if !jobPattern.MatchString(jobID) {
-		return "", &submissionError{cause: fmt.Errorf("submit outcome pending reconciliation for %s: invalid job ID", jobName), ambiguous: true}
-	}
-	return jobID, nil
+func sessionWorkflowPath(session Session) string {
+	return strings.TrimSuffix(session.PrivateRoot, "/") + "/workflow.yaml"
 }
 
-func (s Service) validateScript(ctx context.Context, alias, script string) (commandResult, error) {
-	outText, errText, err := s.Runner.RunOutput(ctx, alias, strings.NewReader(script), "sbatch", "--test-only")
-	// Slurm rejecting the script is an answer; anything else is a failed call.
-	var exit *exec.ExitError
-	if err == nil || errors.As(err, &exit) && exit.ExitCode() != 255 {
-		return commandResult{stdout: outText, stderr: errText, passed: err == nil}, nil
+func minutesToWalltime(minutes int) string {
+	days, rest := minutes/(24*60), minutes%(24*60)
+	hours, mins := rest/60, rest%60
+	if days > 0 {
+		return fmt.Sprintf("%d-%02d:%02d:00", days, hours, mins)
 	}
-	return commandResult{}, sshexec.ClassifyFailure(alias, errText, err)
+	return fmt.Sprintf("%02d:%02d:00", hours, mins)
 }
 
-func validationResult(prepared *preparedRuntime, result commandResult) *ValidationResult {
-	status := "FAILED"
-	if result.passed {
-		status = "PASSED"
-	}
-	return &ValidationResult{RuntimeID: prepared.runtime.ID, Script: prepared.script, Status: status, Message: validationMessage(result), Stdout: strings.TrimSpace(result.stdout), Stderr: strings.TrimSpace(result.stderr)}
-}
+func jobName(id, generation string) string { return "cs-" + id + "-" + generation }
+
+func sessionLogBasename(id, generation string) string { return id + "-" + generation }
 
 func validationMessage(result commandResult) string {
 	if result.passed {
@@ -86,42 +67,81 @@ func validationMessage(result commandResult) string {
 	return "Slurm rejected the job script."
 }
 
-func buildScript(runtime Runtime, linkspan string) string {
-	walltime := minutesToWalltime(runtime.Resources.WallMinutes)
-	lines := []string{"#!/bin/bash", "#SBATCH --nodes=1", "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=" + strconv.Itoa(runtime.Resources.Cores), "#SBATCH --mem=" + strconv.Itoa(runtime.Resources.MemoryMB) + "M", "#SBATCH --time=" + walltime, "#SBATCH --partition=" + runtime.Partition}
-	if runtime.Account != "" {
-		lines = append(lines, "#SBATCH --account="+runtime.Account)
+func buildValidationResult(prepared *preparedSession, result commandResult) *validationResult {
+	status := "FAILED"
+	if result.passed {
+		status = "PASSED"
 	}
-	if runtime.Resources.GPUCount > 0 {
+	return &validationResult{SessionID: prepared.session.ID, Script: prepared.script, Status: status, Message: validationMessage(result), Stdout: strings.TrimSpace(result.stdout), Stderr: strings.TrimSpace(result.stderr)}
+}
+
+func buildScript(session Session, linkspan string) string {
+	walltime := minutesToWalltime(session.Resources.WallMinutes)
+	lines := []string{"#!/bin/bash", "#SBATCH --nodes=1", "#SBATCH --ntasks=1", "#SBATCH --cpus-per-task=" + strconv.Itoa(session.Resources.Cores), "#SBATCH --mem=" + strconv.Itoa(session.Resources.MemoryMB) + "M", "#SBATCH --time=" + walltime, "#SBATCH --partition=" + session.Partition}
+	if session.Account != "" {
+		lines = append(lines, "#SBATCH --account="+session.Account)
+	}
+	if session.Resources.GPUCount > 0 {
 		gres := "#SBATCH --gres=gpu:"
-		if runtime.Resources.GPUType != "gpu" {
-			gres += runtime.Resources.GPUType + ":"
+		if session.Resources.GPUType != "gpu" {
+			gres += session.Resources.GPUType + ":"
 		}
-		lines = append(lines, gres+strconv.Itoa(runtime.Resources.GPUCount))
+		lines = append(lines, gres+strconv.Itoa(session.Resources.GPUCount))
 	}
+	logBase := sessionLogBasename(session.ID, session.Generation)
 	lines = append(lines,
-		"set -eu", "umask 077", `LOG_DIR="$HOME/.cybershuttle/logs"`, `install -d -m 700 "$LOG_DIR"`, `exec >"$LOG_DIR/`+runtime.ID+`.out" 2>"$LOG_DIR/`+runtime.ID+`.err"`, "unset XDG_RUNTIME_DIR TMPDIR",
+		"set -eu", "umask 077", `LOG_DIR="$HOME/.cybershuttle/logs"`, `install -d -m 700 "$LOG_DIR"`, `exec >"$LOG_DIR/`+logBase+`.out" 2>"$LOG_DIR/`+logBase+`.err"`, "unset XDG_RUNTIME_DIR TMPDIR",
 		"LINKSPAN_BIN="+sshexec.ShellQuote(linkspan),
-		// The allocation runs Linkspan and nothing else. What belongs inside it is
-		// the workflow's business, so this script names no application at all.
-		`exec "$LINKSPAN_BIN" --port "$CS_CONTROL_PORT" --tunnel-enable --tunnel-id "$CS_TUNNEL_ID" --tunnel-cluster "$CS_TUNNEL_CLUSTER" --tunnel-host-token "$CS_TUNNEL_HOST_TOKEN" --workflow `+sshexec.ShellQuote(runtimeWorkflowPath(runtime)),
+		`exec "$LINKSPAN_BIN" --port "$CS_CONTROL_PORT" --tunnel-enable --tunnel-id "$CS_TUNNEL_ID" --tunnel-cluster "$CS_TUNNEL_CLUSTER" --tunnel-host-token "$CS_TUNNEL_HOST_TOKEN" --workflow `+sshexec.ShellQuote(sessionWorkflowPath(session)),
 		"")
 	return strings.Join(lines, "\n")
 }
 
-func minutesToWalltime(minutes int) string {
-	days, rest := minutes/(24*60), minutes%(24*60)
-	hours, mins := rest/60, rest%60
-	if days > 0 {
-		return fmt.Sprintf("%d-%02d:%02d:00", days, hours, mins)
-	}
-	return fmt.Sprintf("%02d:%02d:00", hours, mins)
+func sessionWorkflow(session Session) string {
+	port := strconv.Itoa(int(sessionPorts(session.ID, session.Generation).jupyter))
+	return strings.Join([]string{
+		"name: cs-session",
+		"tasks:",
+		"  - on: start",
+		"    steps:",
+		"      - name: Start Jupyter Server",
+		"        action: jupyter.sessions.start",
+		"        params:",
+		"          root_dir: " + fmt.Sprintf("%q", session.WorkspaceRoot),
+		"          addr: " + fmt.Sprintf("%q", "127.0.0.1:"+port),
+		"",
+	}, "\n")
 }
-
-// A card outlives its allocations, so the name carries the generation: without
-// it the finished run's accounting record reads as this submission's outcome.
-func jobName(id, generation string) string { return "cs-" + id + "-" + generation }
 
 func (e *submissionError) Error() string { return e.cause.Error() }
 
 func (e *submissionError) Unwrap() error { return e.cause }
+
+func (s Service) submitSessionScript(ctx context.Context, host string, session Session, script, jupyterToken, hostToken string) (string, error) {
+	jobName := session.JobName
+	ports := sessionPorts(session.ID, session.Generation)
+	export := fmt.Sprintf("--export=ALL,JUPYTER_TOKEN=%s,CS_TUNNEL_HOST_TOKEN=%s,CS_CONTROL_PORT=%d,CS_TUNNEL_ID=%s,CS_TUNNEL_CLUSTER=%s",
+		jupyterToken, hostToken, ports.control, session.Tunnel.ID, session.Tunnel.ClusterID)
+	outText, errText, runErr := s.Runner.RunOutput(ctx, host, strings.NewReader(script), "sbatch", "--job-name="+jobName, export, "--parsable")
+	if runErr != nil {
+		cause := devtunnel.SafeError(fmt.Sprintf("submit %s failed", jobName),
+			errors.New(sshexec.FailureMessage(errText, runErr)), jupyterToken, hostToken)
+		var exit *exec.ExitError
+		ambiguous := !errors.As(runErr, &exit) || exit.ExitCode() == 255
+		return "", &submissionError{cause: cause, ambiguous: ambiguous}
+	}
+	jobID := strings.SplitN(strings.TrimSpace(outText), ";", 2)[0]
+	if !jobPattern.MatchString(jobID) {
+		return "", &submissionError{cause: fmt.Errorf("submit outcome pending reconciliation for %s: invalid job ID", jobName), ambiguous: true}
+	}
+	return jobID, nil
+}
+
+func (s Service) validateScript(ctx context.Context, alias, script string) (commandResult, error) {
+	outText, errText, err := s.Runner.RunOutput(ctx, alias, strings.NewReader(script), "sbatch", "--test-only")
+	var exit *exec.ExitError
+	if err == nil || errors.As(err, &exit) && exit.ExitCode() != 255 {
+		return commandResult{stdout: outText, stderr: errText, passed: err == nil}, nil
+	}
+	return commandResult{}, sshexec.ClassifyFailure(alias, errText, err)
+}

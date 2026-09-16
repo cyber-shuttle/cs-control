@@ -2,7 +2,7 @@
 
 `csctl serve` exposes one JSON HTTP API and one WebSocket route on an explicit loopback address, `127.0.0.1:8045`
 by default. Every path below is relative to that address. There is no other interface: the CLI has no commands
-for hosts or runtimes.
+for hosts or sessions.
 
 ## Authentication
 
@@ -45,27 +45,33 @@ preflight asking for anything else is refused with `403`.
 Every refusal produced by the API or the device broker is this envelope, with `Cache-Control: no-store`:
 
 ```json
-{ "error": { "code": "runtime_not_found", "message": "runtime not found" } }
+{ "error": { "code": "session_not_found", "message": "session not found" } }
 ```
 
 Refusals produced by the authentication boundary itself are plain text with the status and no envelope:
 `401 unauthorized` (missing or invalid credentials), `403 origin is not allowed`, `403 preflight is not
-allowed`. A `401` also carries `WWW-Authenticate: Bearer`.
+allowed`. A `401` also carries `WWW-Authenticate: Bearer`. The WebSocket credential path answers the same
+way, writing `http.StatusText` of the status with no envelope: `400 Bad Request` for a malformed or
+incomplete `Sec-WebSocket-Protocol` negotiation, `401 Unauthorized` (with `WWW-Authenticate: Bearer`) for a
+missing or undecodable bearer or identity credential in it.
 
 An error the API did not classify becomes `500 internal_error`.
 
 | Code | Status |
 | --- | --- |
-| `invalid_json`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_runtime_id`, `slurm_validation_failed` | 400 |
+| `invalid_json`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed` | 400 |
 | `tunnel_authorization_required` | 401 |
-| `runtime_owner_mismatch` | 403 |
-| `not_found`, `runtime_not_found`, `ssh_host_not_found` | 404 |
+| `session_owner_mismatch`, `origin_required`, `origin_not_allowed`, `preflight_not_allowed`, `authorization_denied` | 403 |
+| `not_found`, `session_not_found`, `ssh_host_not_found` | 404 |
 | `method_not_allowed` | 405 |
-| `runtime_exists`, `runtime_running`, `runtime_not_stopped`, `idempotency_conflict`, `runtime_provisioning_in_progress`, `runtime_access_unavailable`, `ssh_host_exists`, `ssh_host_not_managed`, `ssh_authentication_required`, `ssh_authentication_in_progress` | 409 |
+| `session_exists`, `session_running`, `session_not_stopped`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_host_not_managed`, `ssh_authentication_required`, `ssh_authentication_in_progress` | 409 |
+| `authorization_expired` | 410 |
 | `upgrade_required` | 426 |
-| `internal_error` | 500 |
-| `runtime_provisioning_failed` | 502 or 504 |
-| `service_stopping`, `ssh_authentication_unavailable` | 503 |
+| `rate_limited` | 429 |
+| `internal_error`, `broker_unavailable` | 500 |
+| `session_provisioning_failed` | 502 or 504 |
+| `slurm_discovery_failed`, `upstream_unavailable`, `upstream_invalid`, `upstream_failure` | 502 |
+| `service_stopping`, `broker_capacity` | 503 |
 
 Request bodies are JSON, at most 64 KiB. Unknown fields and trailing data are refused with `invalid_json`.
 
@@ -127,7 +133,7 @@ The response is the resulting host. An alias outside the managed block is `ssh_h
 Removes a managed entry. An alias outside the managed block is `ssh_host_not_managed`.
 
 ```json
-{ "name": "delta", "extraDirectives": null, "managed": false }
+{ "name": "delta", "extraDirectives": [], "managed": false }
 ```
 
 ### `POST /api/v1/ssh/{alias}/test` → 200
@@ -184,14 +190,16 @@ Client to server: binary frames are keystrokes, at most 32 KiB each. Text frames
 64 KiB and the server pings every 20 seconds. A second authentication for the same host while one is in flight
 is refused with `ssh_authentication_in_progress`.
 
-## Runtimes
+## Sessions
 
-`{id}` matches `^rt-[a-f0-9]{12}$`; a path that does not is `404 not_found`.
+`{id}` matches `^s-[a-f0-9]{12}$`; a path that does not is `404 not_found`.
 
-### `POST /api/v1/runtimes/validate` → 200
+### `POST /api/v1/sessions/validate` → 200
 
 Builds the candidate batch script and runs `sbatch --test-only` with it. This is the review step: the script it
-returns is byte-identical to the one create submits.
+returns is identical to the one create submits, except for the log redirect. No generation exists yet at
+validation time, so the returned script's log path carries an empty generation; create rebuilds the script
+with the real generation once one is assigned, before submitting it.
 
 Request:
 
@@ -208,14 +216,14 @@ Request:
 
 `account` is optional and `gpuType`/`gpuCount` are supplied together or not at all. `cores` is 2–4096,
 `memoryMb` is 4096–100000000, `wallMinutes` is 1–525600, and the request must fit a discovered partition.
-`rootFolder` is a safe absolute, home-relative (`~/x`, `$HOME/x`) or environment-relative (`$VAR/x`) POSIX
-path, resolved on the host.
+`rootFolder` is a safe POSIX path: absolute, relative to the home (`x`, `.`, `~/x`, `$HOME/x`) or under
+another variable (`$VAR/x`), resolved on the host.
 
 Response:
 
 ```json
 {
-  "runtimeId": "rt-012345abcdef",
+  "sessionId": "s-012345abcdef",
   "script": "#!/bin/bash\n#SBATCH --nodes=1\n...",
   "status": "PASSED",
   "message": "Slurm accepted the job script."
@@ -225,17 +233,17 @@ Response:
 `status` is `PASSED` or `FAILED`. A Slurm rejection is a `FAILED` result with a `200`, not an error; a failed
 SSH call is an error. `stdout` and `stderr` are omitted when empty.
 
-### `POST /api/v1/runtimes` → 201
+### `POST /api/v1/sessions` → 201
 
 Same request body as validate. Creates the tunnel and credential, persists the record, prepares the login node,
 and submits. A repeated request with the same `idempotencyKey` and the same fields returns the existing
-runtime; the same key with different fields is `idempotency_conflict`.
+session; the same key with different fields is `idempotency_conflict`.
 
-The response is one runtime record, which is also the item shape everywhere else:
+The response is one session record, which is also the item shape everywhere else:
 
 ```json
 {
-  "id": "rt-012345abcdef",
+  "id": "s-012345abcdef",
   "generation": "g-0123456789abcdef",
   "state": "READY",
   "sshHost": "delta",
@@ -249,25 +257,30 @@ The response is one runtime record, which is also the item shape everywhere else
 }
 ```
 
-`state` is one of `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, `FAILED`. `account` and
-`error` are omitted when empty. `startedAt` is when Slurm was first seen running the allocation, taken from
+`id` names the session, the durable record; `generation` names the Slurm job currently serving it. A session
+outlives its jobs -- `start` takes a new generation under the same `id` -- so `generation` is what ties this
+record to one particular run.
+
+`state` is one of `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, `FAILED`; `READY` means
+the job is running and its Linkspan has started writing its log. `account` and
+`error` are omitted when empty. `startedAt` is when Slurm was first seen running the session, taken from
 the scheduler's own elapsed figure rather than from a poll, and is absent until it starts: with
 `resources.wallMinutes` it is the deadline a client counts down to, so a queue wait is never mistaken for one. Owner, tunnel, job ID, job name, node and remote paths are held but never
 returned.
 
-### `GET /api/v1/runtimes` → 200 or 304
+### `GET /api/v1/sessions` → 200 or 304
 
 The one read a client polls. It answers from persisted state and starts a reconciliation for the next poll to
-collect, so it never waits on SSH. Runtimes and log tails are both filtered to the caller.
+collect, so it never waits on SSH. Sessions and log tails are both filtered to the caller.
 
 ```json
 {
-  "runtimes": [],
+  "sessions": [],
   "logs": [
     {
-      "runtimeId": "rt-012345abcdef",
+      "sessionId": "s-012345abcdef",
       "lines": [
-        { "stream": "status", "text": "Preparing the runtime environment", "at": "2030-01-01T00:00:05Z" },
+        { "stream": "status", "text": "Preparing the session environment", "at": "2030-01-01T00:00:05Z" },
         { "stream": "stdout", "text": "Installing collected packages", "at": "2030-01-01T00:00:07Z" }
       ]
     }
@@ -275,61 +288,61 @@ collect, so it never waits on SSH. Runtimes and log tails are both filtered to t
 }
 ```
 
-`runtimes` holds runtime records in the shape above.
-`stream` is `status` (this daemon's own narration), `stdout` or `stderr` (the allocation's startup output,
+`sessions` holds session records in the shape above.
+`stream` is `status` (this daemon's own narration), `stdout` or `stderr` (the session's startup output,
 replaced by whatever the last read returned). Lines are bounded and redacted. `at` is when the line was first
 observed here; an unchanged remote line keeps the time it was first seen.
 
 The response carries a strong `ETag` over the filtered body, so it cannot match across principals. A poll whose
 `If-None-Match` matches is answered `304 Not Modified` with no body.
 
-### `GET /api/v1/runtimes/{id}` → 200
+### `GET /api/v1/sessions/{id}` → 200
 
-One runtime record. A runtime owned by another principal is `runtime_owner_mismatch`.
+One session record. A session owned by another principal is `session_owner_mismatch`.
 
-### `POST /api/v1/runtimes/{id}/start` → 200
+### `POST /api/v1/sessions/{id}/start` → 200
 
-Runs a terminal runtime again under the same identity: a new generation, a new tunnel, a new job. A runtime
-that is not terminal is `runtime_running`.
+Runs a terminal session again under the same identity: a new generation, a new tunnel, a new job. A session
+that is not terminal is `session_running`.
 
-### `POST /api/v1/runtimes/{id}/stop` → 200
+### `POST /api/v1/sessions/{id}/stop` → 200
 
-Marks the runtime `STOPPING`, releases the allocation's tunnel and credential, and asks the scheduler to cancel
-the job. The response carries what the scheduler reported.
+Marks the session `STOPPING`, releases the session's tunnel and credential, and asks the scheduler to cancel
+the job. The response is the session record.
 
-### `DELETE /api/v1/runtimes/{id}` → 200
+### `DELETE /api/v1/sessions/{id}` → 200
 
-Stops the runtime first, then removes the record and its stored credential. A runtime the scheduler has not
-released yet is `runtime_not_stopped`; delete it again once it is.
+Stops the session first, then removes the record and its stored credential. A session the scheduler has not
+released yet is `session_not_stopped`; delete it again once it is.
 
-### `GET /api/v1/runtimes/{id}/access` → 200
+### `GET /api/v1/sessions/{id}/access` → 200
 
-The only route that returns a secret, and only to the owner of a `READY` runtime. `uri` is the allocation's
+The only route that returns a secret, and only to the owner of a `READY` session. `uri` is the session's
 direct Jupyter URI over the tunnel and `token` is Jupyter Server's own identity token; `expiresAt` is the live
 tunnel expiration, not the value recorded at creation.
 
 ```json
 {
-  "runtimeId": "rt-012345abcdef",
+  "sessionId": "s-012345abcdef",
   "generation": "g-0123456789abcdef",
   "expiresAt": "2030-01-01T01:00:00Z",
   "jupyter": { "uri": "https://31001.use.devtunnels.ms", "token": "<43-character token>" }
 }
 ```
 
-A runtime that is not `READY`, has no stored credential, or whose tunnel cannot be reached or has expired is
-`runtime_access_unavailable` with the reason in the message.
+A session that is not `READY`, has no stored credential, or whose tunnel cannot be reached or has expired is
+`session_access_unavailable` with the reason in the message.
 
-### `GET /api/v1/runtimes/{id}/metrics` → 200
+### `GET /api/v1/sessions/{id}/metrics` → 200
 
-What the allocation is using now, as Linkspan on the compute node reports it over the control port of the
-allocation's own tunnel. Samples are bounded, process-local and five seconds apart; the window holds the last
+What the session is using now, as Linkspan on the compute node reports it over the control port of the
+session's own tunnel. Samples are bounded, process-local and five seconds apart; the window holds the last
 twenty. They are deliberately not part of the poll above: they change every tick, and folding them in would
-defeat its `ETag` for exactly the runtimes that have any.
+defeat its `ETag` for exactly the sessions that have any.
 
 ```json
 {
-  "runtimeId": "rt-012345abcdef",
+  "sessionId": "s-012345abcdef",
   "samples": [
     {
       "at": "2030-01-01T00:05:00Z",
@@ -343,20 +356,20 @@ defeat its `ETag` for exactly the runtimes that have any.
 
 Every figure is optional: a host with no GPUs reports none, and a cgroup file that cannot be read is absent
 rather than zero, which for a cumulative counter is a different claim. `at` is when the sample was observed
-here, so consecutive samples differentiate `cpuUsageUsec` into a rate. A runtime that is not running answers
+here, so consecutive samples differentiate `cpuUsageUsec` into a rate. A session that is not running answers
 with an empty window rather than an error.
 
-### `GET /api/v1/runtimes/history` → 200
+### `GET /api/v1/sessions/history` → 200
 
-What this caller's finished allocations did, newest first and bounded. A run is named by the generation that
-ran it, so relaunching a card leaves the previous run behind rather than overwriting it, and deleting the card
-does not remove the runs it accumulated.
+What this caller's finished sessions did, newest first and bounded. A run is named by the generation that
+ran it, so relaunching a session leaves the previous run behind rather than overwriting it, and deleting the
+session record does not remove the runs it accumulated.
 
 ```json
 {
   "runs": [
     {
-      "runtimeId": "rt-012345abcdef",
+      "sessionId": "s-012345abcdef",
       "generation": "g-0123456789abcdef",
       "sshHost": "delta",
       "partition": "cpu",
@@ -373,21 +386,22 @@ does not remove the runs it accumulated.
         "cpuEfficiencyPct": 50,
         "memoryEfficiencyPct": 50
       },
-      "samples": [],
       "logs": [
-        { "stream": "status", "text": "Allocation is running", "at": "2030-01-01T00:00:05Z" }
+        { "stream": "status", "text": "Session is running", "at": "2030-01-01T00:00:05Z" }
       ]
     }
   ]
 }
 ```
 
-The record is frozen when the allocation ends, carrying its final sample window and its narration with it.
-Both are process-local and dropped at that moment, so the run is the only place either survives: a runtime
-that is no longer running carries no log tail in `GET /api/v1/runtimes`, because what it said belongs to the
+The record is frozen when the session ends, carrying its final sample window and its narration with it.
+Both are process-local and dropped at that moment, so the run is the only place either survives: a session
+carries no log tail in `GET /api/v1/sessions` once its run is frozen, because what it said belongs to the
 run that said it. `logs` has the same shape as the tails on that route and is absent when it said nothing. `stats` comes from
 Slurm's own accounting and is absent until it lands: `slurmdbd` flushes step usage a beat after a job ends, so
-it is read again on the sampling tick for ten minutes and then left as it is.
+it is read again on the sampling tick for ten minutes and then left as it is. `samples` carries the run's last
+resource samples the same way `logs` carries its narration, and `error` names why the run ended if it did not
+end cleanly; both are absent rather than empty when there is nothing to report.
 
 ## Device-code sign-in
 

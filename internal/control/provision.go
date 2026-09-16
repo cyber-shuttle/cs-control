@@ -1,3 +1,11 @@
+// The one round trip a login node gets before submission, using a constant shell program with paths as arguments.
+// It installs Linkspan when missing or outdated and writes the per-session workflow.
+// Preparation is tracked by the Service, so a second caller is told to come back rather than race the first.
+//
+//	provisionFailures
+//	provisionOutcome, provisionMessage
+//	Service
+//	provisionSession
 package control
 
 import (
@@ -6,20 +14,14 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
-// Two downloads is not a scheduler round trip, so it gets its own budget.
 const provisionTimeout = 5 * time.Minute
 
-// provisionScript is deliberately constant: paths and the workflow document
-// arrive as arguments, so nothing derived from a request is written into the
-// remote shell program. It installs Linkspan, writes the workflow, and reports
-// each outcome as one line. Present and working is left alone.
 const provisionScript = `set -u
 LC_ALL=C
 LANG=C
@@ -84,13 +86,14 @@ else
     rm -f "$staged"; printf '%s\n' 'error=linkspan-install'; exit 80; }
   printf '%s\n' 'linkspan=installed'
 fi
-# An allocation hosts a tunnel the control plane created, which needs a
-# host-scoped token. A Linkspan without that flag starts, refuses the argument,
-# and takes the allocation with it, so it is refused here instead.
-"$linkspan" --help 2>&1 | grep -q -- '-tunnel-host-token' || {
+# The document below is the tasks form Linkspan reads from 0.19.0; an older
+# Linkspan starts, refuses the document, and takes the session with it, so it
+# is refused here instead.
+version=$("$linkspan" --version 2>/dev/null | head -1 | tr -d 'v \r')
+[ "$(printf '%s\n%s\n' 0.19.0 "$version" | sort -V | head -1)" = 0.19.0 ] || {
   printf '%s\n' 'error=linkspan-unsupported'; exit 81; }
 
-# What the allocation is for travels with it, staged and moved so a partial
+# What the session is for travels with it, staged and moved so a partial
 # write never becomes the document Linkspan reads.
 umask 077
 staged="$workflow.staged"
@@ -101,63 +104,15 @@ install -d -m 700 "$(dirname "$workflow")" 2>/dev/null &&
 printf '%s\n' 'provision=complete'
 `
 
-// What each refusal means to the person who asked for a runtime.
 var provisionFailures = map[string]string{
 	"arguments":            "the host was given paths it could not use",
 	"linkspan-directory":   "could not create the directory the Linkspan binary belongs in",
 	"architecture":         "the host reports an architecture Linkspan is not released for",
 	"linkspan-download":    "could not download the Linkspan release",
 	"linkspan-install":     "could not install the downloaded Linkspan binary",
-	"linkspan-unsupported": "the Linkspan on this host has no --tunnel-host-token, so it cannot host the tunnel this runtime was given",
-	"workflow":             "could not write the workflow the allocation runs",
+	"linkspan-unsupported": "the Linkspan on this host is older than 0.19.0, so it cannot read the workflow this session was given",
+	"workflow":             "could not write the workflow the session runs",
 }
-
-// provisionRuntime gives a host the binary an allocation needs and the
-// workflow it will run, in one round trip before submission, leaving whatever is
-// already there untouched.
-func (s Service) provisionRuntime(ctx context.Context, alias string, runtime Runtime, home, linkspan string) error {
-	// One preparation per host: a second caller is told to come back rather than
-	// race the first over the binary it is installing.
-	if _, busy := hostPreparations.LoadOrStore(alias, true); busy {
-		return apierr.New("runtime_provisioning_in_progress",
-			"The runtime environment on "+alias+" is still being prepared. Try again in a moment.", http.StatusConflict)
-	}
-	defer hostPreparations.Delete(alias)
-	// A caller that goes away must not leave a half-built environment behind.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionTimeout)
-	defer cancel()
-	s.runtimeStatus(runtime.ID, "Preparing the runtime environment")
-	document := base64.StdEncoding.EncodeToString([]byte(runtimeWorkflow(runtime)))
-	remote := strings.Join([]string{
-		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-s"), sshexec.ShellQuote("--"),
-		sshexec.ShellQuote("csctl-provision"), sshexec.ShellQuote(home), sshexec.ShellQuote(linkspan),
-		sshexec.ShellQuote(runtimeWorkflowPath(runtime)), sshexec.ShellQuote(document),
-	}, " ")
-	cmd, err := s.Runner.Command(ctx, alias, remote)
-	if err != nil {
-		return err
-	}
-	cmd.Stdin = strings.NewReader(provisionScript)
-	outText, errText, runErr := sshexec.RunBounded(ctx, cmd)
-	report := provisionOutcome(outText)
-	if runErr != nil {
-		if ctx.Err() != nil {
-			return apierr.New("runtime_provisioning_failed", "Preparing the runtime environment on "+alias+" timed out.", http.StatusGatewayTimeout)
-		}
-		return apierr.New("runtime_provisioning_failed", provisionMessage(alias, report["error"], errText), http.StatusBadGateway)
-	}
-	if report["provision"] != "complete" {
-		return apierr.New("runtime_provisioning_failed", provisionMessage(alias, report["error"], errText), http.StatusBadGateway)
-	}
-	if report["linkspan"] == "installed" {
-		s.runtimeStatus(runtime.ID, "Installed Linkspan")
-	}
-	s.runtimeStatus(runtime.ID, "Runtime environment ready")
-	return nil
-}
-
-// Process-wide: being prepared is a fact about the host, not about a request.
-var hostPreparations sync.Map
 
 func provisionOutcome(output string) map[string]string {
 	report := map[string]string{}
@@ -171,10 +126,49 @@ func provisionOutcome(output string) map[string]string {
 
 func provisionMessage(alias, failure, stderr string) string {
 	if reason, known := provisionFailures[failure]; known {
-		return fmt.Sprintf("Preparing the runtime environment on %s failed: %s.", alias, reason)
+		return fmt.Sprintf("Preparing the session environment on %s failed: %s.", alias, reason)
 	}
 	if detail := strings.TrimSpace(stderr); detail != "" {
-		return fmt.Sprintf("Preparing the runtime environment on %s failed: %s", alias, detail)
+		return fmt.Sprintf("Preparing the session environment on %s failed: %s", alias, detail)
 	}
-	return "Preparing the runtime environment on " + alias + " failed."
+	return "Preparing the session environment on " + alias + " failed."
+}
+
+func (s Service) provisionSession(ctx context.Context, alias string, session Session, home, linkspan string) error {
+	key := s.Runner.Hosts.UserPath + "\x00" + alias
+	if _, busy := s.HostPreparations.LoadOrStore(key, true); busy {
+		return apierr.New("session_provisioning_in_progress",
+			"The session environment on "+alias+" is still being prepared. Try again in a moment.", http.StatusConflict)
+	}
+	defer s.HostPreparations.Delete(key)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), provisionTimeout)
+	defer cancel()
+	s.sessionStatus(session.ID, "Preparing the session environment")
+	document := base64.StdEncoding.EncodeToString([]byte(sessionWorkflow(session)))
+	remote := strings.Join([]string{
+		sshexec.ShellQuote("sh"), sshexec.ShellQuote("-s"), sshexec.ShellQuote("--"),
+		sshexec.ShellQuote("csctl-provision"), sshexec.ShellQuote(home), sshexec.ShellQuote(linkspan),
+		sshexec.ShellQuote(sessionWorkflowPath(session)), sshexec.ShellQuote(document),
+	}, " ")
+	cmd, err := s.Runner.Command(ctx, alias, remote)
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = strings.NewReader(provisionScript)
+	outText, errText, runErr := sshexec.RunBounded(ctx, cmd)
+	report := provisionOutcome(outText)
+	if runErr != nil {
+		if ctx.Err() != nil {
+			return apierr.New("session_provisioning_failed", "Preparing the session environment on "+alias+" timed out.", http.StatusGatewayTimeout)
+		}
+		return apierr.New("session_provisioning_failed", provisionMessage(alias, report["error"], errText), http.StatusBadGateway)
+	}
+	if report["provision"] != "complete" {
+		return apierr.New("session_provisioning_failed", provisionMessage(alias, report["error"], errText), http.StatusBadGateway)
+	}
+	if report["linkspan"] == "installed" {
+		s.sessionStatus(session.ID, "Installed Linkspan")
+	}
+	s.sessionStatus(session.ID, "Session environment ready")
+	return nil
 }

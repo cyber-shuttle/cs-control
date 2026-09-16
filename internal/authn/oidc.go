@@ -1,3 +1,12 @@
+// OIDC identity validation, layered under MicrosoftOAuthValidator, backed by discovery and JWKS.
+// A signature failure against a known key is hostile input, not evidence of rotation.
+// Only an unknown kid inside its cooldown earns a key refresh.
+//
+//	MicrosoftOAuthValidator
+//	oidcMetadata, oidcKeySet, cachedOIDCKeys, oidcRefreshCall, oidcValidator, idTokenHeader, idTokenClaims
+//	makeOIDCValidator, newOIDCValidator, parseSignedIDToken, verifyIDTokenSignature
+//	waitOIDCRefresh
+//	NewMicrosoftOAuthValidator
 package authn
 
 import (
@@ -25,34 +34,9 @@ const (
 	oidcUnknownKIDCooldown = 30 * time.Second
 )
 
-// MicrosoftOAuthValidator validates two independent bearers: the Dev Tunnels
-// access token is a capability, the ID token is the sole identity bearer, and no
-// binding between them is claimed.
 type MicrosoftOAuthValidator struct {
-	access   *DevTunnelOAuthValidator
-	identity *OIDCValidator
-}
-
-func NewMicrosoftOAuthValidator(devTunnelBaseURL, authority, clientID string, client *http.Client) (*MicrosoftOAuthValidator, error) {
-	access, err := NewDevTunnelOAuthValidator(devTunnelBaseURL, client)
-	if err != nil {
-		return nil, err
-	}
-	identity, err := NewOIDCValidator(authority, clientID, client)
-	if err != nil {
-		return nil, err
-	}
-	return &MicrosoftOAuthValidator{access: access, identity: identity}, nil
-}
-
-func (v *MicrosoftOAuthValidator) Validate(ctx context.Context, credentials OAuthCredentials) (Principal, error) {
-	if v == nil || v.access == nil || v.identity == nil || !validOAuthToken(credentials.AccessToken) || !validOAuthToken(credentials.IDToken) {
-		return Principal{}, errors.New("OAuth credentials are invalid")
-	}
-	if err := v.access.ValidateAccess(ctx, credentials.AccessToken); err != nil {
-		return Principal{}, err
-	}
-	return v.identity.Validate(ctx, credentials.IDToken)
+	access   *devTunnelOAuthValidator
+	identity *oidcValidator
 }
 
 type oidcMetadata struct {
@@ -82,67 +66,16 @@ type oidcRefreshCall struct {
 	err  error
 }
 
-// OIDCValidator is a bounded RS256 validator backed by OIDC discovery and
-// JWKS. Its cache is process-memory only.
-type OIDCValidator struct {
+type oidcValidator struct {
 	authority          *url.URL
 	clientID           string
 	client             *http.Client
 	production         bool
-	now                func() time.Time
+	now                clock
 	mu                 sync.Mutex
 	cache              cachedOIDCKeys
 	refresh            *oidcRefreshCall
 	nextUnknownRefresh time.Time
-}
-
-func NewOIDCValidator(authority, clientID string, client *http.Client) (*OIDCValidator, error) {
-	parsed, tenant, err := parseTenantAuthority(authority)
-	if err != nil {
-		return nil, err
-	}
-	parsed.Path = "/" + tenant + "/v2.0"
-	return makeOIDCValidator(parsed, clientID, client, true)
-}
-
-func makeOIDCValidator(authority *url.URL, clientID string, client *http.Client, production bool) (*OIDCValidator, error) {
-	if !ValidIdentityValue(clientID) {
-		return nil, errors.New("OAuth client ID is invalid")
-	}
-	bounded := httpx.BoundedClient(client, defaultOAuthTimeout)
-	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &OIDCValidator{authority: authority, clientID: clientID, client: bounded, production: production, now: time.Now}, nil
-}
-
-func (v *OIDCValidator) Validate(ctx context.Context, token string) (Principal, error) {
-	header, claims, signingInput, signature, err := parseSignedIDToken(token)
-	if err != nil {
-		return Principal{}, errors.New("ID token is invalid")
-	}
-	cache, err := v.loadKeys(ctx)
-	if err != nil {
-		return Principal{}, err
-	}
-	key := cache.keys[header.Kid]
-	if key == nil {
-		cache, err = v.refreshUnknownKID(ctx, header.Kid)
-		if err != nil {
-			return Principal{}, err
-		}
-		key = cache.keys[header.Kid]
-		if key == nil {
-			return Principal{}, errors.New("ID token signing key is unknown")
-		}
-	}
-	// A signature failure for a known kid is hostile input, not evidence of key
-	// rotation. Same-kid rotation is picked up by the bounded cache TTL.
-	if err := verifyIDTokenSignature(key, signingInput, signature); err != nil {
-		return Principal{}, errors.New("ID token signature is invalid")
-	}
-	if err := v.validateClaims(claims, cache.metadata.Issuer); err != nil {
-		return Principal{}, err
-	}
-	return Principal{Subject: claims.Subject, Tenant: claims.Tenant}, nil
 }
 
 type idTokenHeader struct {
@@ -158,6 +91,23 @@ type idTokenClaims struct {
 	NotBefore *int64 `json:"nbf"`
 	Subject   string `json:"oid"`
 	Tenant    string `json:"tid"`
+}
+
+func makeOIDCValidator(authority *url.URL, clientID string, client *http.Client, production bool) (*oidcValidator, error) {
+	if !validIdentityValue(clientID) {
+		return nil, errors.New("OAuth client ID is invalid")
+	}
+	bounded := httpx.GuardedClient(client, defaultOAuthTimeout, httpx.SameOriginRedirect)
+	return &oidcValidator{authority: authority, clientID: clientID, client: bounded, production: production, now: time.Now}, nil
+}
+
+func newOIDCValidator(authority, clientID string, client *http.Client) (*oidcValidator, error) {
+	parsed, tenant, err := parseTenantAuthority(authority)
+	if err != nil {
+		return nil, err
+	}
+	parsed.Path = "/" + tenant + "/v2.0"
+	return makeOIDCValidator(parsed, clientID, client, true)
 }
 
 func parseSignedIDToken(token string) (idTokenHeader, idTokenClaims, string, []byte, error) {
@@ -177,7 +127,7 @@ func parseSignedIDToken(token string) (idTokenHeader, idTokenClaims, string, []b
 		}
 		return nil
 	}
-	if err := decodeJSON(parts[0], &header); err != nil || header.Alg != "RS256" || !ValidIdentityValue(header.Kid) || header.Typ != "" && header.Typ != "JWT" {
+	if err := decodeJSON(parts[0], &header); err != nil || header.Alg != "RS256" || !validIdentityValue(header.Kid) || header.Typ != "" && header.Typ != "JWT" {
 		return header, claims, "", nil, errors.New("token header")
 	}
 	if err := decodeJSON(parts[1], &claims); err != nil {
@@ -190,8 +140,42 @@ func parseSignedIDToken(token string) (idTokenHeader, idTokenClaims, string, []b
 	return header, claims, parts[0] + "." + parts[1], signature, nil
 }
 
-func (v *OIDCValidator) validateClaims(claims idTokenClaims, configuredIssuer string) error {
-	if claims.Audience != v.clientID || claims.Expires == nil || claims.NotBefore == nil || !ValidIdentityValue(claims.Subject) || !ValidIdentityValue(claims.Tenant) {
+func verifyIDTokenSignature(key *rsa.PublicKey, signingInput string, signature []byte) error {
+	digest := sha256.Sum256([]byte(signingInput))
+	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature)
+}
+
+func (v *oidcValidator) Validate(ctx context.Context, token string) (Principal, error) {
+	header, claims, signingInput, signature, err := parseSignedIDToken(token)
+	if err != nil {
+		return Principal{}, errors.New("ID token is invalid")
+	}
+	cache, err := v.loadKeys(ctx)
+	if err != nil {
+		return Principal{}, err
+	}
+	key := cache.keys[header.Kid]
+	if key == nil {
+		cache, err = v.refreshUnknownKID(ctx, header.Kid)
+		if err != nil {
+			return Principal{}, err
+		}
+		key = cache.keys[header.Kid]
+		if key == nil {
+			return Principal{}, errors.New("ID token signing key is unknown")
+		}
+	}
+	if err := verifyIDTokenSignature(key, signingInput, signature); err != nil {
+		return Principal{}, errors.New("ID token signature is invalid")
+	}
+	if err := v.validateClaims(claims, cache.metadata.Issuer); err != nil {
+		return Principal{}, err
+	}
+	return Principal{Subject: claims.Subject, Tenant: claims.Tenant}, nil
+}
+
+func (v *oidcValidator) validateClaims(claims idTokenClaims, configuredIssuer string) error {
+	if claims.Audience != v.clientID || claims.Expires == nil || claims.NotBefore == nil || !validIdentityValue(claims.Subject) || !validIdentityValue(claims.Tenant) {
 		return errors.New("ID token claims are invalid")
 	}
 	expectedIssuer := strings.ReplaceAll(configuredIssuer, "{tenantid}", claims.Tenant)
@@ -205,12 +189,40 @@ func (v *OIDCValidator) validateClaims(claims idTokenClaims, configuredIssuer st
 	return nil
 }
 
-func verifyIDTokenSignature(key *rsa.PublicKey, signingInput string, signature []byte) error {
-	digest := sha256.Sum256([]byte(signingInput))
-	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature)
+func waitOIDCRefresh(ctx context.Context, call *oidcRefreshCall) error {
+	select {
+	case <-ctx.Done():
+		return errors.New("OIDC signing-key refresh was canceled")
+	case <-call.done:
+		return nil
+	}
 }
 
-func (v *OIDCValidator) loadKeys(ctx context.Context) (cachedOIDCKeys, error) {
+func (v *oidcValidator) refreshCallLocked() (*oidcRefreshCall, bool) {
+	if v.refresh != nil {
+		return v.refresh, false
+	}
+	call := &oidcRefreshCall{done: make(chan struct{})}
+	v.refresh = call
+	return call, true
+}
+
+func (v *oidcValidator) awaitRefresh(ctx context.Context, call *oidcRefreshCall, start bool) (cachedOIDCKeys, error) {
+	if start {
+		go v.runRefresh(call)
+	}
+	if err := waitOIDCRefresh(ctx, call); err != nil {
+		return cachedOIDCKeys{}, err
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if call.err != nil {
+		return cachedOIDCKeys{}, call.err
+	}
+	return v.cache, nil
+}
+
+func (v *oidcValidator) loadKeys(ctx context.Context) (cachedOIDCKeys, error) {
 	v.mu.Lock()
 	if v.cache.keys != nil && v.now().Before(v.cache.expires) {
 		cache := v.cache
@@ -222,9 +234,7 @@ func (v *OIDCValidator) loadKeys(ctx context.Context) (cachedOIDCKeys, error) {
 	return v.awaitRefresh(ctx, call, start)
 }
 
-// One global cooldown bounds unknown-kid refreshes: the first triggers a refresh,
-// every other kid inside the window is answered from the cached set.
-func (v *OIDCValidator) refreshUnknownKID(ctx context.Context, kid string) (cachedOIDCKeys, error) {
+func (v *oidcValidator) refreshUnknownKID(ctx context.Context, kid string) (cachedOIDCKeys, error) {
 	v.mu.Lock()
 	now := v.now()
 	if v.cache.keys[kid] != nil || v.refresh == nil && now.Before(v.nextUnknownRefresh) {
@@ -240,34 +250,7 @@ func (v *OIDCValidator) refreshUnknownKID(ctx context.Context, kid string) (cach
 	return v.awaitRefresh(ctx, call, start)
 }
 
-// awaitRefresh starts the fetch this caller claimed, waits for whichever call is
-// in flight, and answers with the cache that call produced. The lock must be
-// released before entering.
-func (v *OIDCValidator) awaitRefresh(ctx context.Context, call *oidcRefreshCall, start bool) (cachedOIDCKeys, error) {
-	if start {
-		go v.runRefresh(call)
-	}
-	if err := waitOIDCRefresh(ctx, call); err != nil {
-		return cachedOIDCKeys{}, err
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if call.err != nil {
-		return cachedOIDCKeys{}, call.err
-	}
-	return v.cache, nil
-}
-
-func (v *OIDCValidator) refreshCallLocked() (*oidcRefreshCall, bool) {
-	if v.refresh != nil {
-		return v.refresh, false
-	}
-	call := &oidcRefreshCall{done: make(chan struct{})}
-	v.refresh = call
-	return call, true
-}
-
-func (v *OIDCValidator) runRefresh(call *oidcRefreshCall) {
+func (v *oidcValidator) runRefresh(call *oidcRefreshCall) {
 	metadata, err := v.fetchMetadata(context.Background())
 	var keys map[string]*rsa.PublicKey
 	if err == nil {
@@ -285,16 +268,7 @@ func (v *OIDCValidator) runRefresh(call *oidcRefreshCall) {
 	v.mu.Unlock()
 }
 
-func waitOIDCRefresh(ctx context.Context, call *oidcRefreshCall) error {
-	select {
-	case <-ctx.Done():
-		return errors.New("OIDC signing-key refresh was canceled")
-	case <-call.done:
-		return nil
-	}
-}
-
-func (v *OIDCValidator) fetchMetadata(ctx context.Context) (oidcMetadata, error) {
+func (v *oidcValidator) fetchMetadata(ctx context.Context) (oidcMetadata, error) {
 	endpoint := *v.authority
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/.well-known/openid-configuration"
 	var metadata oidcMetadata
@@ -316,14 +290,14 @@ func (v *OIDCValidator) fetchMetadata(ctx context.Context) (oidcMetadata, error)
 	return metadata, nil
 }
 
-func (v *OIDCValidator) fetchKeys(ctx context.Context, endpoint string) (map[string]*rsa.PublicKey, error) {
+func (v *oidcValidator) fetchKeys(ctx context.Context, endpoint string) (map[string]*rsa.PublicKey, error) {
 	var set oidcKeySet
 	if err := httpx.GetJSON(ctx, v.client, endpoint, "", maxOIDCResponse, &set); err != nil {
 		return nil, errors.New("fetch OIDC signing keys")
 	}
 	keys := make(map[string]*rsa.PublicKey, len(set.Keys))
 	for _, jwk := range set.Keys {
-		if jwk.Kty != "RSA" || (jwk.Use != "" && jwk.Use != "sig") || (jwk.Alg != "" && jwk.Alg != "RS256") || !ValidIdentityValue(jwk.Kid) || keys[jwk.Kid] != nil {
+		if jwk.Kty != "RSA" || (jwk.Use != "" && jwk.Use != "sig") || (jwk.Alg != "" && jwk.Alg != "RS256") || !validIdentityValue(jwk.Kid) || keys[jwk.Kid] != nil {
 			return nil, errors.New("OIDC signing key is invalid")
 		}
 		n, errN := base64.RawURLEncoding.Strict().DecodeString(jwk.N)
@@ -345,4 +319,26 @@ func (v *OIDCValidator) fetchKeys(ctx context.Context, endpoint string) (map[str
 		return nil, errors.New("OIDC signing keys are empty")
 	}
 	return keys, nil
+}
+
+func NewMicrosoftOAuthValidator(devTunnelBaseURL, authority, clientID string, client *http.Client) (*MicrosoftOAuthValidator, error) {
+	access, err := newDevTunnelOAuthValidator(devTunnelBaseURL, client)
+	if err != nil {
+		return nil, err
+	}
+	identity, err := newOIDCValidator(authority, clientID, client)
+	if err != nil {
+		return nil, err
+	}
+	return &MicrosoftOAuthValidator{access: access, identity: identity}, nil
+}
+
+func (v *MicrosoftOAuthValidator) Validate(ctx context.Context, credentials OAuthCredentials) (Principal, error) {
+	if v == nil || v.access == nil || v.identity == nil || !validOAuthToken(credentials.AccessToken) || !validOAuthToken(credentials.IDToken) {
+		return Principal{}, errors.New("OAuth credentials are invalid")
+	}
+	if err := v.access.ValidateAccess(ctx, credentials.AccessToken); err != nil {
+		return Principal{}, err
+	}
+	return v.identity.Validate(ctx, credentials.IDToken)
 }

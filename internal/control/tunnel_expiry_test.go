@@ -1,3 +1,6 @@
+// Tunnel lifecycle edges. An uncertain create compensates by idempotently deleting the deterministic tunnel ID.
+//
+//	Test*
 package control
 
 import (
@@ -10,32 +13,32 @@ import (
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/authn"
+	"github.com/cyber-shuttle/cs-control/internal/credentialstore"
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
-func TestCreateAllocationTunnelCompensatesUncertainCreateError(t *testing.T) {
+func TestCreateSessionTunnelCompensatesUncertainCreateError(t *testing.T) {
 	const oauth = "oauth-token-must-not-leak"
 	manager := &testTunnelManager{
 		createErr: errors.New("create response was ambiguous"),
 		deleteErr: errors.New("delete failed with " + oauth),
 	}
-	runtime := pendingRuntime("rt-012345abcdef", "delta", "")
-	before := runtime
+	session := pendingSession("s-012345abcdef", "delta", "")
+	before := session
 	credentialDir := t.TempDir()
-	if err := os.Chmod(credentialDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.Chmod(credentialDir, 0o700))
 	service := Service{
 		Runner: sshexec.Runner{Timeout: 5 * time.Second}, Tunnels: manager,
-		Credentials: CredentialStore{Dir: credentialDir},
+		Credentials: credentialstore.Store{Dir: credentialDir},
 	}
-	_, _, err := service.createAllocationTunnel(context.Background(), &runtime, authn.TunnelAuthorization{OAuthToken: oauth, Principal: authn.Principal{Subject: "owner", Tenant: "tenant"}})
+	_, _, err := service.createSessionTunnel(context.Background(), &session, authn.TunnelAuthorization{OAuthToken: oauth, Principal: authn.Principal{Subject: "owner", Tenant: "tenant"}})
 	if err == nil || strings.Contains(err.Error(), oauth) || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("create/cleanup error = %v", err)
 	}
-	if !reflect.DeepEqual(runtime, before) {
-		t.Fatalf("runtime mutated after uncertain create: before=%#v after=%#v", before, runtime)
+	if !reflect.DeepEqual(session, before) {
+		t.Fatalf("session mutated after uncertain create: before=%#v after=%#v", before, session)
 	}
 	if len(manager.deletes) != 1 || manager.deletes[0].TunnelID != manager.creates[0].TunnelID || manager.deletes[0].ClusterID != "" || manager.deletes[0].OAuthToken != oauth {
 		t.Fatalf("uncertain create compensation = %#v, create=%#v", manager.deletes, manager.creates)
@@ -46,7 +49,7 @@ func TestCreateAllocationTunnelCompensatesUncertainCreateError(t *testing.T) {
 	}
 }
 
-func TestAllocationTunnelDurationFloorAndCap(t *testing.T) {
+func TestSessionTunnelDurationFloorAndCap(t *testing.T) {
 	for _, test := range []struct {
 		name        string
 		wallMinutes int
@@ -57,7 +60,7 @@ func TestAllocationTunnelDurationFloorAndCap(t *testing.T) {
 		{name: "thirty day cap", wallMinutes: 525600, want: devtunnel.MaxDurationSeconds},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := allocationTunnelDurationSeconds(test.wallMinutes); got != test.want {
+			if got := sessionTunnelDurationSeconds(test.wallMinutes); got != test.want {
 				t.Fatalf("duration = %d, want %d", got, test.want)
 			}
 		})

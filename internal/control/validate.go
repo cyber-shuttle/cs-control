@@ -1,36 +1,104 @@
+// Validation that does not touch the network: resource fit, request fields, and workspace path grammar.
+// Everything here is a pure predicate or refusal.
+// The one check needing SSH lives beside prepareSession in lifecycle.go instead.
+//
+//	invalidRootFolder
+//	resourcesFit, hasGPU, gpuSupports
+//	safeRemotePath, homeRootExpression
+//	resolveRemoteExecutable
+//	safeWorkspaceSuffix, validatePartitionResources, oneRemotePath
+//	safeRemoteExecutable
+//	boundedSessionError, validWorkspaceExpression
+//	validateCreate
+//	validateWorkspacePrivateLayout
 package control
 
 import (
-	"context"
 	"errors"
+	"net/http"
 	pathpkg "path"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 )
 
-// Every workspace refusal carries one code, so a client can act on the class of
-// failure while the message names the particular one.
 func invalidRootFolder(message string) error {
-	return apierr.New("invalid_root_folder", message, 400)
+	return apierr.New("invalid_root_folder", message, http.StatusBadRequest)
 }
 
-func validatePartitionResources(values []Partition, name string, resources Resources) error {
-	matches := make([]Partition, 0, 1)
+func resourcesFit(resources resources, partition partition) bool {
+	return resources.Cores <= partition.CPUCount && resources.MemoryMB <= partition.MemoryMB
+}
+
+func hasGPU(partition partition) bool {
+	for _, gres := range partition.GRES {
+		if gres.Name == "gpu" || strings.HasPrefix(gres.Name, "gpu:") {
+			return true
+		}
+	}
+	return false
+}
+
+func gpuSupports(partition partition, gpuType string, gpuCount int) bool {
+	for _, gres := range partition.GRES {
+		if gres.Count < gpuCount {
+			continue
+		}
+		if gres.Name == "gpu" || strings.TrimPrefix(gres.Name, "gpu:") == gpuType {
+			return true
+		}
+	}
+	return false
+}
+
+func safeRemotePath(value string) bool {
+	return remotePathPattern.MatchString(value) && pathpkg.Clean(value) == value && value != "/"
+}
+
+func homeRootExpression(value string) bool {
+	switch value {
+	case ".", "~", "$HOME", "${HOME}":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveRemoteExecutable(value, home string) string {
+	rest, anchored := strings.CutPrefix(value, "$HOME/")
+	if !anchored {
+		return value
+	}
+	return pathpkg.Join(home, rest)
+}
+
+func safeWorkspaceSuffix(value string) bool {
+	if value == "" || pathpkg.Clean(value) != value || strings.HasPrefix(value, "/") {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." || !workspaceSegment.MatchString(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func validatePartitionResources(values []partition, name string, resources resources) error {
+	matches := make([]partition, 0, 1)
 	for _, value := range values {
 		if value.Name == name {
 			matches = append(matches, value)
 		}
 	}
 	if len(matches) == 0 {
-		return apierr.New("invalid_partition", "Slurm partition was not discovered for this host", 400)
+		return apierr.New("invalid_partition", "Slurm partition was not discovered for this host", http.StatusBadRequest)
 	}
 
 	gpuRequested := resources.GPUCount != 0 || resources.GPUType != ""
-	if gpuRequested && (resources.GPUCount < 1 || !namePattern.MatchString(resources.GPUType)) {
-		return apierr.New("invalid_gpu", "gpuType and positive gpuCount must be supplied together", 400)
+	if gpuRequested && (resources.GPUCount < 1 || !sshconfig.SafeName(resources.GPUType, 64)) {
+		return apierr.New("invalid_gpu", "gpuType and positive gpuCount must be supplied together", http.StatusBadRequest)
 	}
 	if !gpuRequested {
 		for _, partition := range matches {
@@ -38,7 +106,7 @@ func validatePartitionResources(values []Partition, name string, resources Resou
 				return nil
 			}
 		}
-		return apierr.New("invalid_resource", "no CPU variant of the selected partition supports the requested resources", 400)
+		return apierr.New("invalid_resource", "no CPU variant of the selected partition supports the requested resources", http.StatusBadRequest)
 	}
 
 	gpuAvailable := false
@@ -51,72 +119,35 @@ func validatePartitionResources(values []Partition, name string, resources Resou
 		}
 	}
 	if gpuAvailable {
-		return apierr.New("invalid_resource", "requested CPU or memory exceeds the matching GPU partition capacity", 400)
+		return apierr.New("invalid_resource", "requested CPU or memory exceeds the matching GPU partition capacity", http.StatusBadRequest)
 	}
-	return apierr.New("invalid_gpu", "requested GPU is not available in the selected partition", 400)
+	return apierr.New("invalid_gpu", "requested GPU is not available in the selected partition", http.StatusBadRequest)
 }
 
-func resourcesFit(resources Resources, partition Partition) bool {
-	return resources.Cores <= partition.CPUCount && resources.MemoryMB <= partition.MemoryMB
+func oneRemotePath(output string) (string, error) {
+	value := strings.TrimSuffix(output, "\n")
+	if value == "" || strings.ContainsAny(value, "\r\n") || !safeRemotePath(value) {
+		return "", errors.New("not one safe absolute path")
+	}
+	return value, nil
 }
 
-func hasGPU(partition Partition) bool {
-	for _, gres := range partition.GRES {
-		if gres.Name == "gpu" || strings.HasPrefix(gres.Name, "gpu:") {
-			return true
-		}
+func safeRemoteExecutable(value string) bool {
+	if rest, anchored := strings.CutPrefix(value, "$HOME/"); anchored {
+		return safeRemotePath("/" + rest)
 	}
-	return false
+	return safeRemotePath(value) && strings.HasPrefix(value, "/")
 }
 
-func gpuSupports(partition Partition, gpuType string, gpuCount int) bool {
-	for _, gres := range partition.GRES {
-		if gres.Count < gpuCount {
-			continue
-		}
-		if gres.Name == "gpu" || strings.TrimPrefix(gres.Name, "gpu:") == gpuType {
-			return true
-		}
-	}
-	return false
-}
-
-func validateCreate(request *CreateRequest) error {
-	if request.ID == "" && request.IdempotencyKey == "" {
-		return apierr.New("invalid_idempotency_key", "idempotencyKey is required", 400)
-	}
-	if !sshconfig.ValidAlias(request.SSHHost) {
-		return sshconfig.ErrInvalidAlias
-	}
-	if !namePattern.MatchString(request.Partition) {
-		return apierr.New("invalid_partition", "invalid partition", 400)
-	}
-	if request.Account != "" && !namePattern.MatchString(request.Account) {
-		return apierr.New("invalid_account", "invalid account", 400)
-	}
-	if !validWorkspaceExpression(request.RootFolder) {
-		return invalidRootFolder("rootFolder must be a safe absolute, home-relative, or environment-relative POSIX path")
-	}
-	if request.Resources.Cores < MinCores || request.Resources.Cores > 4096 {
-		return apierr.New("invalid_resources", "cores must be between 2 and 4096", 400)
-	}
-	if request.Resources.MemoryMB < MinMemoryMB || request.Resources.MemoryMB > 100_000_000 {
-		return apierr.New("invalid_resources", "memoryMb is out of range", 400)
-	}
-	if request.Resources.WallMinutes < 1 || request.Resources.WallMinutes > 525600 {
-		return apierr.New("invalid_resources", "wallMinutes is out of range", 400)
-	}
-	if request.IdempotencyKey != "" && (len(request.IdempotencyKey) > 128 || strings.ContainsAny(request.IdempotencyKey, "\x00\r\n")) {
-		return apierr.New("invalid_idempotency_key", "invalid idempotency key", 400)
-	}
-	return nil
+func boundedSessionError(err error) string {
+	return apierr.TruncateUTF8(strings.ToValidUTF8(err.Error(), "�"), maxSessionError)
 }
 
 func validWorkspaceExpression(value string) bool {
 	if value == "" || value != strings.TrimSpace(value) || strings.ContainsAny(value, "\\\x00\r\n") {
 		return false
 	}
-	if value == "." || value == "~" || value == "$HOME" || value == "${HOME}" {
+	if homeRootExpression(value) {
 		return true
 	}
 	if strings.HasPrefix(value, "/") {
@@ -138,133 +169,47 @@ func validWorkspaceExpression(value string) bool {
 	return safeWorkspaceSuffix(value)
 }
 
-func safeWorkspaceSuffix(value string) bool {
-	if value == "" || pathpkg.Clean(value) != value || strings.HasPrefix(value, "/") {
-		return false
+func validateCreate(request *createRequest) error {
+	if request.ID == "" && request.IdempotencyKey == "" {
+		return apierr.New("invalid_idempotency_key", "idempotencyKey is required", http.StatusBadRequest)
 	}
-	for _, part := range strings.Split(value, "/") {
-		if part == "" || part == "." || part == ".." || !workspaceSegment.MatchString(part) {
-			return false
-		}
+	if !sshconfig.ValidAlias(request.SSHHost) {
+		return sshconfig.ErrInvalidAlias
 	}
-	return true
+	if !sshconfig.SafeName(request.Partition, 64) {
+		return apierr.New("invalid_partition", "invalid partition", http.StatusBadRequest)
+	}
+	if request.Account != "" && !sshconfig.SafeName(request.Account, 64) {
+		return apierr.New("invalid_account", "invalid account", http.StatusBadRequest)
+	}
+	if !validWorkspaceExpression(request.RootFolder) {
+		return invalidRootFolder("rootFolder must be a safe POSIX path: absolute, relative to the home, or under $HOME or $VAR")
+	}
+	if request.Resources.Cores < minCores || request.Resources.Cores > 4096 {
+		return apierr.New("invalid_resources", "cores must be between 2 and 4096", http.StatusBadRequest)
+	}
+	if request.Resources.MemoryMB < minMemoryMB || request.Resources.MemoryMB > 100_000_000 {
+		return apierr.New("invalid_resources", "memoryMb is out of range", http.StatusBadRequest)
+	}
+	if request.Resources.WallMinutes < 1 || request.Resources.WallMinutes > 525600 {
+		return apierr.New("invalid_resources", "wallMinutes is out of range", http.StatusBadRequest)
+	}
+	if request.IdempotencyKey != "" && (len(request.IdempotencyKey) > 128 || strings.ContainsAny(request.IdempotencyKey, "\x00\r\n")) {
+		return apierr.New("invalid_idempotency_key", "invalid idempotency key", http.StatusBadRequest)
+	}
+	return nil
 }
 
-func (s Service) resolveWorkspaceRoot(ctx context.Context, alias, home, expression string) (string, error) {
-	if !validWorkspaceExpression(expression) || !safeRemotePath(home) {
-		return "", invalidRootFolder("workspace expression is invalid")
-	}
-	base, suffix := home, ""
-	switch {
-	case expression == "." || expression == "~" || expression == "$HOME" || expression == "${HOME}":
-	case strings.HasPrefix(expression, "/"):
-		base = expression
-	case strings.HasPrefix(expression, "~/"):
-		suffix = strings.TrimPrefix(expression, "~/")
-	case workspaceVar.MatchString(expression):
-		match := workspaceVar.FindStringSubmatch(expression)
-		name := match[1]
-		if name == "" {
-			name = match[2]
-		}
-		suffix = match[3]
-		if name != "HOME" {
-			output, err := s.Runner.Run(ctx, alias, nil, "printenv", name)
-			if err != nil {
-				return "", invalidRootFolder("workspace environment variable " + name + " is unavailable")
-			}
-			base, err = oneRemotePath(output)
-			if err != nil {
-				return "", invalidRootFolder("workspace environment variable " + name + " must contain one absolute safe path")
-			}
-		}
-	default:
-		suffix = expression
-	}
-	resolved := base
-	if suffix != "" {
-		resolved = pathpkg.Join(base, suffix)
-	}
-	if !safeRemotePath(resolved) {
-		return "", invalidRootFolder("workspace resolves to an unsafe path")
-	}
-	return resolved, nil
-}
-
-func validateWorkspacePrivateLayout(home, workspace, privateRoot, runtimeID, expression string) error {
+func validateWorkspacePrivateLayout(home, workspace, privateRoot, sessionID, expression string) error {
 	if workspace == privateRoot || strings.HasPrefix(workspace, privateRoot+"/") {
-		return invalidRootFolder("workspace resolves inside the private runtime directory")
+		return invalidRootFolder("workspace resolves inside the private session directory")
 	}
 	if !strings.HasPrefix(privateRoot, workspace+"/") {
 		return nil
 	}
-	// HOME is an explicitly supported workspace. Its private state is safe only
-	// at the exact hidden runtime path.
-	expected := pathpkg.Join(home, ".cybershuttle", "runtimes", runtimeID)
+	expected := pathpkg.Join(home, defaultSessionBase, sessionID)
 	if workspace == home && homeRootExpression(expression) && privateRoot == expected {
 		return nil
 	}
-	return invalidRootFolder("workspace may contain private runtime state only at $HOME/.cybershuttle/runtimes/{runtimeId}")
-}
-
-func oneRemotePath(output string) (string, error) {
-	value := strings.TrimSuffix(output, "\n")
-	if value == "" || strings.ContainsAny(value, "\r\n") || !safeRemotePath(value) {
-		return "", errors.New("not one safe absolute path")
-	}
-	return value, nil
-}
-
-func safeRemotePath(value string) bool {
-	return remotePathPattern.MatchString(value) && pathpkg.Clean(value) == value && value != "/"
-}
-
-// A remote executable may be anchored at $HOME, so one setting serves hosts
-// whose accounts do not share a home directory. Discovery resolves the anchor
-// before the path reaches a script.
-func safeRemoteExecutable(value string) bool {
-	if rest, anchored := strings.CutPrefix(value, "$HOME/"); anchored {
-		return safeRemotePath("/" + rest)
-	}
-	return safeRemotePath(value) && strings.HasPrefix(value, "/")
-}
-
-func resolveRemoteExecutable(value, home string) string {
-	rest, anchored := strings.CutPrefix(value, "$HOME/")
-	if !anchored {
-		return value
-	}
-	return pathpkg.Join(home, rest)
-}
-
-func homeRootExpression(value string) bool {
-	switch value {
-	case ".", "~", "$HOME", "${HOME}":
-		return true
-	default:
-		return false
-	}
-}
-
-func boundedOptionalRuntimeError(err error) string {
-	if err == nil {
-		return ""
-	}
-	return boundedRuntimeError(err)
-}
-
-func boundedRuntimeError(err error) string {
-	return truncateUTF8(strings.ToValidUTF8(err.Error(), "�"), maxRuntimeError)
-}
-
-// truncateUTF8 cuts value to at most limit bytes without splitting a rune.
-func truncateUTF8(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	value = value[:limit]
-	for !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
+	return invalidRootFolder("workspace may contain private session state only at $HOME/.cybershuttle/sessions/{sessionId}")
 }

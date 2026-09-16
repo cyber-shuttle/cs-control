@@ -1,67 +1,74 @@
-// Package control is the runtime domain: the allocation state machine, its
-// durable store, scheduler reconciliation, Slurm discovery, the batch script,
-// the generation credential store, the bounded runtime log, and the HTTP
-// surface that serves them.
+// Package control is the session domain: the state machine, its store, reconciliation, discovery, and HTTP surface.
+// It reaches outside only through composed subsystems it never bypasses.
+// sshexec runs remote commands, sshconfig reads host config, devtunnel owns tunnels, authn owns identity.
 //
-// Everything it needs from outside is a composed subsystem it never reaches
-// past: sshexec runs remote commands, sshconfig reads ~/.ssh/config, devtunnel
-// owns the Dev Tunnels API, authn owns identity, gateway serves the SSH
-// authentication socket, and safeio, httpx and apierr hold the primitives they
-// share.
+//	gres, partition, resource
+//	resources, createRequest, tunnelMetadata, sessionResponse, Session
+//	sessionList, publicSessions
+//	sessionAccessResponse, sessionJupyterAccess, validationResult, preparedSession, commandResult, state
+//	Config, Store, Service
+//	hostConfigDirName, detached
 package control
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
+	"github.com/cyber-shuttle/cs-control/internal/credentialstore"
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
+	"github.com/cyber-shuttle/cs-control/internal/safeio"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
 const (
-	stateVersion           = 5
-	maxRuntimeError        = 4096
+	stateVersion           = 6
+	maxSessionError        = 4096
 	controlPortDescription = "cybershuttle-control"
 	jupyterPortDescription = "cybershuttle-jupyter"
 	tunnelCleanupGrace     = 15 * time.Minute
 )
 
 var (
-	namePattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
-	idPattern         = regexp.MustCompile(`^rt-[a-f0-9]{12}$`)
+	idPattern         = regexp.MustCompile(`^s-[a-f0-9]{12}$`)
+	generationPattern = regexp.MustCompile(`^g-[a-f0-9]{16}$`)
 	jobPattern        = regexp.MustCompile(`^[0-9]+$`)
-	nodePattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$`)
 	remotePathPattern = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 	workspaceVar      = regexp.MustCompile(`^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})(?:/(.*))?$`)
 	workspaceSegment  = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
 
-type GRES struct {
+type gres struct {
 	Name  string `json:"name"`
 	Count int    `json:"count"`
 }
 
-type Partition struct {
+type partition struct {
 	Name     string `json:"name"`
 	CPUCount int    `json:"cpuCount"`
 	MemoryMB int    `json:"memoryMb"`
-	GRES     []GRES `json:"gres"`
+	GRES     []gres `json:"gres"`
 }
 
-type Resource struct {
+type resource struct {
 	Host       string      `json:"host"`
 	Accounts   []string    `json:"accounts"`
-	Partitions []Partition `json:"partitions"`
+	Partitions []partition `json:"partitions"`
 	HomeDir    string      `json:"homeDir"`
 }
 
-type Resources struct {
+type resources struct {
 	Cores       int    `json:"cores"`
 	MemoryMB    int    `json:"memoryMb"`
 	WallMinutes int    `json:"wallMinutes"`
@@ -69,27 +76,24 @@ type Resources struct {
 	GPUCount    int    `json:"gpuCount,omitempty"`
 }
 
-type CreateRequest struct {
-	ID string `json:"-"`
-	// Unexported: only Start sets it, never a caller.
+type createRequest struct {
+	ID             string `json:"-"`
 	relaunch       bool
 	IdempotencyKey string    `json:"idempotencyKey,omitempty"`
 	SSHHost        string    `json:"sshHost"`
 	Account        string    `json:"account,omitempty"`
 	Partition      string    `json:"partition"`
 	RootFolder     string    `json:"rootFolder"`
-	Resources      Resources `json:"resources"`
+	Resources      resources `json:"resources"`
 }
 
-type TunnelMetadata struct {
+type tunnelMetadata struct {
 	ID        string    `json:"id"`
 	ClusterID string    `json:"clusterId"`
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// RuntimeResponse is the narrow allocation state exposed to browser clients.
-// Runtime embeds it, so a field is public exactly when it is declared here.
-type RuntimeResponse struct {
+type sessionResponse struct {
 	ID         string    `json:"id"`
 	Generation string    `json:"generation"`
 	State      string    `json:"state"`
@@ -97,20 +101,17 @@ type RuntimeResponse struct {
 	Account    string    `json:"account,omitempty"`
 	Partition  string    `json:"partition"`
 	RootFolder string    `json:"rootFolder"`
-	Resources  Resources `json:"resources"`
+	Resources  resources `json:"resources"`
 	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
-	// When Slurm was first seen running this allocation, and so what --time is
-	// measured from. Absent until it starts, so a client can tell a queue wait
-	// from a countdown.
-	StartedAt time.Time `json:"startedAt,omitzero"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	StartedAt  time.Time `json:"startedAt,omitzero"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
-type Runtime struct {
-	RuntimeResponse
+type Session struct {
+	sessionResponse
 	Owner         authn.Principal `json:"owner"`
-	Tunnel        TunnelMetadata  `json:"tunnel"`
+	Tunnel        tunnelMetadata  `json:"tunnel"`
 	JobID         string          `json:"jobId,omitempty"`
 	JobName       string          `json:"jobName"`
 	Node          string          `json:"node,omitempty"`
@@ -118,33 +119,33 @@ type Runtime struct {
 	WorkspaceRoot string          `json:"workspaceRoot"`
 }
 
-type RuntimeList struct {
-	Runtimes []RuntimeResponse `json:"runtimes"`
-	Logs     []RuntimeLogTail  `json:"logs"`
+type sessionList struct {
+	Sessions []sessionResponse `json:"sessions"`
+	Logs     []sessionLogTail  `json:"logs"`
 }
 
-func publicRuntimes(runtimes []Runtime) []RuntimeResponse {
-	result := make([]RuntimeResponse, len(runtimes))
-	for index := range runtimes {
-		result[index] = runtimes[index].RuntimeResponse
+func publicSessions(sessions []Session) []sessionResponse {
+	result := make([]sessionResponse, len(sessions))
+	for index := range sessions {
+		result[index] = sessions[index].sessionResponse
 	}
 	return result
 }
 
-type RuntimeAccessResponse struct {
-	RuntimeID  string               `json:"runtimeId"`
+type sessionAccessResponse struct {
+	SessionID  string               `json:"sessionId"`
 	Generation string               `json:"generation"`
 	ExpiresAt  time.Time            `json:"expiresAt"`
-	Jupyter    RuntimeJupyterAccess `json:"jupyter"`
+	Jupyter    sessionJupyterAccess `json:"jupyter"`
 }
 
-type RuntimeJupyterAccess struct {
+type sessionJupyterAccess struct {
 	URI   string `json:"uri"`
 	Token string `json:"token"`
 }
 
-type ValidationResult struct {
-	RuntimeID string `json:"runtimeId"`
+type validationResult struct {
+	SessionID string `json:"sessionId"`
 	Script    string `json:"script"`
 	Status    string `json:"status"`
 	Message   string `json:"message"`
@@ -152,15 +153,10 @@ type ValidationResult struct {
 	Stderr    string `json:"stderr,omitempty"`
 }
 
-type preparedRuntime struct {
-	request CreateRequest
-	runtime Runtime
-	script  string
-	// The account's own home: the interpreter a runtime starts is a tool of the
-	// account, not of the workspace it opens.
-	home string
-	// Where Linkspan belongs, $HOME already resolved, so provisioning and the
-	// script name the same file.
+type preparedSession struct {
+	session  Session
+	script   string
+	home     string
 	linkspan string
 }
 
@@ -172,30 +168,22 @@ type commandResult struct {
 
 type state struct {
 	Version  int                 `json:"version"`
-	Runtimes map[string]*Runtime `json:"runtimes"`
-	// What finished allocations did, newest first. Absent in a file written
-	// before runs were kept, which is a history of none rather than a fault.
-	Runs []RunRecord `json:"runs,omitempty"`
+	Sessions map[string]*Session `json:"sessions"`
+	Runs     []runRecord         `json:"runs,omitempty"`
 }
 
-// DefaultLinkspanPath is where a runtime installs Linkspan when a host has none.
 const DefaultLinkspanPath = "$HOME/.cybershuttle/bin/linkspan"
 
-// defaultRuntimeBase is a runtime's private state, relative to the account's home.
-const defaultRuntimeBase = ".cybershuttle/runtimes"
+const defaultSessionBase = ".cybershuttle/sessions"
 
-// The smallest allocation worth scheduling. cs-jupyter's create form offers the
-// same floor; keep the two in step.
 const (
-	MinCores    = 2
-	MinMemoryMB = 4096
+	minCores    = 2
+	minMemoryMB = 4096
 )
 
 type Config struct {
 	LinkspanPath string
-	// Where each principal's own SSH host configuration lives. One directory per
-	// caller, so an alias one of them adds is invisible to the rest.
-	HostsDir string
+	HostsDir     string
 }
 
 type Store struct {
@@ -203,70 +191,100 @@ type Store struct {
 }
 
 type Service struct {
-	Runner      sshexec.Runner
-	Store       Store
-	Config      Config
-	Logs        *RuntimeLogs
-	Metrics     *RuntimeMetrics
-	Tunnels     devtunnel.Manager
-	Credentials CredentialStore
-	Now         func() time.Time
+	Runner           sshexec.Runner
+	Store            Store
+	Config           Config
+	Logs             *sessionLogs
+	Metrics          *sessionMetrics
+	Tunnels          devtunnel.Manager
+	Credentials      credentialstore.Store
+	HostPreparations *sync.Map
+	Now              func() time.Time
 }
 
-func (s Service) SSHConfig() sshconfig.Config { return s.Runner.Hosts }
-
-// hostConfigDirName is a stable, filesystem-safe name for a principal. The
-// subject is an identifier from another system and never becomes a path.
 func hostConfigDirName(principal authn.Principal) string {
 	sum := sha256.Sum256([]byte(principal.Subject + "\x00" + principal.Tenant))
 	return hex.EncodeToString(sum[:16])
 }
 
-// forPrincipal binds every SSH operation to one caller's own host configuration.
-// Composed rather than threaded: the service is copied with its runner pointed at
-// that caller's file, so each existing call site keeps naming s.Runner and reaches
-// only what the caller configured.
+func detached(session *Session) *Session {
+	value := *session
+	return &value
+}
+
+func (s Service) sshConfig() sshconfig.Config { return s.Runner.Hosts }
+
 func (s Service) forPrincipal(principal authn.Principal) Service {
 	scoped := s
-	// SystemPath is deliberately dropped with it: /etc/ssh/ssh_config is this
-	// machine's, and nothing on this machine is any caller's by default.
 	scoped.Runner.Hosts = sshconfig.Config{UserPath: s.hostConfigPath(principal)}
 	return scoped
 }
 
 func (s Service) hostConfigPath(principal authn.Principal) string {
 	if s.Config.HostsDir == "" {
-		return ""
+		return os.DevNull
 	}
 	return filepath.Join(s.Config.HostsDir, hostConfigDirName(principal), "config")
 }
 
-func (s Service) effectiveConfig() Config {
-	cfg := s.Config
-	if !safeRemoteExecutable(cfg.LinkspanPath) {
-		cfg.LinkspanPath = DefaultLinkspanPath
+func (s Service) linkspanPath() string {
+	if !safeRemoteExecutable(s.Config.LinkspanPath) {
+		return DefaultLinkspanPath
 	}
-	return cfg
+	return s.Config.LinkspanPath
 }
 
 var (
-	errRuntimeNotFound  = apierr.New("runtime_not_found", "runtime not found", 404)
-	errOwnerMismatch    = apierr.New("runtime_owner_mismatch", "runtime is owned by another principal", 403)
-	errRuntimeRunning   = apierr.New("runtime_running", "runtime is still running; stop it before running it again", 409)
-	errRouteNotFound    = apierr.New("not_found", "route not found", 404)
-	errMethodNotAllowed = apierr.New("method_not_allowed", "method not allowed", 405)
+	errSessionNotFound     = apierr.New("session_not_found", "session not found", http.StatusNotFound)
+	errOwnerMismatch       = apierr.New("session_owner_mismatch", "session is owned by another principal", http.StatusForbidden)
+	errSessionRunning      = apierr.New("session_running", "session is still running; stop it before running it again", http.StatusConflict)
+	errIdempotencyConflict = apierr.New("idempotency_conflict", "idempotency key was already used for another request", http.StatusConflict)
+	errRouteNotFound       = apierr.New("not_found", "route not found", http.StatusNotFound)
+	errMethodNotAllowed    = apierr.New("method_not_allowed", "method not allowed", http.StatusMethodNotAllowed)
 )
-
-// Everything answering a caller returns one of these, so no response shares
-// memory with the state the lock protects.
-func detached(runtime *Runtime) *Runtime {
-	value := *runtime
-	return &value
-}
 
 func (s Service) now() time.Time {
 	if s.Now != nil {
 		return s.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (s Store) withLock(fn func(*state) error) error {
+	if s.Dir == "" {
+		return errors.New("state directory is required")
+	}
+	return safeio.WithFileLock(filepath.Join(s.Dir, ".lock"), func() error {
+		current, err := s.load()
+		if err != nil {
+			return err
+		}
+		return fn(current)
+	})
+}
+
+func (s Store) load() (*state, error) {
+	data, err := os.ReadFile(filepath.Join(s.Dir, "state.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return &state{Version: stateVersion, Sessions: map[string]*Session{}}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var current state
+	if err := json.Unmarshal(data, &current); err != nil {
+		return nil, fmt.Errorf("read state: %w", err)
+	}
+	if current.Version != stateVersion || current.Sessions == nil {
+		return nil, errors.New("unsupported state file")
+	}
+	return &current, nil
+}
+
+func (s Store) save(current *state) error {
+	data, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return err
+	}
+	return safeio.ReplaceFile(filepath.Join(s.Dir, "state.json"), append(data, '\n'))
 }

@@ -1,182 +1,245 @@
+// A run is recorded once a session first reaches a terminal state, keeping its final window and narration.
+// Each generation gets its own run, and history is filtered to its owner and bounded.
+// This file also covers the sacct accounting parser reading a finished job's usage.
+//
+//	runsIn
+//	Test*
 package control
 
 import (
 	"context"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/cyber-shuttle/cs-control/internal/sshexec"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
-func runsIn(t *testing.T, service Service) []RunRecord {
+const sacctRows = `12345|4|8192000K|3600|14400|||
+12345.batch|4|8192000K|3600|14400|4096000K|02:00:00
+12345.extern|4|8192000K|3600|14400|4K|00:00:00`
+
+func runsIn(t *testing.T, service Service) []runRecord {
 	t.Helper()
-	runs, err := service.ListRuns(testPrincipal)
-	if err != nil {
-		t.Fatal(err)
-	}
+	runs, err := service.listRuns(testPrincipal)
+	testutil.Check(t, err)
 	return runs
 }
 
-// The reconciliation that first sees a terminal state is the last moment the
-// allocation's own sample window still describes it, so that is where the run
-// is frozen -- and it must survive the delete that drops the runtime beside it.
-func TestAFinishedAllocationIsRecordedAndOutlivesItsRuntime(t *testing.T) {
+func TestARunOutlivesTheSessionThatEnded(t *testing.T) {
 	service, _, _ := reconciliationService(t)
-	service.Metrics = NewRuntimeMetrics()
-	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	runtime.State = "READY"
-	putRuntimes(t, service, runtime)
+	session := pendingSession("s-111111111111", "alpha", "101")
+	session.State = "READY"
+	putSessions(t, service, session)
 	used := int64(4096)
-	service.Metrics.Append(runtime.ID, MetricSample{At: time.Now(), MemBytes: &used})
+	service.Metrics.Append(session.ID, metricSample{At: time.Now(), MemBytes: &used})
 
-	t.Setenv("FAKE_STATUS_LINES", "101|COMPLETED|node1|"+runtime.JobName+"|3600")
-	if err := service.ReconcileAll(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("FAKE_STATUS_LINES", "101|COMPLETED|node1|"+session.JobName+"|3600")
+	testutil.Check(t, service.reconcileAll(context.Background()))
 	runs := runsIn(t, service)
-	if len(runs) != 1 || runs[0].FinalState != "STOPPED" || runs[0].RuntimeID != runtime.ID {
-		t.Fatalf("a finished allocation left no usable record: %+v", runs)
+	if len(runs) != 1 || runs[0].FinalState != "STOPPED" || runs[0].SessionID != session.ID {
+		t.Fatalf("a finished session left no usable record: %+v", runs)
 	}
-	// The window is process-local and about to be dropped, so it rides along.
 	if len(runs[0].Samples) != 1 || *runs[0].Samples[0].MemBytes != used {
 		t.Fatalf("the sample window did not travel with the run: %+v", runs[0].Samples)
 	}
-	if got := service.Metrics.Series(runtime.ID); len(got) != 0 {
-		t.Fatalf("a finished allocation kept its live window: %+v", got)
+	if got := service.Metrics.Series(session.ID); len(got) != 0 {
+		t.Fatalf("a finished session kept its live window: %+v", got)
 	}
+	endedAt := runs[0].EndedAt
 
-	// Reconciling again must not write the run a second time.
-	if err := service.ReconcileAll(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, service.reconcileAll(context.Background()))
 	if runs := runsIn(t, service); len(runs) != 1 {
 		t.Fatalf("the same run was recorded %d times", len(runs))
+	} else if !runs[0].EndedAt.Equal(endedAt) {
+		t.Fatalf("a later reconcile moved EndedAt from %s to %s, the terminal transition's own time", endedAt, runs[0].EndedAt)
 	}
 }
 
-// A run belongs to the generation that ran it, not to the card: a caller's
-// history keeps both, and each carries what its own allocation asked for.
 func TestEachGenerationIsItsOwnRun(t *testing.T) {
 	service, _, _ := reconciliationService(t)
-	service.Metrics = NewRuntimeMetrics()
-	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	runtime.State = "STOPPED"
-	setTestRuntimeMetadata(&runtime)
-	if err := service.RecordRun(&runtime); err != nil {
-		t.Fatal(err)
-	}
-	second := runtime
+	session := pendingSession("s-111111111111", "alpha", "101")
+	session.State = "STOPPED"
+	setTestSessionMetadata(&session)
+	testutil.Check(t, service.freezeRun(&session))
+	second := session
 	second.Generation = "g-fedcba9876543210"
 	second.Resources.Cores = 8
-	if err := service.RecordRun(&second); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, service.freezeRun(&second))
 	runs := runsIn(t, service)
 	if len(runs) != 2 {
 		t.Fatalf("a relaunch overwrote the previous run: %+v", runs)
 	}
-	// Newest first, so the history reads as it happened.
 	if runs[0].Generation != second.Generation || runs[0].Resources.Cores != 8 {
-		t.Fatalf("the newest run is not first, or lost its own allocation: %+v", runs[0])
+		t.Fatalf("the newest run is not first, or lost its own session: %+v", runs[0])
 	}
-	if err := service.RecordRun(&second); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, service.freezeRun(&second))
 	if runs := runsIn(t, service); len(runs) != 2 {
 		t.Fatalf("recording the same generation twice kept %d runs", len(runs))
 	}
 }
 
-// The history is one caller's own, like the runtime list.
 func TestRunHistoryIsFilteredToItsOwner(t *testing.T) {
 	service, _, _ := reconciliationService(t)
-	service.Metrics = NewRuntimeMetrics()
-	mine := pendingRuntime("rt-111111111111", "alpha", "101")
-	setTestRuntimeMetadata(&mine)
-	theirs := pendingRuntime("rt-222222222222", "alpha", "102")
-	setTestRuntimeMetadata(&theirs)
+	mine := pendingSession("s-111111111111", "alpha", "101")
+	mine.State = "STOPPED"
+	setTestSessionMetadata(&mine)
+	theirs := pendingSession("s-222222222222", "alpha", "102")
+	theirs.State = "STOPPED"
+	setTestSessionMetadata(&theirs)
 	theirs.Owner.Subject = "someone-else"
-	for _, runtime := range []*Runtime{&mine, &theirs} {
-		if err := service.RecordRun(runtime); err != nil {
-			t.Fatal(err)
-		}
+	for _, session := range []*Session{&mine, &theirs} {
+		testutil.Check(t, service.freezeRun(session))
 	}
 	runs := runsIn(t, service)
-	if len(runs) != 1 || runs[0].RuntimeID != mine.ID {
+	if len(runs) != 1 || runs[0].SessionID != mine.ID {
 		t.Fatalf("the history is not the caller's own: %+v", runs)
 	}
 }
 
-// A card outlives its allocations and a machine accumulates cards, so the
-// history is bounded rather than growing with use.
-// A card that stopped days ago and is run again today did not finish today. The
-// relaunch used to restamp the previous run as having just ended, which made a
-// long-finished run read as the live one.
-func TestARunKeepsTheTimeItActuallyEnded(t *testing.T) {
+func TestARunKeepsTheNarrationAndTheSessionLosesIt(t *testing.T) {
 	service, _, _ := reconciliationService(t)
-	service.Metrics = NewRuntimeMetrics()
-	stopped := pendingRuntime("rt-111111111111", "alpha", "101")
-	stopped.State = "STOPPED"
-	ended := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	stopped.UpdatedAt = ended
-	setTestRuntimeMetadata(&stopped)
+	session := pendingSession("s-111111111111", "alpha", "101")
+	session.State = "READY"
+	putSessions(t, service, session)
+	service.Logs.Append(session.ID, "Session is running", service.now())
 
-	if err := service.RecordRun(&stopped); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("FAKE_STATUS_LINES", "101|COMPLETED|node1|"+session.JobName+"|3600")
+	testutil.Check(t, service.reconcileAll(context.Background()))
 	runs := runsIn(t, service)
-	if len(runs) != 1 {
-		t.Fatalf("expected one run, got %d", len(runs))
-	}
-	if !runs[0].EndedAt.Equal(ended) {
-		t.Fatalf("run ended at %s, want the terminal transition at %s", runs[0].EndedAt, ended)
-	}
-}
-
-// What a runtime said belongs to the run that said it: the live tail is
-// process-local and dropped the moment the run ends, so a card that is no
-// longer running has no log and its run carries the whole of it.
-func TestARunKeepsTheNarrationAndTheCardLosesIt(t *testing.T) {
-	service, _, _ := reconciliationService(t)
-	service.Metrics = NewRuntimeMetrics()
-	runtime := pendingRuntime("rt-111111111111", "alpha", "101")
-	runtime.State = "READY"
-	putRuntimes(t, service, runtime)
-	service.Logs.Append(runtime.ID, "Allocation is running")
-
-	t.Setenv("FAKE_STATUS_LINES", "101|COMPLETED|node1|"+runtime.JobName+"|3600")
-	if err := service.ReconcileAll(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	runs := runsIn(t, service)
-	if len(runs) != 1 {
-		t.Fatalf("expected one run, got %d", len(runs))
-	}
+	testutil.Equal(t, len(runs), 1, "run count")
 	if len(runs[0].Logs) == 0 {
-		t.Fatal("the run kept none of what the allocation said")
+		t.Fatal("the run kept none of what the session said")
 	}
 	var found bool
 	for _, line := range runs[0].Logs {
-		if line.Text == "Allocation is running" {
+		if line.Text == "Session is running" {
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("the run lost the narration: %+v", runs[0].Logs)
 	}
-	// The card is over, so nothing live remains to show beside its run.
-	if _, ok := service.Logs.Tail(runtime.ID); ok {
-		t.Fatal("a finished runtime kept its live tail")
+	if _, ok := service.Logs.Tail(session.ID); ok {
+		t.Fatal("a finished session kept its live tail")
 	}
 }
 
 func TestRunHistoryIsBounded(t *testing.T) {
-	current := &state{Version: stateVersion, Runtimes: map[string]*Runtime{}}
+	current := &state{Version: stateVersion, Sessions: map[string]*Session{}}
 	for index := 0; index < maxRunRecords+10; index++ {
-		recordRun(current, RunRecord{RunResponse: RunResponse{
-			RuntimeID: "rt-111111111111", Generation: "g-" + strconv.Itoa(index),
+		recordRun(current, runRecord{runResponse: runResponse{
+			SessionID: "s-111111111111", Generation: "g-" + strconv.Itoa(index),
 		}})
 	}
-	if len(current.Runs) != maxRunRecords {
-		t.Fatalf("history grew to %d records", len(current.Runs))
+	testutil.Equal(t, len(current.Runs), maxRunRecords, "run history length")
+}
+
+func TestParseSacctUtilReadsUsageFromTheBatchStep(t *testing.T) {
+	stats := parseSacctUtil(sacctRows)
+	if stats.Cores != 4 || stats.ElapsedSeconds != 3600 {
+		t.Fatalf("session figures came from the wrong row: %+v", stats)
+	}
+	if stats.RequestedMemory != "7.8 GB" || stats.MaxRSS != "3.9 GB" {
+		t.Fatalf("memory was not read in KiB from the right rows: %+v", stats)
+	}
+	if stats.CPUEfficiencyPct < 49.9 || stats.CPUEfficiencyPct > 50.1 {
+		t.Fatalf("CPU efficiency = %v, want ~50", stats.CPUEfficiencyPct)
+	}
+	if stats.MemoryEfficiencyPct < 49.9 || stats.MemoryEfficiencyPct > 50.1 {
+		t.Fatalf("memory efficiency = %v, want ~50", stats.MemoryEfficiencyPct)
+	}
+	if !stats.Complete() {
+		t.Fatal("a row carrying a peak reads as incomplete")
+	}
+}
+
+func TestParseSacctUtilTreatsAnUnflushedRowAsIncomplete(t *testing.T) {
+	stats := parseSacctUtil("12345|4|8192000K|3600|14400||\n12345.batch|4|8192000K|3600|14400||00:00:00")
+	if stats.Complete() {
+		t.Fatalf("an unflushed row reads as a finished report: %+v", stats)
+	}
+	if stats.CPUEfficiencyPct != 0 || stats.MaxRSS != "" {
+		t.Fatalf("an unflushed row invented figures: %+v", stats)
+	}
+	if stats.Cores != 4 || stats.ElapsedSeconds != 3600 {
+		t.Fatalf("what the session asked for is known regardless: %+v", stats)
+	}
+	if stats := parseSacctUtil("\n  \n"); stats != (runStats{}) {
+		t.Fatalf("empty accounting produced %+v", stats)
+	}
+}
+
+func TestReadRunStatsBoundsSacctByTheRunsStartTimeNotSacctsMidnightDefault(t *testing.T) {
+	ssh, _, _ := fakeSSH(t)
+	runStatsLog := filepath.Join(t.TempDir(), "run-stats")
+	t.Setenv("FAKE_RUN_STATS_LOG", runStatsLog)
+	t.Setenv("FAKE_RUN_STATS_OUTPUT", sacctRows)
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second, ControlNamespace: filepath.Join(t.TempDir(), "masters")}}
+
+	startedAt := time.Now().Add(-36 * time.Hour)
+	stats, err := service.readRunStats(context.Background(), "alpha", "job-name", startedAt)
+	testutil.Check(t, err)
+	if !stats.Complete() {
+		t.Fatalf("stats did not parse: %+v", stats)
+	}
+	sent := string(mustRead(t, runStatsLog))
+	match := regexp.MustCompile(`--starttime=now-(\d+)seconds`).FindStringSubmatch(sent)
+	if match == nil {
+		t.Fatalf("run stats did not bound sacct by a lookback, letting it default to midnight: %s", sent)
+	}
+	seconds, err := strconv.ParseInt(match[1], 10, 64)
+	testutil.Check(t, err)
+	if want := int64((36 * time.Hour).Seconds()); seconds < want {
+		t.Fatalf("lookback of %d seconds does not reach the run's start, 36 hours ago", seconds)
+	}
+}
+
+func TestCompleteRunStatsGivesEachPendingRunItsOwnTimeout(t *testing.T) {
+	ssh, _, _ := fakeSSH(t)
+	sleepOnce := filepath.Join(t.TempDir(), "sacct-slept-once")
+	t.Setenv("FAKE_RUN_STATS_SLEEP_ONCE", sleepOnce)
+	t.Setenv("FAKE_RUN_STATS_SLEEP_SECONDS", "2")
+	t.Setenv("FAKE_RUN_STATS_OUTPUT", sacctRows)
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{HostsDir: filepath.Join(t.TempDir(), "hosts")}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	registerTestHosts(t, service, testPrincipal, "delta")
+	slow := runRecord{runResponse: runResponse{SessionID: "s-111111111111", Generation: "g-0000000000000001", SSHHost: "delta", EndedAt: service.now()}, Owner: testPrincipal}
+	fast := runRecord{runResponse: runResponse{SessionID: "s-222222222222", Generation: "g-0000000000000002", SSHHost: "delta", EndedAt: service.now()}, Owner: testPrincipal}
+	if err := service.Store.withLock(func(current *state) error {
+		current.Runs = []runRecord{slow, fast}
+		return service.Store.save(current)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.completeRunStats()
+
+	runs := runsIn(t, service)
+	var gotFast bool
+	for _, run := range runs {
+		if run.Generation == fast.Generation {
+			gotFast = run.Stats != nil
+		}
+	}
+	if !gotFast {
+		t.Fatal("a slow run starved the timeout of the pending run behind it")
+	}
+}
+
+func TestHMSSecondsReadsSlurmDurations(t *testing.T) {
+	for text, want := range map[string]float64{
+		"02:00:00":   7200,
+		"1-00:00:00": 86400,
+		"05:30":      330,
+		"":           0,
+		"not-a-time": 0,
+		"00:00:00":   0,
+	} {
+		if got := hmsSeconds(text); got != want {
+			t.Errorf("hmsSeconds(%q) = %v, want %v", text, got, want)
+		}
 	}
 }

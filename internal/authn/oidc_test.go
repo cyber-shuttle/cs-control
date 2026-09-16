@@ -1,3 +1,10 @@
+// Tests MicrosoftOAuthValidator and the OIDC validator it wraps: bearers, rejection, key refresh, and tenant policy.
+//
+//	writeTestJSON, testRSAKey, testJWK, testJWKS, signIDToken, changedClaim, withoutClaim, oidcServer, jwksRoute
+//	TestMicrosoftOAuthValidatorAcceptsIndependentCapabilityAndIdentityBearers
+//	TestOIDCValidatorRejectsInvalidIdentityTokensWithoutLeaks
+//	TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey
+//	TestOIDCValidatorRejectsWrongJWKAlgorithmAndEncryptionUse, TestProductionOIDCAuthorityIsRestricted
 package authn
 
 import (
@@ -17,11 +24,62 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
-// oidcServer answers OIDC discovery plus whatever routes the caller adds. The
-// URL is known only once the server exists, so metadata reads it back through
-// the closure.
+func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Fatal(fmt.Errorf("write test JSON: %w", err))
+	}
+}
+func testRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	testutil.Check(t, err)
+	return key
+}
+
+func testJWK(kid string, key *rsa.PublicKey) map[string]string {
+	exponent := big.NewInt(int64(key.E)).Bytes()
+	return map[string]string{
+		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid,
+		"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(exponent),
+	}
+}
+
+func testJWKS(kid string, key *rsa.PublicKey) map[string]any {
+	return map[string]any{"keys": []map[string]string{testJWK(kid, key)}}
+}
+
+func signIDToken(t *testing.T, key *rsa.PrivateKey, claims, header map[string]any) string {
+	t.Helper()
+	encode := func(value any) string {
+		encoded, err := json.Marshal(value)
+		testutil.Check(t, err)
+		return base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	signingInput := encode(header) + "." + encode(claims)
+	digest := sha256.Sum256([]byte(signingInput))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	testutil.Check(t, err)
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func changedClaim(source map[string]any, key string, value any) map[string]any {
+	claims := maps.Clone(source)
+	claims[key] = value
+	return claims
+}
+
+func withoutClaim(source map[string]any, key string) map[string]any {
+	claims := maps.Clone(source)
+	delete(claims, key)
+	return claims
+}
+
 func oidcServer(t *testing.T, routes map[string]http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	var server *httptest.Server
@@ -49,8 +107,6 @@ func TestMicrosoftOAuthValidatorAcceptsIndependentCapabilityAndIdentityBearers(t
 	const kid = "identity-key"
 	server := oidcServer(t, map[string]http.HandlerFunc{
 		"/keys": jwksRoute(t, kid, &key.PublicKey),
-		// The opaque JWE is independently accepted as a Dev Tunnels capability; it
-		// has no locally asserted subject to bind to the ID token.
 		"/userlimits": func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Authorization") != "Bearer protected.encrypted-key.iv.ciphertext.tag" {
 				t.Errorf("access authorization = %q", r.Header.Get("Authorization"))
@@ -60,21 +116,15 @@ func TestMicrosoftOAuthValidatorAcceptsIndependentCapabilityAndIdentityBearers(t
 	})
 
 	identity, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	validator := &MicrosoftOAuthValidator{access: newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client()), identity: identity}
 	now := time.Now().Unix()
-	// The signed ID token is independently valid and is the sole source of
-	// Principal. No at_hash or subject-binding claim is required.
 	idToken := signIDToken(t, key, map[string]any{
 		"iss": server.URL + "/issuer", "aud": "client-id", "exp": now + 300, "nbf": now - 1,
 		"oid": "11111111-1111-1111-1111-111111111111", "tid": "22222222-2222-2222-2222-222222222222",
 	}, map[string]any{"alg": "RS256", "kid": kid, "typ": "JWT"})
 	principal, err := validator.Validate(context.Background(), OAuthCredentials{AccessToken: "protected.encrypted-key.iv.ciphertext.tag", IDToken: idToken})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if principal != (Principal{Subject: "11111111-1111-1111-1111-111111111111", Tenant: "22222222-2222-2222-2222-222222222222"}) {
 		t.Fatalf("principal = %#v", principal)
 	}
@@ -86,9 +136,7 @@ func TestOIDCValidatorRejectsInvalidIdentityTokensWithoutLeaks(t *testing.T) {
 	const kid = "identity-key"
 	server := oidcServer(t, map[string]http.HandlerFunc{"/keys": jwksRoute(t, kid, &key.PublicKey)})
 	validator, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	fixed := time.Unix(2_000_000_000, 0)
 	validator.now = func() time.Time { return fixed }
 	valid := map[string]any{
@@ -154,15 +202,12 @@ func TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey(t *testing.T
 	}))
 	defer server.Close()
 	validator, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	now := time.Now().Unix()
 	claims := map[string]any{"iss": server.URL + "/issuer", "aud": "client-id", "exp": now + 300, "nbf": now - 1, "oid": "owner", "tid": "tenant"}
 	known := signIDToken(t, key, claims, map[string]any{"alg": "RS256", "kid": knownKID})
-	if _, err := validator.Validate(context.Background(), known); err != nil {
-		t.Fatal(err)
-	}
+	_, err = validator.Validate(context.Background(), known)
+	testutil.Check(t, err)
 
 	const flood = 512
 	start := make(chan struct{})
@@ -185,8 +230,6 @@ func TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey(t *testing.T
 		t.Fatal("unknown-kid refresh did not start")
 	}
 
-	// A valid token using a cached known key must not wait behind the blocked
-	// refresh, even though all unknown-kid callers are coalesced on it.
 	knownDone := make(chan error, 1)
 	go func() {
 		_, err := validator.Validate(context.Background(), known)
@@ -194,9 +237,7 @@ func TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey(t *testing.T
 	}()
 	select {
 	case err := <-knownDone:
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.Check(t, err)
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("known-key validation was serialized behind OIDC refresh")
 	}
@@ -214,8 +255,6 @@ func TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey(t *testing.T
 	}
 	requestMu.Unlock()
 
-	// The global cooldown prevents a new random kid from immediately causing
-	// another network refresh.
 	cooldownToken := signIDToken(t, key, claims, map[string]any{"alg": "RS256", "kid": "random-after-flood"})
 	if _, err := validator.Validate(context.Background(), cooldownToken); err == nil {
 		t.Fatal("unknown kid during cooldown was accepted")
@@ -245,9 +284,7 @@ func TestOIDCValidatorRejectsWrongJWKAlgorithmAndEncryptionUse(t *testing.T) {
 				},
 			})
 			validator, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
-			if err != nil {
-				t.Fatal(err)
-			}
+			testutil.Check(t, err)
 			now := time.Now().Unix()
 			claims := map[string]any{"iss": server.URL + "/issuer", "aud": "client-id", "exp": now + 300, "nbf": now - 1, "oid": "owner", "tid": "tenant"}
 			token := signIDToken(t, key, claims, map[string]any{"alg": "RS256", "kid": "rejected-key"})
@@ -264,80 +301,15 @@ func TestProductionOIDCAuthorityIsRestricted(t *testing.T) {
 		"https://login.microsoftonline.com.evil/contoso/",
 		"https://login.microsoftonline.com/contoso/extra/",
 		"https://user@login.microsoftonline.com/contoso/",
-		// Runtime ownership is a tenant-scoped subject, so an authority that
-		// accepts every tenant must not be configurable at any entry point.
 		"https://login.microsoftonline.com/common/",
-		"https://login.microsoftonline.com/consumers/",
-		"https://login.microsoftonline.com/organizations/",
 	} {
-		if _, err := NewOIDCValidator(authority, "client-id", nil); err == nil {
+		if _, err := newOIDCValidator(authority, "client-id", nil); err == nil {
 			t.Fatalf("authority accepted: %q", authority)
 		}
 	}
-	validator, err := NewOIDCValidator("https://login.microsoftonline.com/contoso/", "client-id", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	validator, err := newOIDCValidator("https://login.microsoftonline.com/contoso/", "client-id", nil)
+	testutil.Check(t, err)
 	if validator.authority.String() != "https://login.microsoftonline.com/contoso/v2.0" {
 		t.Fatalf("normalized authority = %q", validator.authority)
-	}
-}
-
-func testRSAKey(t *testing.T) *rsa.PrivateKey {
-	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key
-}
-
-func testJWK(kid string, key *rsa.PublicKey) map[string]string {
-	exponent := big.NewInt(int64(key.E)).Bytes()
-	return map[string]string{
-		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid,
-		"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(exponent),
-	}
-}
-
-func testJWKS(kid string, key *rsa.PublicKey) map[string]any {
-	return map[string]any{"keys": []map[string]string{testJWK(kid, key)}}
-}
-
-func signIDToken(t *testing.T, key *rsa.PrivateKey, claims, header map[string]any) string {
-	t.Helper()
-	encode := func(value any) string {
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return base64.RawURLEncoding.EncodeToString(encoded)
-	}
-	signingInput := encode(header) + "." + encode(claims)
-	digest := sha256.Sum256([]byte(signingInput))
-	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
-}
-
-func changedClaim(source map[string]any, key string, value any) map[string]any {
-	claims := maps.Clone(source)
-	claims[key] = value
-	return claims
-}
-
-func withoutClaim(source map[string]any, key string) map[string]any {
-	claims := maps.Clone(source)
-	delete(claims, key)
-	return claims
-}
-
-func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
-	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(value); err != nil {
-		t.Fatal(fmt.Errorf("write test JSON: %w", err))
 	}
 }

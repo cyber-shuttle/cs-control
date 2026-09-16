@@ -1,8 +1,14 @@
-// Package apierr carries the single error shape every subsystem reports and
-// the HTTP layer renders. It depends on nothing so any subsystem may use it.
+// Package apierr carries the single error shape every subsystem reports and the HTTP layer renders.
+// For defaults to an opaque 500, so an unclassified failure never leaks its own message to a client.
+//
+//	APIError
+//	New, Envelope, For, TruncateUTF8
 package apierr
 
-import "errors"
+import (
+	"errors"
+	"unicode/utf8"
+)
 
 type APIError struct {
 	Code    string `json:"code"`
@@ -26,4 +32,15 @@ func For(err error) *APIError {
 		return result
 	}
 	return &APIError{Code: "internal_error", Message: "internal error", Status: 500}
+}
+
+func TruncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }

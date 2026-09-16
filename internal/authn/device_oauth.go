@@ -1,3 +1,11 @@
+// The device-code broker serves the two routes a browser drives before it has a token.
+// It keeps the device code only in bounded process memory, and discards it once delivered or expired.
+//
+//	deviceHandlePattern, deviceBrokerEntry, DeviceCodeBroker
+//	deviceStartResponse, devicePollResponse
+//	pollOutcome, devicePollOutcomes
+//	writeDeviceError, validDeviceAuthorization, newDeviceHandle
+//	NewDeviceCodeBroker, NewDeviceCodeRoutes
 package authn
 
 import (
@@ -16,6 +24,7 @@ import (
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
+	"github.com/cyber-shuttle/cs-control/internal/apihttp"
 	"github.com/cyber-shuttle/cs-control/internal/httpx"
 )
 
@@ -49,7 +58,7 @@ type DeviceCodeBroker struct {
 	tokenEndpoint   string
 	origins         map[string]struct{}
 	client          *http.Client
-	now             func() time.Time
+	now             clock
 	ctx             context.Context
 	cancel          context.CancelFunc
 }
@@ -70,7 +79,41 @@ type devicePollResponse struct {
 	ExpiresInSeconds int64  `json:"expiresInSeconds,omitempty"`
 }
 
-// Microsoft endpoints are derived only from a pinned, tenant-specific authority.
+type pollOutcome struct {
+	remove   bool
+	slowDown time.Duration
+	status   int
+	code     string
+	message  string
+}
+
+var devicePollOutcomes = map[string]pollOutcome{
+	"authorization_pending": {},
+	"slow_down":             {slowDown: 5 * time.Second},
+	"access_denied":         {remove: true, status: http.StatusForbidden, code: "authorization_denied", message: "authorization was denied"},
+	"expired_token":         {remove: true, status: http.StatusGone, code: "authorization_expired", message: "authorization expired"},
+}
+
+func writeDeviceError(w http.ResponseWriter, status int, code, message string) {
+	apihttp.WriteError(w, apierr.New(code, message, status))
+}
+
+func validDeviceAuthorization(deviceCode, userCode, verificationURI string, expiresIn, interval int64) bool {
+	if deviceCode == "" || len(deviceCode) > 4096 || userCode == "" || len(userCode) > 128 || expiresIn <= 0 || expiresIn > 3600 || interval < 0 || interval > 60 {
+		return false
+	}
+	uri, err := url.Parse(verificationURI)
+	return err == nil && uri.Scheme == "https" && uri.Host != "" && uri.User == nil && uri.Fragment == "" && len(verificationURI) <= 2048
+}
+
+func newDeviceHandle() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
 func NewDeviceCodeBroker(authority string, allowedOrigins []string, client *http.Client) (*DeviceCodeBroker, error) {
 	base, tenant, err := parseTenantAuthority(authority)
 	if err != nil {
@@ -99,8 +142,6 @@ func NewDeviceCodeBroker(authority string, allowedOrigins []string, client *http
 	return broker, nil
 }
 
-// Only the two broker routes sit before the OAuth boundary; every other request
-// is delegated unchanged.
 func NewDeviceCodeRoutes(next http.Handler, broker *DeviceCodeBroker) (http.Handler, error) {
 	if next == nil || broker == nil {
 		return nil, errors.New("device-code route dependencies are required")
@@ -115,12 +156,6 @@ func NewDeviceCodeRoutes(next http.Handler, broker *DeviceCodeBroker) (http.Hand
 	}), nil
 }
 
-func writeDeviceError(w http.ResponseWriter, status int, code, message string) {
-	httpx.WriteError(w, apierr.New(code, message, status))
-}
-
-// Trade-off: a body on a bodyless route is ignored rather than refused; revisit
-// only if a body ever gains meaning here.
 func (b *DeviceCodeBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -218,15 +253,7 @@ func (b *DeviceCodeBroker) handleStart(w http.ResponseWriter, r *http.Request, o
 	}
 	b.entries[handle] = entry
 	b.mu.Unlock()
-	httpx.WriteJSON(w, http.StatusOK, deviceStartResponse{Handle: handle, UserCode: result.UserCode, VerificationURI: result.VerificationURI, ExpiresInSeconds: result.ExpiresIn, IntervalSeconds: result.Interval})
-}
-
-func validDeviceAuthorization(deviceCode, userCode, verificationURI string, expiresIn, interval int64) bool {
-	if deviceCode == "" || len(deviceCode) > 4096 || userCode == "" || len(userCode) > 128 || expiresIn <= 0 || expiresIn > 3600 || interval < 0 || interval > 60 {
-		return false
-	}
-	uri, err := url.Parse(verificationURI)
-	return err == nil && uri.Scheme == "https" && uri.Host != "" && uri.User == nil && uri.Fragment == "" && len(verificationURI) <= 2048
+	apihttp.WriteJSON(w, http.StatusOK, deviceStartResponse{Handle: handle, UserCode: result.UserCode, VerificationURI: result.VerificationURI, ExpiresInSeconds: result.ExpiresIn, IntervalSeconds: result.Interval})
 }
 
 func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, origin, handle string) {
@@ -289,32 +316,10 @@ func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, or
 	b.deliverTokens(w, handle, tokens.AccessToken, tokens.IDToken, tokens.ExpiresIn)
 }
 
-// pollOutcome is how one upstream token response ends: whether the entry is
-// discarded, how far its interval backs off, and what the browser is told. An
-// empty code means the authorization is still pending.
-type pollOutcome struct {
-	remove   bool
-	slowDown time.Duration
-	status   int
-	code     string
-	message  string
-}
-
-// devicePollOutcomes maps the OAuth device-flow errors the broker understands.
-// Anything else is an upstream failure.
-var devicePollOutcomes = map[string]pollOutcome{
-	"authorization_pending": {},
-	"slow_down":             {slowDown: 5 * time.Second},
-	"access_denied":         {remove: true, status: http.StatusForbidden, code: "authorization_denied", message: "authorization was denied"},
-	"expired_token":         {remove: true, status: http.StatusGone, code: "authorization_expired", message: "authorization expired"},
-}
-
-// settle applies one outcome to the entry and writes the single response it
-// implies, so every poll result reaches the browser through one path.
 func (b *DeviceCodeBroker) settle(w http.ResponseWriter, handle string, outcome pollOutcome) {
 	interval := b.finishPoll(handle, outcome.remove, outcome.slowDown)
 	if outcome.code == "" {
-		httpx.WriteJSON(w, http.StatusAccepted, devicePollResponse{Status: "pending", IntervalSeconds: int64(interval / time.Second)})
+		apihttp.WriteJSON(w, http.StatusAccepted, devicePollResponse{Status: "pending", IntervalSeconds: int64(interval / time.Second)})
 		return
 	}
 	writeDeviceError(w, outcome.status, outcome.code, outcome.message)
@@ -337,18 +342,8 @@ func (b *DeviceCodeBroker) postForm(parent context.Context, endpoint string, for
 	return httpx.Do(b.client, request, maxDeviceResponse)
 }
 
-func newDeviceHandle() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, bytes); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(bytes), nil
-}
-
-// Trade-off: a failed loopback response write loses the tokens and the user
-// signs in again; add store-and-redeliver if that is ever observed.
 func (b *DeviceCodeBroker) deliverTokens(w http.ResponseWriter, handle, accessToken, idToken string, expiresIn int64) {
-	httpx.WriteJSON(w, http.StatusOK, devicePollResponse{Status: "complete", AccessToken: accessToken, IDToken: idToken, ExpiresInSeconds: expiresIn})
+	apihttp.WriteJSON(w, http.StatusOK, devicePollResponse{Status: "complete", AccessToken: accessToken, IDToken: idToken, ExpiresInSeconds: expiresIn})
 	b.finishPoll(handle, true, 0)
 }
 

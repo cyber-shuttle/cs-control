@@ -1,7 +1,15 @@
-// Package authn is the identity boundary. It validates the Dev Tunnels access
-// capability and the Microsoft ID token that carries the caller's identity, and
-// brokers the device-code flow. It knows nothing about runtimes or SSH.
-
+// Package authn is the identity boundary.
+// It validates the Dev Tunnels access capability and the Microsoft ID token, and brokers the device-code flow.
+// Every request carries both tokens, and the WebSocket route folds its own into a subprotocol handshake.
+//
+//	Principal, clock, OAuthCredentials, oAuthValidator, oauthBoundary
+//	devTunnelOAuthValidator, TunnelAuthorization, tunnelAuthorizationContextKey, tenantSegment
+//	validOAuthToken, validateControlOrigin, validatedOriginSet, allowOrigin
+//	preflightHeadersAllowed, validPreflight, bearerToken
+//	controlWebSocketRoute, controlWebSocketProtocols, decodeWebSocketCredential, controlWebSocketAuthorization
+//	httpOAuthCredentials, withTunnelAuthorization, newDevTunnelOAuthValidatorForBase, newDevTunnelOAuthValidator
+//	parseTenantAuthority
+//	validIdentityValue, NewOAuthBoundary, WithTunnelAuthorization, TunnelAuthorizationFromContext
 package authn
 
 import (
@@ -28,14 +36,10 @@ import (
 )
 
 const (
-	maxOAuthResponse    = 64 << 10
-	defaultOAuthTimeout = 15 * time.Second
-	// ControlIdentityHeader carries the signed ID token on plain HTTP requests.
-	ControlIdentityHeader = "X-CyberShuttle-Identity"
-	// ControlWebSocketProtocol is the only subprotocol a control WebSocket may negotiate.
-	ControlWebSocketProtocol = "cybershuttle.v1"
-	// WebSocketBearerPrefix and WebSocketIdentityPrefix mark the two credential
-	// subprotocols a browser may send on a control WebSocket.
+	maxOAuthResponse                    = 64 << 10
+	defaultOAuthTimeout                 = 15 * time.Second
+	ControlIdentityHeader               = "X-CyberShuttle-Identity"
+	ControlWebSocketProtocol            = "cybershuttle.v1"
 	WebSocketBearerPrefix               = "bearer."
 	WebSocketIdentityPrefix             = "identity."
 	maxWebSocketCredentialProtocolBytes = (devtunnel.MaxToken*8 + 5) / 6
@@ -46,47 +50,47 @@ type Principal struct {
 	Tenant  string `json:"tenant"`
 }
 
-// OAuthCredentials are request-scoped and never logged or persisted. The access
-// token is an independently validated Dev Tunnels capability; the signed ID token
-// is the sole identity bearer, with no binding claimed between them.
+type clock func() time.Time
+
 type OAuthCredentials struct {
 	AccessToken string
 	IDToken     string
 }
 
-type OAuthValidator interface {
+type oAuthValidator interface {
 	Validate(context.Context, OAuthCredentials) (Principal, error)
 }
 
 type oauthBoundary struct {
 	next      http.Handler
-	validator OAuthValidator
+	validator oAuthValidator
 	originSet map[string]struct{}
 }
 
-func NewOAuthBoundary(next http.Handler, validator OAuthValidator, allowedOrigins []string) (http.Handler, error) {
-	if next == nil || validator == nil {
-		return nil, errors.New("OAuth boundary dependencies are required")
-	}
-	origins, err := validatedOriginSet(allowedOrigins)
-	if err != nil {
-		return nil, err
-	}
-	return &oauthBoundary{next: next, validator: validator, originSet: origins}, nil
+type devTunnelOAuthValidator struct {
+	baseURL string
+	client  *http.Client
 }
 
-func validatedOriginSet(allowedOrigins []string) (map[string]struct{}, error) {
-	origins := make(map[string]struct{}, len(allowedOrigins))
-	for _, origin := range allowedOrigins {
-		if err := validateControlOrigin(origin); err != nil {
-			return nil, err
+type TunnelAuthorization struct {
+	OAuthToken string
+	Principal  Principal
+}
+
+type tunnelAuthorizationContextKey struct{}
+
+var tenantSegment = regexp.MustCompile(`^[A-Za-z0-9.-]{1,256}$`)
+
+func validOAuthToken(token string) bool {
+	if token == "" || len(token) > devtunnel.MaxToken || !utf8.ValidString(token) {
+		return false
+	}
+	for _, char := range token {
+		if unicode.IsControl(char) || unicode.IsSpace(char) {
+			return false
 		}
-		origins[origin] = struct{}{}
 	}
-	if len(origins) == 0 {
-		return nil, errors.New("at least one control origin is required")
-	}
-	return origins, nil
+	return true
 }
 
 func validateControlOrigin(origin string) error {
@@ -108,73 +112,20 @@ func validateControlOrigin(origin string) error {
 	return errors.New("control origin must use HTTPS or loopback HTTP")
 }
 
-func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	origin := r.Header.Get("Origin")
-	if origin != "" {
-		if !allowOrigin(w, origin, b.originSet) {
-			http.Error(w, "origin is not allowed", http.StatusForbidden)
-			return
+func validatedOriginSet(allowedOrigins []string) (map[string]struct{}, error) {
+	origins := make(map[string]struct{}, len(allowedOrigins))
+	for _, origin := range allowedOrigins {
+		if err := validateControlOrigin(origin); err != nil {
+			return nil, err
 		}
-		// ETag is not CORS-safelisted, so without this a cross-origin client cannot
-		// read it and the conditional runtime poll never sends If-None-Match.
-		w.Header().Set("Access-Control-Expose-Headers", "ETag")
+		origins[origin] = struct{}{}
 	}
-	if r.Method == http.MethodOptions && origin != "" && r.Header.Get("Access-Control-Request-Method") != "" {
-		if !validPreflight(r) {
-			http.Error(w, "preflight is not allowed", http.StatusForbidden)
-			return
-		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match, "+ControlIdentityHeader)
-		w.WriteHeader(http.StatusNoContent)
-		return
+	if len(origins) == 0 {
+		return nil, errors.New("at least one control origin is required")
 	}
-	request := r
-	var credentials OAuthCredentials
-	var ok bool
-	if websocket.IsWebSocketUpgrade(r) && controlWebSocketRoute(r) {
-		var status int
-		credentials, request, status = controlWebSocketAuthorization(r)
-		if status != 0 {
-			if status == http.StatusUnauthorized {
-				w.Header().Set("WWW-Authenticate", "Bearer")
-			}
-			http.Error(w, http.StatusText(status), status)
-			return
-		}
-		ok = true
-	} else {
-		credentials, ok = httpOAuthCredentials(r.Header)
-	}
-	if !ok {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	principal, err := b.validator.Validate(request.Context(), credentials)
-	if err != nil || principal.Subject == "" || principal.Tenant == "" {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	ctx := WithTunnelAuthorization(request.Context(), TunnelAuthorization{OAuthToken: credentials.AccessToken, Principal: principal})
-	b.next.ServeHTTP(w, request.WithContext(ctx))
+	return origins, nil
 }
 
-func httpOAuthCredentials(header http.Header) (OAuthCredentials, bool) {
-	if len(header.Values("Authorization")) != 1 || len(header.Values(ControlIdentityHeader)) != 1 {
-		return OAuthCredentials{}, false
-	}
-	accessToken, ok := bearerToken(header.Get("Authorization"))
-	identityToken := header.Get(ControlIdentityHeader)
-	if !ok || !validOAuthToken(identityToken) {
-		return OAuthCredentials{}, false
-	}
-	return OAuthCredentials{AccessToken: accessToken, IDToken: identityToken}, true
-}
-
-// allowOrigin admits an exact configured origin and stamps the response, so
-// both browser-facing entry points advertise a permitted origin identically.
 func allowOrigin(w http.ResponseWriter, origin string, origins map[string]struct{}) bool {
 	if _, ok := origins[origin]; !ok {
 		return false
@@ -184,8 +135,6 @@ func allowOrigin(w http.ResponseWriter, origin string, origins map[string]struct
 	return true
 }
 
-// preflightHeadersAllowed reports whether every header a preflight asks for is
-// one the entry point actually accepts. The subset test lives here alone.
 func preflightHeadersAllowed(raw string, allowed ...string) bool {
 	for _, header := range strings.Split(raw, ",") {
 		header = strings.TrimSpace(header)
@@ -216,18 +165,6 @@ func bearerToken(header string) (string, bool) {
 	return fields[1], true
 }
 
-func validOAuthToken(token string) bool {
-	if token == "" || len(token) > devtunnel.MaxToken || !utf8.ValidString(token) {
-		return false
-	}
-	for _, char := range token {
-		if unicode.IsControl(char) || unicode.IsSpace(char) {
-			return false
-		}
-	}
-	return true
-}
-
 func controlWebSocketRoute(request *http.Request) bool {
 	if request.Method != http.MethodGet || request.URL.EscapedPath() != request.URL.Path {
 		return false
@@ -253,6 +190,17 @@ func controlWebSocketProtocols(header http.Header) ([]string, bool) {
 		}
 	}
 	return protocols, true
+}
+
+func decodeWebSocketCredential(encoded string) (string, bool) {
+	if encoded == "" || len(encoded) > maxWebSocketCredentialProtocolBytes {
+		return "", false
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != encoded || !validOAuthToken(string(decoded)) {
+		return "", false
+	}
+	return string(decoded), true
 }
 
 func controlWebSocketAuthorization(request *http.Request) (OAuthCredentials, *http.Request, int) {
@@ -298,23 +246,79 @@ func controlWebSocketAuthorization(request *http.Request) (OAuthCredentials, *ht
 	return OAuthCredentials{AccessToken: accessToken, IDToken: identityToken}, clean, 0
 }
 
-func decodeWebSocketCredential(encoded string) (string, bool) {
-	if encoded == "" || len(encoded) > maxWebSocketCredentialProtocolBytes {
-		return "", false
+func httpOAuthCredentials(header http.Header) (OAuthCredentials, bool) {
+	if len(header.Values("Authorization")) != 1 || len(header.Values(ControlIdentityHeader)) != 1 {
+		return OAuthCredentials{}, false
 	}
-	decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
-	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != encoded || !validOAuthToken(string(decoded)) {
-		return "", false
+	accessToken, ok := bearerToken(header.Get("Authorization"))
+	identityToken := header.Get(ControlIdentityHeader)
+	if !ok || !validOAuthToken(identityToken) {
+		return OAuthCredentials{}, false
 	}
-	return string(decoded), true
+	return OAuthCredentials{AccessToken: accessToken, IDToken: identityToken}, true
 }
 
-type DevTunnelOAuthValidator struct {
-	baseURL string
-	client  *http.Client
+func withTunnelAuthorization(ctx context.Context, auth TunnelAuthorization) context.Context {
+	return context.WithValue(ctx, tunnelAuthorizationContextKey{}, auth)
 }
 
-func NewDevTunnelOAuthValidator(baseURL string, client *http.Client) (*DevTunnelOAuthValidator, error) {
+func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		if !allowOrigin(w, origin, b.originSet) {
+			http.Error(w, "origin is not allowed", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Access-Control-Expose-Headers", "ETag")
+	}
+	if r.Method == http.MethodOptions && origin != "" && r.Header.Get("Access-Control-Request-Method") != "" {
+		if !validPreflight(r) {
+			http.Error(w, "preflight is not allowed", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match, "+ControlIdentityHeader)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	request := r
+	var credentials OAuthCredentials
+	var ok bool
+	if websocket.IsWebSocketUpgrade(r) && controlWebSocketRoute(r) {
+		var status int
+		credentials, request, status = controlWebSocketAuthorization(r)
+		if status != 0 {
+			if status == http.StatusUnauthorized {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+			}
+			http.Error(w, http.StatusText(status), status)
+			return
+		}
+		ok = true
+	} else {
+		credentials, ok = httpOAuthCredentials(r.Header)
+	}
+	if !ok {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	principal, err := b.validator.Validate(request.Context(), credentials)
+	if err != nil || principal.Subject == "" || principal.Tenant == "" {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	ctx := withTunnelAuthorization(request.Context(), TunnelAuthorization{OAuthToken: credentials.AccessToken, Principal: principal})
+	b.next.ServeHTTP(w, request.WithContext(ctx))
+}
+
+func newDevTunnelOAuthValidatorForBase(base *url.URL, client *http.Client) *devTunnelOAuthValidator {
+	bounded := devtunnel.GuardedClient(client, defaultOAuthTimeout)
+	return &devTunnelOAuthValidator{baseURL: base.String(), client: bounded}
+}
+
+func newDevTunnelOAuthValidator(baseURL string, client *http.Client) (*devTunnelOAuthValidator, error) {
 	base, err := devtunnel.ParseProductionBaseURL(baseURL)
 	if err != nil {
 		return nil, err
@@ -322,12 +326,7 @@ func NewDevTunnelOAuthValidator(baseURL string, client *http.Client) (*DevTunnel
 	return newDevTunnelOAuthValidatorForBase(base, client), nil
 }
 
-func newDevTunnelOAuthValidatorForBase(base *url.URL, client *http.Client) *DevTunnelOAuthValidator {
-	bounded := devtunnel.BoundedClient(client, defaultOAuthTimeout)
-	return &DevTunnelOAuthValidator{baseURL: base.String(), client: bounded}
-}
-
-func (v *DevTunnelOAuthValidator) ValidateAccess(ctx context.Context, token string) error {
+func (v *devTunnelOAuthValidator) ValidateAccess(ctx context.Context, token string) error {
 	if _, ok := bearerToken("Bearer " + token); !ok {
 		return errors.New("delegated token is invalid")
 	}
@@ -337,8 +336,6 @@ func (v *DevTunnelOAuthValidator) ValidateAccess(ctx context.Context, token stri
 	query.Set("api-version", devtunnel.APIVersion)
 	endpoint.RawQuery = query.Encode()
 
-	// Dev Tunnels accepting the token is the whole check, so only a bounded,
-	// well-formed JSON body is required.
 	var limits []json.RawMessage
 	if err := httpx.GetJSON(ctx, v.client, endpoint.String(), token, maxOAuthResponse, &limits); err != nil {
 		return fmt.Errorf("validate delegated token with Dev Tunnels: %w", err)
@@ -346,12 +343,6 @@ func (v *DevTunnelOAuthValidator) ValidateAccess(ctx context.Context, token stri
 	return nil
 }
 
-// Bounded and character-restricted, so subsystems may store or compare it.
-var tenantSegment = regexp.MustCompile(`^[A-Za-z0-9.-]{1,256}$`)
-
-// parseTenantAuthority accepts only a pinned, tenant-specific Microsoft authority
-// and returns it with its tenant segment. Refusing the multi-tenant aliases here
-// rather than per call site keeps any entry point from accepting any tenant.
 func parseTenantAuthority(raw string) (*url.URL, string, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "login.microsoftonline.com" ||
@@ -369,34 +360,37 @@ func parseTenantAuthority(raw string) (*url.URL, string, error) {
 	return parsed, segments[0], nil
 }
 
-func ValidIdentityValue(value string) bool {
+func validIdentityValue(value string) bool {
 	if value == "" || len(value) > 256 {
 		return false
 	}
 	for _, char := range value {
-		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || strings.ContainsRune("-._:@", char)) {
+		allowed := (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || strings.ContainsRune("-._:@", char)
+		if !allowed {
 			return false
 		}
 	}
 	return true
 }
 
-type TunnelAuthorization struct {
-	OAuthToken string
-	Principal  Principal
+func NewOAuthBoundary(next http.Handler, validator oAuthValidator, allowedOrigins []string) (http.Handler, error) {
+	if next == nil || validator == nil {
+		return nil, errors.New("OAuth boundary dependencies are required")
+	}
+	origins, err := validatedOriginSet(allowedOrigins)
+	if err != nil {
+		return nil, err
+	}
+	return &oauthBoundary{next: next, validator: validator, originSet: origins}, nil
 }
 
-type tunnelAuthorizationContextKey struct{}
-
-// WithTunnelAuthorization carries a validated identity and the delegated token it
-// arrived with. The OAuth boundary is the only production caller.
 func WithTunnelAuthorization(ctx context.Context, auth TunnelAuthorization) context.Context {
-	return context.WithValue(ctx, tunnelAuthorizationContextKey{}, auth)
+	return withTunnelAuthorization(ctx, auth)
 }
 
 func TunnelAuthorizationFromContext(ctx context.Context) (TunnelAuthorization, error) {
 	auth, ok := ctx.Value(tunnelAuthorizationContextKey{}).(TunnelAuthorization)
-	if !ok || auth.OAuthToken == "" || len(auth.OAuthToken) > devtunnel.MaxToken || strings.ContainsAny(auth.OAuthToken, "\x00\r\n") || !ValidIdentityValue(auth.Principal.Subject) || !ValidIdentityValue(auth.Principal.Tenant) {
+	if !ok || auth.OAuthToken == "" || len(auth.OAuthToken) > devtunnel.MaxToken || strings.ContainsAny(auth.OAuthToken, "\x00\r\n") || !validIdentityValue(auth.Principal.Subject) || !validIdentityValue(auth.Principal.Tenant) {
 		return TunnelAuthorization{}, apierr.New("tunnel_authorization_required", "fresh delegated Dev Tunnel authorization is required", 401)
 	}
 	return auth, nil

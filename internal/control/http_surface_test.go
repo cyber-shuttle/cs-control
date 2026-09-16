@@ -1,10 +1,12 @@
+// The HTTP surface's own tests: every route the mux must dispatch, and the shared strict JSON body decoding.
+//
+//	Test*
 package control
 
 import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,46 +16,50 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 )
 
-func TestHTTPRouteSurfaceRetainsOnlyRequiredControlOperations(t *testing.T) {
+func TestHTTPRouteSurfaceRetainsRequiredControlOperations(t *testing.T) {
 	configDir := t.TempDir()
-	systemConfig := filepath.Join(configDir, "ssh_config")
-	if err := os.WriteFile(systemConfig, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	service := Service{
-		Store: Store{Dir: t.TempDir()}, Logs: NewRuntimeLogs(),
-		Runner: sshexec.Runner{Hosts: sshconfig.Config{UserPath: filepath.Join(configDir, "user_ssh_config"), SystemPath: systemConfig}},
+		Store: Store{Dir: t.TempDir()}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics(),
+		Runner: sshexec.Runner{Hosts: sshconfig.Config{UserPath: filepath.Join(configDir, "user_ssh_config")}},
 	}
-	api := NewHTTPHandler(service, nil)
+	api := NewHTTPHandler(service, noopAuth{})
 	t.Cleanup(api.Close)
 
+	// Every route is reached with a tunnel-authorized caller and an otherwise empty service, so the
+	// status below is what an unknown session or unmanaged host alias produces, not a routing failure.
 	for _, test := range []struct {
 		method string
 		path   string
+		status int
 	}{
-		{http.MethodPost, "/api/v1/runtimes/validate"},
-		{http.MethodPost, "/api/v1/runtimes"},
-		{http.MethodGet, "/api/v1/runtimes"},
-		{http.MethodGet, "/api/v1/runtimes/rt-012345abcdef/access"},
-		{http.MethodGet, "/api/v1/runtimes/rt-012345abcdef/metrics"},
-		{http.MethodGet, "/api/v1/runtimes/history"},
-		{http.MethodPost, "/api/v1/runtimes/rt-012345abcdef/start"},
-		{http.MethodPost, "/api/v1/runtimes/rt-012345abcdef/stop"},
-		{http.MethodGet, "/api/v1/ssh"},
-		{http.MethodPost, "/api/v1/ssh"},
-		{http.MethodPut, "/api/v1/ssh/delta"},
-		{http.MethodDelete, "/api/v1/ssh/delta"},
-		{http.MethodPost, "/api/v1/ssh/delta/test"},
-		{http.MethodGet, "/api/v1/ssh/delta/auth"},
-		{http.MethodGet, "/api/v1/ssh/delta/slurm"},
+		{http.MethodPost, "/api/v1/sessions/validate", http.StatusBadRequest},
+		{http.MethodPost, "/api/v1/sessions", http.StatusBadRequest},
+		{http.MethodGet, "/api/v1/sessions", http.StatusOK},
+		{http.MethodGet, "/api/v1/sessions/s-012345abcdef", http.StatusNotFound},
+		{http.MethodDelete, "/api/v1/sessions/s-012345abcdef", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/sessions/s-012345abcdef/access", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/sessions/s-012345abcdef/metrics", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/sessions/history", http.StatusOK},
+		{http.MethodPost, "/api/v1/sessions/s-012345abcdef/start", http.StatusNotFound},
+		{http.MethodPost, "/api/v1/sessions/s-012345abcdef/stop", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/ssh", http.StatusOK},
+		{http.MethodPost, "/api/v1/ssh", http.StatusBadRequest},
+		{http.MethodPut, "/api/v1/ssh/delta", http.StatusBadRequest},
+		{http.MethodDelete, "/api/v1/ssh/delta", http.StatusConflict},
+		{http.MethodPost, "/api/v1/ssh/delta/test", http.StatusOK},
+		{http.MethodGet, "/api/v1/ssh/delta/auth", http.StatusUpgradeRequired},
+		{http.MethodGet, "/api/v1/ssh/delta/slurm", http.StatusNotFound},
 	} {
-		t.Run("retained "+test.path, func(t *testing.T) {
+		t.Run(test.method+" "+test.path, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil).WithContext(testTunnelContext())
 			response := httptest.NewRecorder()
-			api.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+			api.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("route %s %s = %d, want %d: %s", test.method, test.path, response.Code, test.status, response.Body.String())
+			}
 			if strings.Contains(response.Body.String(), `"code":"not_found"`) {
 				t.Fatalf("retained route %s %s was not dispatched: %d %s", test.method, test.path, response.Code, response.Body.String())
 			}
-			// This API is bearer-only: no route may start a browser session.
 			if cookies := response.Header().Values("Set-Cookie"); len(cookies) != 0 {
 				t.Fatalf("route %s %s emitted cookies: %q", test.method, test.path, cookies)
 			}

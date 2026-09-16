@@ -1,3 +1,10 @@
+// A job that arrives after must be cancelled immediately.
+// A cancel failure persists for a later batch to retry.
+// A client that disconnects mid-create must not leave the job running either.
+//
+//	createStopRaceService
+//	waitFor
+//	Test*
 package control
 
 import (
@@ -8,12 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/sshexec"
+	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
 func createStopRaceService(t *testing.T) (Service, string, string, string) {
 	t.Helper()
-	ssh, _, _ := fakeSSH(t)
 	dir := t.TempDir()
 	started := filepath.Join(dir, "submit-started")
 	release := filepath.Join(dir, "submit-release")
@@ -21,39 +27,50 @@ func createStopRaceService(t *testing.T) (Service, string, string, string) {
 	t.Setenv("FAKE_SUBMIT_STARTED", started)
 	t.Setenv("FAKE_SUBMIT_RELEASE", release)
 	t.Setenv("FAKE_SCANCEL_LOG", cancellations)
-	service := Service{
-		Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second},
-		Store:  Store{Dir: filepath.Join(dir, "state")},
-		Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"},
-	}
-	configureTestTunnel(t, &service)
+	service := testService(t)
 	return service, started, release, cancellations
+}
+
+func waitFor(t *testing.T, errs <-chan error, what string, ready func() bool) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-errs:
+			t.Fatalf("Create finished before %s: %v", what, err)
+		case <-ticker.C:
+			if ready() {
+				return
+			}
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
 }
 
 func TestCreateCancelsJobWhenStopWinsBeforeSbatchReturns(t *testing.T) {
 	service, started, release, cancellations := createStopRaceService(t)
-	result := make(chan *Runtime, 1)
+	result := make(chan *Session, 1)
 	errs := make(chan error, 1)
 	go func() {
-		runtime, err := service.Create(testTunnelContext(), createRequest())
-		result <- runtime
+		session, err := service.create(testTunnelContext(), newTestCreateRequest())
+		result <- session
 		errs <- err
 	}()
-	waitForSubmitStart(t, started, errs)
+	waitFor(t, errs, "sbatch started", func() bool { _, err := os.Stat(started); return err == nil })
 
-	stopped, err := service.Stop(testTunnelContext(), createRequest().ID)
+	stopped, err := service.stop(testTunnelContext(), newTestCreateRequest().ID)
 	if err != nil || stopped.State != "STOPPING" || stopped.JobID != "" {
 		t.Fatalf("stop did not persist intent while sbatch was blocked: %#v %v", stopped, err)
 	}
-	if err := os.WriteFile(release, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, os.WriteFile(release, nil, 0o600))
 
 	select {
 	case err := <-errs:
-		if err != nil {
-			t.Fatal(err)
-		}
+		testutil.Check(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Create did not finish after sbatch was released")
 	}
@@ -65,7 +82,7 @@ func TestCreateCancelsJobWhenStopWinsBeforeSbatchReturns(t *testing.T) {
 	if err != nil || strings.Count(string(data), "scancel 12345") != 1 {
 		t.Fatalf("submitted job was not immediately cancelled exactly once: %q %v", data, err)
 	}
-	cached, err := service.GetCached(created.ID)
+	cached, err := service.loadSession(created.ID)
 	if err != nil || cached.State != "STOPPING" || cached.JobID != "12345" {
 		t.Fatalf("stored state lost stop/job identity: %#v %v", cached, err)
 	}
@@ -74,23 +91,18 @@ func TestCreateCancelsJobWhenStopWinsBeforeSbatchReturns(t *testing.T) {
 func TestCreatePersistsCancelFailureAndLaterBatchRetries(t *testing.T) {
 	service, started, release, cancellations := createStopRaceService(t)
 	t.Setenv("FAKE_SCANCEL_FAIL", "1")
-	result := make(chan *Runtime, 1)
+	result := make(chan *Session, 1)
 	errs := make(chan error, 1)
 	go func() {
-		runtime, err := service.Create(testTunnelContext(), createRequest())
-		result <- runtime
+		session, err := service.create(testTunnelContext(), newTestCreateRequest())
+		result <- session
 		errs <- err
 	}()
-	waitForSubmitStart(t, started, errs)
-	if _, err := service.Stop(testTunnelContext(), createRequest().ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(release, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-errs; err != nil {
-		t.Fatal(err)
-	}
+	waitFor(t, errs, "sbatch started", func() bool { _, err := os.Stat(started); return err == nil })
+	_, err := service.stop(testTunnelContext(), newTestCreateRequest().ID)
+	testutil.Check(t, err)
+	testutil.Check(t, os.WriteFile(release, nil, 0o600))
+	testutil.Check(t, <-errs)
 	created := <-result
 	if created.State != "STOPPING" || !strings.Contains(created.Error, "scheduler temporarily unavailable") {
 		t.Fatalf("cancel failure was not persisted: %#v", created)
@@ -98,9 +110,7 @@ func TestCreatePersistsCancelFailureAndLaterBatchRetries(t *testing.T) {
 
 	t.Setenv("FAKE_SCANCEL_FAIL", "0")
 	listed, err := reconciledList(context.Background(), service)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.Check(t, err)
 	if len(listed) != 1 || listed[0].State != "STOPPED" || listed[0].Error != "" {
 		t.Fatalf("later reconciliation did not retry cancellation: %#v", listed)
 	}
@@ -110,44 +120,39 @@ func TestCreatePersistsCancelFailureAndLaterBatchRetries(t *testing.T) {
 	}
 }
 
-func TestStopAfterSubmittedJobIDDoesNotAllowCreateOverwrite(t *testing.T) {
-	service, _, _, cancellations := createStopRaceService(t)
-	t.Setenv("FAKE_SUBMIT_STARTED", "")
-	t.Setenv("FAKE_SUBMIT_RELEASE", "")
-	created, err := service.Create(testTunnelContext(), createRequest())
-	if err != nil || created.State != "QUEUED" || created.JobID != "12345" {
-		t.Fatalf("create failed: %#v %v", created, err)
-	}
-	stopped, err := service.Stop(testTunnelContext(), created.ID)
-	if err != nil || stopped.State != "STOPPED" {
-		t.Fatalf("stop after job ID failed: %#v %v", stopped, err)
+func TestCreateCancelsUnsavedJobEvenWithACancelledRequestContext(t *testing.T) {
+	service, started, release, cancellations := createStopRaceService(t)
+	ctx, cancel := context.WithCancel(testTunnelContext())
+	request := newTestCreateRequest()
+	errs := make(chan error, 1)
+	go func() {
+		_, err := service.create(ctx, request)
+		errs <- err
+	}()
+	waitFor(t, errs, "sbatch started", func() bool { _, err := os.Stat(started); return err == nil })
+	testutil.Check(t, os.Chmod(service.Store.Dir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(service.Store.Dir, 0o700) })
+	testutil.Check(t, os.WriteFile(release, nil, 0o600))
+	waitFor(t, errs, `status "Session submitted to Slurm"`, func() bool {
+		tail, ok := service.Logs.Tail(request.ID)
+		if !ok {
+			return false
+		}
+		for _, line := range tail.Lines {
+			if line.Text == "Session submitted to Slurm" {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+
+	err := <-errs
+	if err == nil || !strings.Contains(err.Error(), "job was cancelled") {
+		t.Fatalf("compensation did not report a successful cancel with a cancelled request context: %v", err)
 	}
 	data, err := os.ReadFile(cancellations)
-	if err != nil || !strings.Contains(string(data), "scancel 12345") {
-		t.Fatalf("known job was not cancelled: %q %v", data, err)
-	}
-	cached, err := service.GetCached(created.ID)
-	if err != nil || cached.State != "STOPPED" {
-		t.Fatalf("stop state was overwritten: %#v %v", cached, err)
-	}
-}
-
-func waitForSubmitStart(t *testing.T, path string, errs <-chan error) {
-	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case err := <-errs:
-			t.Fatalf("Create failed before sbatch started: %v", err)
-		case <-ticker.C:
-			if _, err := os.Stat(path); err == nil {
-				return
-			}
-		case <-deadline.C:
-			t.Fatalf("timed out waiting for %s", path)
-		}
+	if err != nil || !strings.Contains(string(data), "12345") {
+		t.Fatalf("submitted job was not cancelled: %q %v", data, err)
 	}
 }

@@ -1,7 +1,7 @@
 # Architecture
 
 `csctl` is a single binary that runs on a researcher's own machine and binds to loopback. It has no CLI
-commands for hosts or runtimes: `serve` starts the HTTP API and a browser or editor client drives everything
+commands for hosts or sessions: `serve` starts the HTTP API and a browser or editor client drives everything
 over it.
 
 The handler stack is `authn.NewDeviceCodeRoutes(authn.NewOAuthBoundary(control.NewHTTPHandler(...)))`. The two
@@ -13,71 +13,74 @@ through it.
 Each subsystem is a package. New code goes in the lowest layer that can hold it.
 
 ```
-apierr  safeio       error shape, private files
-framed               marker-delimited remote output
-httpx                bounded client/body, HTTPS base-URL policy, JSON writers
-sshconfig            reads ~/.ssh/config, writes only its own managed block, never runs ssh
+apierr  apihttp      error shape, JSON response writers and strict decoding
+safeio               private files
+httpx                bounded client/body, redirect policy, outbound JSON GET
+sshconfig            reads the per-principal hosts config, writes only its own managed block, never runs ssh
 sshexec              argument vectors, control socket, bounded output
 devtunnel            Dev Tunnels management client and its URI/host policy
+credentialstore      one generation's connect and Jupyter tokens, held as one private file per generation
 authn                OAuth boundary, OIDC validation, device-code broker
+control              session domain, store, reconcile, discovery, HTTP, marker-delimited remote output
 gateway              SSH authentication WebSocket route and its frames
-control              runtime domain, store, reconcile, discovery, HTTP
 cmd/csctl            composition root
 ```
 
-`control` names the SSH route interface it serves (`SSHAuthRoute`) rather than importing `gateway`; `cmd/csctl`
-supplies the concrete gateway. Duplication belongs in a shared lower package rather than copied between two
-subsystems.
+`control` names the SSH route interface it serves rather than importing `gateway`; `cmd/csctl` supplies the
+concrete gateway. Duplication belongs in a shared lower package rather than copied between two subsystems.
 
-## Allocation lifecycle
+## Session lifecycle
 
-A client validates before it creates. `POST /api/v1/runtimes/validate` returns the candidate batch script and
-Slurm's verdict on it; `POST /api/v1/runtimes` creates the allocation the caller reviewed. Both are
+A client validates before it creates. `POST /api/v1/sessions/validate` returns the candidate batch script and
+Slurm's verdict on it; `POST /api/v1/sessions` creates the session the caller reviewed. Both are
 OAuth-authenticated API actions.
 
 Create proceeds in this order:
 
 1. SSH discovery (`id`, `sacctmgr`, `sinfo`, `printenv HOME`) and `sbatch --test-only` against the candidate
    script.
-2. One creator-owned Dev Tunnel for the allocation generation, the generation credential written to disk, then
-   the runtime record persisted — durable before anything slow begins.
+2. One creator-owned Dev Tunnel for the session generation, the generation credential written to disk, then
+   the session record persisted — durable before anything slow begins.
 3. Login-node preparation: Linkspan and the workflow document.
-4. `sbatch`, with the job name and the allocation identity on the command line.
+4. `sbatch`, with the job name and the session identity on the command line.
 
 Because the record is durable before preparation starts, preparation progress streams into the log tail the
 client is already polling rather than into a request that says nothing until it ends.
 
 Conclusive submission failure compensates tunnel and credential state. Ambiguous submission — anything other
 than a refusal `sbatch` itself reported — stays durable for reconciliation, because the job may already be
-queued. Stop releases the allocation's tunnel and credential and asks the scheduler to cancel the job; the
+queued. Stop releases the session's tunnel and credential and asks the scheduler to cancel the job; the
 generation it ends is never reused.
 
 ### Generations and job names
 
-The job name is `cs-<runtime id>-<generation>`, so the scheduler and its accounting database answer for one
-allocation rather than for the runtime record. A record outlives its allocations: without the generation, a run
-that has just been submitted is reconciled against the accounting record of the run it replaced and inherits
-that run's outcome. For the same reason, the window that tolerates a job Slurm has not published yet is
-measured from the record's last change rather than from its creation, which a relaunch keeps.
+A session is the durable record; a Slurm job only serves it, and a session outlives its jobs. The job name is
+`cs-<session id>-<generation>`, so the scheduler and its accounting database answer for one generation of that
+record rather than for the session as a whole. Without the generation, a run that has just been submitted would
+be reconciled against the accounting record of the run it replaced and would inherit that run's outcome. For the
+same reason, the window that tolerates a job Slurm has not published yet is measured from the record's last
+change rather than from its creation, which a relaunch keeps.
 
-A terminal allocation is not resumable, so running one again (`POST /api/v1/runtimes/{id}/start`) is a create
-under the same runtime identity: it replaces the record and takes a new generation, rather than adding a second
+A terminal session is not resumable, so running one again (`POST /api/v1/sessions/{id}/start`) is a create
+under the same session identity: it replaces the record and takes a new generation, rather than adding a second
 record or a second path to keep consistent with create.
 
-### Self-preparing allocations
+### Self-preparing sessions
 
 The login node supplies only the binary a job cannot start without, the Linkspan release it execs, plus the
 workflow document, both in one constant script during create. The binary belongs to the account rather than to
-a workspace: one `$HOME/.cybershuttle` per account, whatever a runtime opens. The environment, its
-dependencies, the server, and the wait for that server to answer all happen inside the allocation: the workflow
-is one `jupyter.sessions.start` task on `start`, and Linkspan builds the environment under `$HOME/.cybershuttle`,
-starts the server, publishes its port, and ends the job when the server ends.
+a workspace: one `$HOME/.cybershuttle` per account, whatever a session opens. The environment, its
+dependencies, the server, and the wait for that server to answer all happen inside the session: the workflow
+is one task on `start`, its steps holding the one `jupyter.sessions.start` step, and Linkspan builds the
+environment under `$HOME/.cybershuttle`, starts the server, publishes its port, and ends the job when the
+server ends.
 
-An allocation hosts a tunnel this control plane created, so its Linkspan must accept `--tunnel-host-token`.
-Preparation refuses a host whose Linkspan does not, rather than letting the allocation fail on its first flag.
+The workflow document is the `tasks` form, so the session's Linkspan must be 0.19.0 or newer.
+Preparation refuses a host whose Linkspan is older, rather than letting the session fail at startup.
 Preparation outlives the request that triggered it, so a caller that goes away leaves no half-built
-environment, and one preparation runs per host at a time: a second caller is refused with
-`runtime_provisioning_in_progress` rather than made to wait behind work it cannot see. A host that cannot be
+environment. Preparation is keyed on the caller's host configuration plus the alias: a second create for that
+same key is refused with `session_provisioning_in_progress` rather than made to wait behind work it cannot
+see, while a different caller's preparation on the same host proceeds independently. A host that cannot be
 prepared is refused with the reason and never receives a job.
 
 The Linkspan path may be absolute or anchored at `$HOME/`, which discovery resolves per host, so one setting
@@ -85,61 +88,65 @@ serves hosts whose accounts do not share a home directory.
 
 ### The batch script and the workflow
 
-The batch script execs Linkspan and names no application. What runs inside an allocation is the workflow's
-business: preparation writes the per-runtime `workflow.yaml` beside the allocation and the batch script points
+The batch script execs Linkspan and names no application. What runs inside a session is the workflow's
+business: preparation writes the per-session `workflow.yaml` beside the session and the batch script points
 Linkspan at it, so the service starts through Linkspan once Linkspan is live.
 
 The workflow carries only validated remote paths and the Jupyter port, which is not secret. Linkspan starts
 Jupyter Server with the token it inherits from `JUPYTER_TOKEN`. That, the tunnel host token, and the
-allocation identity the tunnel only assigns at creation — its ID, cluster, and generation-derived control port
-— are injected with fixed `sbatch --export` arguments, and the job is named on the same command line with
-`sbatch --job-name`.
+tunnel's own identity — its ID and cluster — plus the control port, derived from the session's generation
+rather than assigned at creation, are injected with fixed `sbatch --export` arguments, and the job is named
+on the same command line with `sbatch --job-name`.
 
-Validation and submission scripts are byte-identical and contain no generated secret literal: nothing unknown
-at review time is written into the script text. Both listening ports are derived from the runtime ID and
+Validation and submission scripts contain no generated secret literal: nothing unknown at review time is
+written into the script text. They are identical except for the log redirect, which validate builds with an
+empty generation placeholder since no generation is assigned until create's tunnel step succeeds; create then
+rebuilds the script with the real generation before submitting it, so the log path the batch job writes to
+matches the one the tail script later reads. Both listening ports are derived from the session ID and
 generation, so they can be declared on the tunnel before the job starts and bound exactly as declared; Linkspan
 republishes the Jupyter port, anonymous as declared, when its server starts, and access looks it up by number.
 
 ### States and reconciliation
 
-The runtime states are `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED` and `FAILED`. There
+The session states are `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED` and `FAILED`. There
 is one state field: a Slurm word this vocabulary does not cover is treated as no observation rather than as a
-state of its own. Scheduler state remains SSH/Slurm authoritative; Dev Tunnels management discovery supplies
-allocation endpoint metadata and is not a second readiness owner.
+state of its own. `STARTING` becomes `READY` once the job is running and its Linkspan has written to its
+log, the one sign the server is up. Scheduler state remains SSH/Slurm authoritative; Dev Tunnels management
+discovery supplies session endpoint metadata and is not a second readiness owner.
 
 Reconciliation is driven by reads, capped at one per second, and never runs more than once at a time. A slow
-background tick every 30 seconds runs the same reconciliation when nobody is reading, so a runtime whose owner
+background tick every 30 seconds runs the same reconciliation when nobody is reading, so a session whose owner
 closed the tab still reaches its terminal state.
 
-There is no push channel. `GET /api/v1/runtimes` is the one read a client polls: it answers from persisted
-state, starts a reconciliation for the next poll to collect, and carries the caller's runtimes and their
-startup log tails — filtered to the same owned set, because a tail is as private as the runtime that produced
+There is no push channel. `GET /api/v1/sessions` is the one read a client polls: it answers from persisted
+state, starts a reconciliation for the next poll to collect, and carries the caller's sessions and their
+startup log tails — filtered to the same owned set, because a tail is as private as the session that produced
 it. The strong `ETag` is taken over that filtered body, so it cannot match across principals, and a poll whose
 `If-None-Match` still matches is answered `304 Not Modified` with no body.
 
 ### Samples and run records
 
-Two things about a running allocation are not scheduler state and are not reconciled with it.
+Two things about a running session are not scheduler state and are not reconciled with it.
 
-Resource samples are read from the Linkspan the allocation is running, over the control port already declared
+Resource samples are read from the Linkspan the session is running, over the control port already declared
 on its own tunnel, once every five seconds. They are process-local and bounded to the last twenty, held beside
-the log tail rather than in `state.json`: a window on a running allocation is not a fact about it, and
+the log tail rather than in `state.json`: a window on a running session is not a fact about it, and
 rewriting persisted state every five seconds to hold one would be the wrong store. They are served on their
 own route for the same reason the poll is cheap — samples change on every tick, so folding them into
-`GET /api/v1/runtimes` would defeat its `ETag` for exactly the runtimes that have any. A missed sample is a
+`GET /api/v1/sessions` would defeat its `ETag` for exactly the sessions that have any. A missed sample is a
 gap in a window, not a fault.
 
-A run record is the opposite: it is the one durable trace an allocation leaves. Ending forgets everything else
-— relaunch replaces the runtime record in place and delete drops it — so the reconciliation that first sees a
-terminal state freezes what the allocation did, carrying its final sample window with it, under the same lock
-that would otherwise lose it. A run is named by the generation that ran it, so a card accumulates runs rather
-than overwriting them, and its history outlives the card. Slurm's own accounting is read separately and later:
+A run record is the opposite: it is the one durable trace a session leaves. Ending forgets everything else
+— relaunch replaces the session record in place and delete drops it — so the reconciliation that first sees a
+terminal state freezes what the session did, carrying its final sample window with it, under the same lock
+that would otherwise lose it. A run is named by the generation that ran it, so a session accumulates runs rather
+than overwriting them, and its history outlives the session record. Slurm's own accounting is read separately and later:
 `slurmdbd` flushes step usage a beat after a job ends, so the record is completed on the sampling tick for ten
 minutes and then left as it is.
 
 ## Dev Tunnels
 
-One creator-owned tunnel per allocation generation, declaring both allocation ports at creation. Tunnel-wide
+One creator-owned tunnel per session generation, declaring both session ports at creation. Tunnel-wide
 anonymous access is never requested; anonymous connect is granted only on the Jupyter port, whose authorization
 is Jupyter Server's own identity token. Traffic inspection is disabled.
 
@@ -166,8 +173,8 @@ This is a boundary, not a filing convention. `ssh` is invoked with `-F` naming t
 through the configuration of the caller who added it and through no other. The account `csctl` runs as has no
 standing in the API: its `~/.ssh/config` is neither read nor written, and its aliases are invisible. Two
 callers may use the same alias name for different hosts. The control master is keyed by the configuration as
-well as the alias, so one caller authenticating a host never hands another an authenticated session, and
-scheduler reconciliation, log tailing and accounting each run as the runtime's own owner.
+well as the alias, so one caller authenticating a host never hands another an authenticated SSH login, and
+scheduler reconciliation, log tailing and accounting each run as the session's own owner.
 
 What this does not do: an `IdentityFile` may still name any path the daemon account can read, and there is no
 way to upload a key. Isolation is of configuration and of connections, not of the filesystem underneath them.
@@ -177,8 +184,8 @@ A pasted `ssh` command is parsed server-side into host, user, port, identity fil
 or include more configuration is refused, and the browser never composes configuration text.
 
 `sshexec` builds fixed argument vectors rather than shell strings and multiplexes over an OpenSSH
-`ControlMaster` socket in the state directory, with bounded output and timeouts. The interactive SSH
-authentication WebSocket is what establishes that master.
+`ControlMaster` socket, with bounded output and timeouts. The interactive SSH authentication WebSocket is
+what establishes that master.
 
 ## Local state
 
@@ -186,10 +193,9 @@ authentication WebSocket is what establishes that master.
 
 | Path | Contents |
 | --- | --- |
-| `state.json` | non-secret scheduler, allocation and tunnel metadata, and the bounded record of what finished allocations did |
+| `state.json` | non-secret scheduler, session and tunnel metadata, and the bounded record of what finished sessions did |
 | `hosts/` | one SSH host configuration per principal, mode `0600` under a `0700` directory |
 | `credentials/` | per-generation Dev Tunnel connect token and Jupyter token, mode `0600` under a `0700` directory |
-| `ssh/` | OpenSSH `ControlMaster` sockets |
 
 OAuth credentials and tunnel host and manage-ports credentials are never persisted.
 
@@ -205,9 +211,9 @@ OAuth credentials and tunnel host and manage-ports credentials are never persist
   capability; the cryptographically validated ID token is the sole identity bearer. No subject or `at_hash`
   binding is claimed between them.
 - **Ownership** is the stable subject and tenant derived only from the validated ID token. Dev Tunnels access
-  validation is an independent capability check and supplies no identity claims. Runtime lists and their log
+  validation is an independent capability check and supplies no identity claims. Session lists and their log
   tails are filtered to the owner; item and access reads reject a different principal.
-- **No ambient authentication.** There are no cookies, browser sessions, token URLs or static file serving, and
+- **No ambient authentication.** There are no cookies, browser sign-in state, token URLs or static file serving, and
   the only unauthenticated routes are the two device-code routes.
 - **The device-code broker** retains the device code in bounded process memory only, enforces polling
   intervals, and discards refresh tokens and terminal state. It brokers pinned Microsoft requests for exact
@@ -218,8 +224,8 @@ OAuth credentials and tunnel host and manage-ports credentials are never persist
   direct URIs and ports are validated before they reach a command line or persistent state. Remote scripts are
   constants and values reach them as arguments. Delegated OAuth credentials and the validated principal travel
   in the request context, not in lifecycle request or state structs.
-- **Redaction.** OAuth, host, connect and Jupyter tokens are redacted from errors, logs, scripts and runtime
-  responses. The Jupyter token appears only in the job environment and in the runtime-access response.
-- **No proxying.** The owner-authenticated `/access` response returns the allocation's direct Jupyter URI and
+- **Redaction.** OAuth, host, connect and Jupyter tokens are redacted from errors, logs, scripts and session
+  responses. The Jupyter token appears only in the job environment and in the session-access response.
+- **No proxying.** The owner-authenticated `/access` response returns the session's direct Jupyter URI and
   its token; cs-control proxies no session data and creates no login-host port forward. The one WebSocket
-  carries interactive SSH authentication prompts as untyped bytes and never forwards runtime data.
+  carries interactive SSH authentication prompts as untyped bytes and never forwards session data.
