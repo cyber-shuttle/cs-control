@@ -297,7 +297,7 @@ func (s Service) completeRunStats() {
 		return
 	}
 	for _, run := range due {
-		ctx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
+		ctx, cancel := s.ownTimeout()
 		stats, err := s.forPrincipal(run.Owner).readRunStats(ctx, run.SSHHost, jobName(run.SessionID, run.Seq), run.StartedAt)
 		cancel()
 		if err != nil || !stats.Complete() {

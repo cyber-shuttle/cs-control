@@ -338,6 +338,10 @@ func (s Service) now() time.Time {
 	return time.Now().UTC()
 }
 
+func (s Service) ownTimeout() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
+}
+
 func (s Store) withLock(fn func(*state) error) error {
 	if s.Dir == "" {
 		return errors.New("state directory is required")

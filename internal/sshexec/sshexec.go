@@ -5,7 +5,7 @@
 //	Runner, capture, captureStream
 //	newCapture, ensurePrivateControlDirectory, authenticationRequired, utf8Request
 //	KillGroup, RunCommand, ChildEnv
-//	ShellQuote, FailureMessage, AuthenticationFailure, ClassifyFailure
+//	ShellQuote, FailureMessage, AuthenticationFailure, AmbiguousExit, ClassifyFailure
 //	RunBounded, RemoveStaleControl, UnlockControl
 package sshexec
 
@@ -177,6 +177,15 @@ func FailureMessage(stderr string, err error) string {
 func AuthenticationFailure(message string) bool {
 	value := strings.ToLower(message)
 	return slices.ContainsFunc(authenticationMarkers, func(marker string) bool { return strings.Contains(value, marker) })
+}
+
+// 255 is ssh's own exit code, so it says nothing about whether the remote command ran.
+func AmbiguousExit(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exit *exec.ExitError
+	return !errors.As(err, &exit) || exit.ExitCode() == 255
 }
 
 func ClassifyFailure(alias, stderr string, err error) error {

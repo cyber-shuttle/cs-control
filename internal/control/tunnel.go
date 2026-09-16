@@ -171,7 +171,7 @@ func (s Service) createSessionTunnel(ctx context.Context, session *Session, auth
 }
 
 func (s Service) releaseSessionTunnel(auth authn.TunnelAuthorization, sessionID string, seq int, tunnel tunnelMetadata) error {
-	ctx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
+	ctx, cancel := s.ownTimeout()
 	defer cancel()
 	var deleteErr error
 	if s.Tunnels != nil && tunnel.ID != "" {

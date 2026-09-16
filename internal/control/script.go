@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -247,9 +246,7 @@ func (s Service) submitSessionScript(ctx context.Context, host string, session S
 	if runErr != nil {
 		cause := apierr.Redact(fmt.Sprintf("submit %s failed", jobName),
 			errors.New(sshexec.FailureMessage(errText, runErr)), jupyterToken, hostToken)
-		var exit *exec.ExitError
-		ambiguous := !errors.As(runErr, &exit) || exit.ExitCode() == 255
-		return "", &submissionError{cause: cause, ambiguous: ambiguous}
+		return "", &submissionError{cause: cause, ambiguous: sshexec.AmbiguousExit(runErr)}
 	}
 	jobID := strings.SplitN(strings.TrimSpace(outText), ";", 2)[0]
 	if !jobPattern.MatchString(jobID) {
@@ -260,8 +257,7 @@ func (s Service) submitSessionScript(ctx context.Context, host string, session S
 
 func (s Service) validateScript(ctx context.Context, alias, script string) (commandResult, error) {
 	outText, errText, err := s.Runner.RunOutput(ctx, alias, strings.NewReader(script), "sbatch", "--test-only")
-	var exit *exec.ExitError
-	if err == nil || errors.As(err, &exit) && exit.ExitCode() != 255 {
+	if !sshexec.AmbiguousExit(err) {
 		return commandResult{stdout: outText, stderr: errText, passed: err == nil}, nil
 	}
 	return commandResult{}, sshexec.ClassifyFailure(alias, errText, err)
