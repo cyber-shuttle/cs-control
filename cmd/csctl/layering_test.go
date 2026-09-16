@@ -18,7 +18,6 @@ const modulePrefix = "github.com/cyber-shuttle/cs-control/"
 var lowestToHighest = []string{
 	"internal/testutil",
 	"internal/apierr",
-	"internal/apihttp",
 	"internal/safeio",
 	"internal/httpx",
 	"internal/sshconfig",

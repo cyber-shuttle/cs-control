@@ -4,8 +4,8 @@
 //
 //	Principal, clock, OAuthCredentials, oAuthValidator, oauthBoundary
 //	devTunnelOAuthValidator, TunnelAuthorization, tunnelAuthorizationContextKey, tenantSegment
-//	validOAuthToken, validateControlOrigin, validatedOriginSet, allowOrigin
-//	preflightHeadersAllowed, validPreflight, bearerToken
+//	canonicalBase64URL, validOAuthToken, validateControlOrigin, validatedOriginSet, allowOrigin
+//	preflightHeadersAllowed, validPreflight, writePreflightAllow, bearerToken
 //	controlWebSocketRoute, controlWebSocketProtocols, decodeWebSocketCredential, controlWebSocketAuthorization
 //	httpOAuthCredentials, withTunnelAuthorization, newDevTunnelOAuthValidatorForBase, newDevTunnelOAuthValidator
 //	parseTenantAuthority
@@ -37,7 +37,7 @@ import (
 
 const (
 	maxOAuthResponse                    = 64 << 10
-	defaultOAuthTimeout                 = 15 * time.Second
+	oauthRequestTimeout                 = 15 * time.Second
 	ControlIdentityHeader               = "X-CyberShuttle-Identity"
 	ControlWebSocketProtocol            = "cybershuttle.v1"
 	WebSocketBearerPrefix               = "bearer."
@@ -80,6 +80,14 @@ type TunnelAuthorization struct {
 type tunnelAuthorizationContextKey struct{}
 
 var tenantSegment = regexp.MustCompile(`^[A-Za-z0-9.-]{1,256}$`)
+
+func canonicalBase64URL(encoded string) ([]byte, bool) {
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != encoded {
+		return nil, false
+	}
+	return decoded, true
+}
 
 func validOAuthToken(token string) bool {
 	if token == "" || len(token) > devtunnel.MaxToken || !utf8.ValidString(token) {
@@ -157,6 +165,12 @@ func validPreflight(r *http.Request) bool {
 	return preflightHeadersAllowed(r.Header.Get("Access-Control-Request-Headers"), "authorization", "content-type", "if-none-match", ControlIdentityHeader)
 }
 
+func writePreflightAllow(w http.ResponseWriter, methods, headers string) {
+	w.Header().Set("Access-Control-Allow-Methods", methods)
+	w.Header().Set("Access-Control-Allow-Headers", headers)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func bearerToken(header string) (string, bool) {
 	fields := strings.Fields(header)
 	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") || !validOAuthToken(fields[1]) {
@@ -196,8 +210,8 @@ func decodeWebSocketCredential(encoded string) (string, bool) {
 	if encoded == "" || len(encoded) > maxWebSocketCredentialProtocolBytes {
 		return "", false
 	}
-	decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
-	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != encoded || !validOAuthToken(string(decoded)) {
+	decoded, ok := canonicalBase64URL(encoded)
+	if !ok || !validOAuthToken(string(decoded)) {
 		return "", false
 	}
 	return string(decoded), true
@@ -276,9 +290,7 @@ func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "preflight is not allowed", http.StatusForbidden)
 			return
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-None-Match, "+ControlIdentityHeader)
-		w.WriteHeader(http.StatusNoContent)
+		writePreflightAllow(w, "GET, POST, PUT, DELETE, OPTIONS", "Authorization, Content-Type, If-None-Match, "+ControlIdentityHeader)
 		return
 	}
 	request := r
@@ -314,7 +326,7 @@ func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func newDevTunnelOAuthValidatorForBase(base *url.URL, client *http.Client) *devTunnelOAuthValidator {
-	bounded := devtunnel.GuardedClient(client, defaultOAuthTimeout)
+	bounded := devtunnel.GuardedClient(client, oauthRequestTimeout)
 	return &devTunnelOAuthValidator{baseURL: base.String(), client: bounded}
 }
 

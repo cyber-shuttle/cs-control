@@ -32,7 +32,7 @@ func TestLiveProvisionPreparesABareHost(t *testing.T) {
 		Metrics: NewSessionMetrics(),
 	}
 	session := Session{
-		sessionResponse: sessionResponse{ID: "s-0123456789ab", Generation: "g-0123456789abcdef"},
+		sessionResponse: sessionResponse{ID: "s-0123456789ab", Seq: 1},
 		PrivateRoot:     root + "/private", WorkspaceRoot: root,
 	}
 	linkspan := root + "/bin/linkspan"

@@ -5,8 +5,8 @@
 //	maxRequestBody, sshAuthRoute
 //	route, requireUpgrade, writeOrError, answer, caller, requestPrincipal, sessionsOwnedBy, decodeJSON, routedSessionID
 //	httpAPI
-//	listHosts, addHost, updateHost, removeHost, testHost
-//	discoverSlurm, validateSession
+//	listHosts, addHost, updateHost
+//	validateSession
 //	createSession
 //	sessionAction
 //	NewHTTPHandler, ValidateLoopbackListen
@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/apihttp"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/sshconfig"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
@@ -42,7 +41,7 @@ func route(handlers map[string]http.HandlerFunc) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		handler, ok := handlers[request.Method]
 		if !ok {
-			apihttp.WriteError(writer, errMethodNotAllowed)
+			apierr.WriteError(writer, errMethodNotAllowed)
 			return
 		}
 		handler(writer, request)
@@ -52,7 +51,7 @@ func route(handlers map[string]http.HandlerFunc) http.HandlerFunc {
 func requireUpgrade(message string, serve http.HandlerFunc) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		if !websocket.IsWebSocketUpgrade(request) {
-			apihttp.WriteError(writer, apierr.New("upgrade_required", message, http.StatusUpgradeRequired))
+			apierr.WriteError(writer, apierr.New("upgrade_required", message, http.StatusUpgradeRequired))
 			return
 		}
 		serve(writer, request)
@@ -61,10 +60,10 @@ func requireUpgrade(message string, serve http.HandlerFunc) http.HandlerFunc {
 
 func writeOrError[T any](writer http.ResponseWriter, status int, value T, err error) {
 	if err != nil {
-		apihttp.WriteError(writer, err)
+		apierr.WriteError(writer, err)
 		return
 	}
-	apihttp.WriteJSON(writer, status, value)
+	apierr.WriteJSON(writer, status, value)
 }
 
 func answer[T any](produce func(*http.Request) (T, error)) http.HandlerFunc {
@@ -101,7 +100,7 @@ func sessionsOwnedBy(sessions []Session, principal authn.Principal) []Session {
 }
 
 func decodeJSON(request *http.Request, target any) error {
-	if err := apihttp.DecodeStrict(io.LimitReader(request.Body, maxRequestBody+1), target); err != nil {
+	if err := apierr.DecodeStrict(io.LimitReader(request.Body, maxRequestBody+1), target); err != nil {
 		return apierr.New("invalid_json", "request body is invalid", http.StatusBadRequest)
 	}
 	return nil
@@ -178,25 +177,13 @@ func updateHost(service Service, request *http.Request) (sshconfig.Host, error) 
 	return service.updateHost(request.PathValue("alias"), update)
 }
 
-func removeHost(service Service, request *http.Request) (sshconfig.Host, error) {
-	return service.removeHost(request.PathValue("alias"))
-}
-
-func testHost(service Service, request *http.Request) (hostTest, error) {
-	return service.testHost(request.Context(), request.PathValue("alias"))
-}
-
 func (a *httpAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
 	service, err := a.callerService(request)
 	if err != nil {
-		apihttp.WriteError(writer, err)
+		apierr.WriteError(writer, err)
 		return
 	}
 	a.Auth.ServeWebSocket(writer, request, request.PathValue("alias"), service.Runner)
-}
-
-func discoverSlurm(service Service, request *http.Request) (resource, error) {
-	return service.discover(request.Context(), request.PathValue("alias"))
 }
 
 func validateSession(service Service, request *http.Request) (*validationResult, error) {
@@ -224,7 +211,7 @@ func (a *httpAPI) ownedSessionList(request *http.Request) ([]byte, error) {
 func (a *httpAPI) listSessions(writer http.ResponseWriter, request *http.Request) {
 	body, err := a.ownedSessionList(request)
 	if err != nil {
-		apihttp.WriteError(writer, err)
+		apierr.WriteError(writer, err)
 		return
 	}
 	sum := sha256.Sum256(body)
@@ -235,7 +222,7 @@ func (a *httpAPI) listSessions(writer http.ResponseWriter, request *http.Request
 		writer.WriteHeader(http.StatusNotModified)
 		return
 	}
-	apihttp.WriteJSONBytes(writer, http.StatusOK, body)
+	apierr.WriteJSONBytes(writer, http.StatusOK, body)
 }
 
 func createSession(service Service, request *http.Request) (sessionResponse, error) {
@@ -304,11 +291,17 @@ func (a *httpAPI) sessionAccess(request *http.Request) (*sessionAccessResponse, 
 func (a *httpAPI) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, handlers := range map[string]map[string]http.HandlerFunc{
-		"/api/v1/ssh":                   {http.MethodGet: caller(a, http.StatusOK, listHosts), http.MethodPost: caller(a, http.StatusCreated, addHost)},
-		"/api/v1/ssh/{alias}":           {http.MethodPut: caller(a, http.StatusOK, updateHost), http.MethodDelete: caller(a, http.StatusOK, removeHost)},
-		"/api/v1/ssh/{alias}/auth":      {http.MethodGet: requireUpgrade("SSH authentication requires a WebSocket", a.sshAuth)},
-		"/api/v1/ssh/{alias}/slurm":     {http.MethodGet: caller(a, http.StatusOK, discoverSlurm)},
-		"/api/v1/ssh/{alias}/test":      {http.MethodPost: caller(a, http.StatusOK, testHost)},
+		"/api/v1/ssh": {http.MethodGet: caller(a, http.StatusOK, listHosts), http.MethodPost: caller(a, http.StatusCreated, addHost)},
+		"/api/v1/ssh/{alias}": {http.MethodPut: caller(a, http.StatusOK, updateHost), http.MethodDelete: caller(a, http.StatusOK, func(service Service, request *http.Request) (sshconfig.Host, error) {
+			return service.removeHost(request.PathValue("alias"))
+		})},
+		"/api/v1/ssh/{alias}/auth": {http.MethodGet: requireUpgrade("SSH authentication requires a WebSocket", a.sshAuth)},
+		"/api/v1/ssh/{alias}/slurm": {http.MethodGet: caller(a, http.StatusOK, func(service Service, request *http.Request) (resource, error) {
+			return service.discover(request.Context(), request.PathValue("alias"))
+		})},
+		"/api/v1/ssh/{alias}/test": {http.MethodPost: caller(a, http.StatusOK, func(service Service, request *http.Request) (hostTest, error) {
+			return service.testHost(request.Context(), request.PathValue("alias"))
+		})},
 		"/api/v1/sessions":              {http.MethodGet: a.listSessions, http.MethodPost: caller(a, http.StatusCreated, createSession)},
 		"/api/v1/sessions/validate":     {http.MethodPost: caller(a, http.StatusOK, validateSession)},
 		"/api/v1/sessions/history":      {http.MethodGet: answer(a.listRuns)},
@@ -321,7 +314,7 @@ func (a *httpAPI) mux() *http.ServeMux {
 		mux.Handle(pattern, route(handlers))
 	}
 	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
-		apihttp.WriteError(writer, errRouteNotFound)
+		apierr.WriteError(writer, errRouteNotFound)
 	})
 	return mux
 }

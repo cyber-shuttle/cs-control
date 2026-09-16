@@ -1,6 +1,6 @@
 {
   "id": "s-012345abcdef",
-  "generation": "g-0123456789abcdef",
+  "seq": 1,
   "state": "READY",
   "sshHost": "delta",
   "account": "project-a",

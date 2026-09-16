@@ -1,5 +1,5 @@
 // A run is recorded once a session first reaches a terminal state, keeping its final window and narration.
-// Each generation gets its own run, and history is filtered to its owner and bounded.
+// Each seq gets its own run, and history is filtered to its owner and bounded.
 // This file also covers the sacct accounting parser reading a finished job's usage.
 //
 //	runsIn
@@ -59,26 +59,26 @@ func TestARunOutlivesTheSessionThatEnded(t *testing.T) {
 	}
 }
 
-func TestEachGenerationIsItsOwnRun(t *testing.T) {
+func TestEachSeqIsItsOwnRun(t *testing.T) {
 	service, _, _ := reconciliationService(t)
 	session := pendingSession("s-111111111111", "alpha", "101")
 	session.State = "STOPPED"
 	setTestSessionMetadata(&session)
 	testutil.Check(t, service.freezeRun(&session))
 	second := session
-	second.Generation = "g-fedcba9876543210"
+	second.Seq = 2
 	second.Resources.Cores = 8
 	testutil.Check(t, service.freezeRun(&second))
 	runs := runsIn(t, service)
 	if len(runs) != 2 {
 		t.Fatalf("a relaunch overwrote the previous run: %+v", runs)
 	}
-	if runs[0].Generation != second.Generation || runs[0].Resources.Cores != 8 {
+	if runs[0].Seq != second.Seq || runs[0].Resources.Cores != 8 {
 		t.Fatalf("the newest run is not first, or lost its own session: %+v", runs[0])
 	}
 	testutil.Check(t, service.freezeRun(&second))
 	if runs := runsIn(t, service); len(runs) != 2 {
-		t.Fatalf("recording the same generation twice kept %d runs", len(runs))
+		t.Fatalf("recording the same seq twice kept %d runs", len(runs))
 	}
 }
 
@@ -132,7 +132,7 @@ func TestRunHistoryIsBounded(t *testing.T) {
 	current := &state{Version: stateVersion, Sessions: map[string]*Session{}}
 	for index := 0; index < maxRunRecords+10; index++ {
 		recordRun(current, runRecord{runResponse: runResponse{
-			SessionID: "s-111111111111", Generation: "g-" + strconv.Itoa(index),
+			SessionID: "s-111111111111", Seq: index + 1,
 		}})
 	}
 	testutil.Equal(t, len(current.Runs), maxRunRecords, "run history length")
@@ -206,8 +206,8 @@ func TestCompleteRunStatsGivesEachPendingRunItsOwnTimeout(t *testing.T) {
 	t.Setenv("FAKE_RUN_STATS_OUTPUT", sacctRows)
 	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{HostsDir: filepath.Join(t.TempDir(), "hosts")}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
 	registerTestHosts(t, service, testPrincipal, "delta")
-	slow := runRecord{runResponse: runResponse{SessionID: "s-111111111111", Generation: "g-0000000000000001", SSHHost: "delta", EndedAt: service.now()}, Owner: testPrincipal}
-	fast := runRecord{runResponse: runResponse{SessionID: "s-222222222222", Generation: "g-0000000000000002", SSHHost: "delta", EndedAt: service.now()}, Owner: testPrincipal}
+	slow := runRecord{runResponse: runResponse{SessionID: "s-111111111111", Seq: 1, SSHHost: "delta", EndedAt: service.now()}, Owner: testPrincipal}
+	fast := runRecord{runResponse: runResponse{SessionID: "s-222222222222", Seq: 2, SSHHost: "delta", EndedAt: service.now()}, Owner: testPrincipal}
 	if err := service.Store.withLock(func(current *state) error {
 		current.Runs = []runRecord{slow, fast}
 		return service.Store.save(current)
@@ -220,7 +220,7 @@ func TestCompleteRunStatsGivesEachPendingRunItsOwnTimeout(t *testing.T) {
 	runs := runsIn(t, service)
 	var gotFast bool
 	for _, run := range runs {
-		if run.Generation == fast.Generation {
+		if run.Seq == fast.Seq {
 			gotFast = run.Stats != nil
 		}
 	}

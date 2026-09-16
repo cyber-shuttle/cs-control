@@ -2,7 +2,11 @@
 // It runs commands only through sshexec and has no view of the session domain.
 // The request that first sees the master turn healthy owns it, so shutdown reaps that exact process.
 //
+//	clientFrame, serverFrame
 //	authInputOp, authAttempt, ownedMaster, SSHAuthManager
+//	exitFrame
+//	pumpPTY
+//	writeJSON, writeBinary
 //	stopAndReap, closeMaster, cleanupFailedAttempt
 //	writeReady, masterExitFrame, readClientFrames, negotiableWindow, writeClientInput
 //	NewSSHAuthManager
@@ -12,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,7 +25,6 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
-	"github.com/cyber-shuttle/cs-control/internal/apihttp"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/sshexec"
 	"github.com/gorilla/websocket"
@@ -45,6 +49,18 @@ var (
 	authWriteTimeout = 5 * time.Second
 	authKeepAlive    = 20 * time.Second
 )
+
+type clientFrame struct {
+	Type string `json:"type"`
+	Cols uint16 `json:"cols,omitempty"`
+	Rows uint16 `json:"rows,omitempty"`
+}
+
+type serverFrame struct {
+	Type    string `json:"type"`
+	Code    *int   `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+}
 
 type authInputOp struct {
 	data   []byte
@@ -84,6 +100,37 @@ type SSHAuthManager struct {
 	active map[string]*authAttempt
 	owned  map[string]*ownedMaster
 	wg     sync.WaitGroup
+}
+
+func exitFrame(code int, message string) serverFrame {
+	return serverFrame{Type: "exit", Code: &code, Message: message}
+}
+
+func pumpPTY(ctx context.Context, master io.Reader, out chan<- []byte, size int) {
+	buffer := make([]byte, size)
+	for {
+		n, err := master.Read(buffer)
+		if n > 0 {
+			select {
+			case out <- append([]byte(nil), buffer[:n]...):
+			case <-ctx.Done():
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func writeJSON(conn *websocket.Conn, timeout time.Duration, frame any) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+	return conn.WriteJSON(frame)
+}
+
+func writeBinary(conn *websocket.Conn, timeout time.Duration, data []byte) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+	return conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
 func (s *authAttempt) assignConnection(conn *websocket.Conn) {
@@ -360,7 +407,7 @@ func (m *SSHAuthManager) command(attempt *authAttempt) (*exec.Cmd, bool, error) 
 func (m *SSHAuthManager) ServeWebSocket(writer http.ResponseWriter, request *http.Request, alias string, runner sshexec.Runner) {
 	attempt, err := m.admit(alias, runner)
 	if err != nil {
-		apihttp.WriteError(writer, err)
+		apierr.WriteError(writer, err)
 		return
 	}
 	finished := false

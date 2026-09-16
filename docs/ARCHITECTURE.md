@@ -13,13 +13,13 @@ through it.
 Each subsystem is a package. New code goes in the lowest layer that can hold it.
 
 ```
-apierr  apihttp      error shape, JSON response writers and strict decoding
+apierr               error shape, JSON response writers and strict decoding
 safeio               private files
 httpx                bounded client/body, redirect policy, outbound JSON GET
 sshconfig            reads the per-principal hosts config, writes only its own managed block, never runs ssh
 sshexec              argument vectors, control socket, bounded output
 devtunnel            Dev Tunnels management client and its URI/host policy
-credentialstore      one generation's connect and Jupyter tokens, held as one private file per generation
+credentialstore      one seq's connect and Jupyter tokens, held as one private file per seq
 authn                OAuth boundary, OIDC validation, device-code broker
 control              session domain, store, reconcile, discovery, HTTP, marker-delimited remote output
 gateway              SSH authentication WebSocket route and its frames
@@ -39,7 +39,7 @@ Create proceeds in this order:
 
 1. SSH discovery (`id`, `sacctmgr`, `sinfo`, `printenv HOME`) and `sbatch --test-only` against the candidate
    script.
-2. One creator-owned Dev Tunnel for the session generation, the generation credential written to disk, then
+2. One creator-owned Dev Tunnel for the session seq, the seq credential written to disk, then
    the session record persisted — durable before anything slow begins.
 3. Login-node preparation: Linkspan and the workflow document.
 4. `sbatch`, with the job name and the session identity on the command line.
@@ -50,19 +50,19 @@ client is already polling rather than into a request that says nothing until it 
 Conclusive submission failure compensates tunnel and credential state. Ambiguous submission — anything other
 than a refusal `sbatch` itself reported — stays durable for reconciliation, because the job may already be
 queued. Stop releases the session's tunnel and credential and asks the scheduler to cancel the job; the
-generation it ends is never reused.
+seq it ends is never reused.
 
-### Generations and job names
+### Seq and job names
 
 A session is the durable record; a Slurm job only serves it, and a session outlives its jobs. The job name is
-`cs-<session id>-<generation>`, so the scheduler and its accounting database answer for one generation of that
-record rather than for the session as a whole. Without the generation, a run that has just been submitted would
+`cs-<session id>-<seq>`, so the scheduler and its accounting database answer for one seq of that
+record rather than for the session as a whole. Without the seq, a run that has just been submitted would
 be reconciled against the accounting record of the run it replaced and would inherit that run's outcome. For the
 same reason, the window that tolerates a job Slurm has not published yet is measured from the record's last
 change rather than from its creation, which a relaunch keeps.
 
 A terminal session is not resumable, so running one again (`POST /api/v1/sessions/{id}/start`) is a create
-under the same session identity: it replaces the record and takes a new generation, rather than adding a second
+under the same session identity: it replaces the record and takes the next seq, rather than adding a second
 record or a second path to keep consistent with create.
 
 ### Self-preparing sessions
@@ -94,16 +94,16 @@ Linkspan at it, so the service starts through Linkspan once Linkspan is live.
 
 The workflow carries only validated remote paths and the Jupyter port, which is not secret. Linkspan starts
 Jupyter Server with the token it inherits from `JUPYTER_TOKEN`. That, the tunnel host token, and the
-tunnel's own identity — its ID and cluster — plus the control port, derived from the session's generation
+tunnel's own identity — its ID and cluster — plus the control port, derived from the session's seq
 rather than assigned at creation, are injected with fixed `sbatch --export` arguments, and the job is named
 on the same command line with `sbatch --job-name`.
 
 Validation and submission scripts contain no generated secret literal: nothing unknown at review time is
-written into the script text. They are identical except for the log redirect, which validate builds with an
-empty generation placeholder since no generation is assigned until create's tunnel step succeeds; create then
-rebuilds the script with the real generation before submitting it, so the log path the batch job writes to
+written into the script text. They are identical except for the log redirect, which validate builds with a
+placeholder seq of 0 since no seq is assigned until create's tunnel step succeeds; create then
+rebuilds the script with the real seq before submitting it, so the log path the batch job writes to
 matches the one the tail script later reads. Both listening ports are derived from the session ID and
-generation, so they can be declared on the tunnel before the job starts and bound exactly as declared; Linkspan
+seq, so they can be declared on the tunnel before the job starts and bound exactly as declared; Linkspan
 republishes the Jupyter port, anonymous as declared, when its server starts, and access looks it up by number.
 
 ### States and reconciliation
@@ -139,14 +139,14 @@ gap in a window, not a fault.
 A run record is the opposite: it is the one durable trace a session leaves. Ending forgets everything else
 — relaunch replaces the session record in place and delete drops it — so the reconciliation that first sees a
 terminal state freezes what the session did, carrying its final sample window with it, under the same lock
-that would otherwise lose it. A run is named by the generation that ran it, so a session accumulates runs rather
+that would otherwise lose it. A run is named by the seq that ran it, so a session accumulates runs rather
 than overwriting them, and its history outlives the session record. Slurm's own accounting is read separately and later:
 `slurmdbd` flushes step usage a beat after a job ends, so the record is completed on the sampling tick for ten
 minutes and then left as it is.
 
 ## Dev Tunnels
 
-One creator-owned tunnel per session generation, declaring both session ports at creation. Tunnel-wide
+One creator-owned tunnel per session seq, declaring both session ports at creation. Tunnel-wide
 anonymous access is never requested; anonymous connect is granted only on the Jupyter port, whose authorization
 is Jupyter Server's own identity token. Traffic inspection is disabled.
 
@@ -195,7 +195,7 @@ what establishes that master.
 | --- | --- |
 | `state.json` | non-secret scheduler, session and tunnel metadata, and the bounded record of what finished sessions did |
 | `hosts/` | one SSH host configuration per principal, mode `0600` under a `0700` directory |
-| `credentials/` | per-generation Dev Tunnel connect token and Jupyter token, mode `0600` under a `0700` directory |
+| `credentials/` | per-seq Dev Tunnel connect token and Jupyter token, mode `0600` under a `0700` directory |
 
 OAuth credentials and tunnel host and manage-ports credentials are never persisted.
 

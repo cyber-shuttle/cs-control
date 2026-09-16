@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -185,10 +186,10 @@ func credential() credentialstore.Credential {
 }
 
 func setTestSessionMetadata(session *Session) {
-	if session.Generation == "" {
-		session.Generation = "g-0123456789abcdef"
+	if session.Seq == 0 {
+		session.Seq = 1
 		session.Owner = testPrincipal
-		session.Tunnel = tunnelMetadata{ID: session.ID + "-" + session.Generation, ClusterID: "use", ExpiresAt: time.Now().Add(time.Hour)}
+		session.Tunnel = tunnelMetadata{ID: session.ID + "-" + strconv.Itoa(session.Seq), ClusterID: "use", ExpiresAt: time.Now().Add(time.Hour)}
 	}
 }
 
@@ -208,6 +209,6 @@ func pendingSession(id, host, jobID string) Session {
 	now := time.Unix(1, 0).UTC()
 	return Session{
 		sessionResponse: sessionResponse{ID: id, State: "QUEUED", SSHHost: host, Partition: "cpu", RootFolder: ".", Resources: resources{Cores: 1, MemoryMB: 1024, WallMinutes: 60}, CreatedAt: now, UpdatedAt: now},
-		JobID:           jobID, JobName: jobName(id, "g-0123456789abcdef"), PrivateRoot: "/home/test/.cybershuttle/sessions/" + id, WorkspaceRoot: "/home/test", Owner: testPrincipal,
+		JobID:           jobID, JobName: jobName(id, 1), PrivateRoot: "/home/test/.cybershuttle/sessions/" + id, WorkspaceRoot: "/home/test", Owner: testPrincipal,
 	}
 }

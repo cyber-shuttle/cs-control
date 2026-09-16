@@ -2,22 +2,19 @@
 //
 //	realisticTunnelResponse, testClient
 //	TestDevTunnelCreateRequestsScopedTokensAndAcceptsAdditiveFields, TestDevTunnelRejectsMalformedUsedFields,
-//	TestDevTunnelURLAndRedirectValidation, TestSafeErrorTruncatesWithoutSplittingARune
+//	TestDevTunnelURLAndRedirectValidation
 package devtunnel
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
@@ -103,14 +100,5 @@ func TestDevTunnelURLAndRedirectValidation(t *testing.T) {
 	to, _ = url.Parse("https://evil.example/tunnels/x")
 	if safeRedirect(from, to) {
 		t.Fatal("hostile redirect accepted")
-	}
-}
-
-func TestSafeErrorTruncatesWithoutSplittingARune(t *testing.T) {
-	// Place a multi-byte rune straddling the truncation boundary, one byte before it.
-	filler := strings.Repeat("a", maxDevTunnelError-len(": ")-1)
-	err := safeError("", errors.New(filler+"€"))
-	if !utf8.ValidString(err.Error()) {
-		t.Fatalf("truncated error message split a rune: %q", err.Error())
 	}
 }

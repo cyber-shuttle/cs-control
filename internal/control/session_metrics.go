@@ -154,7 +154,7 @@ func NewSessionMetrics() *sessionMetrics {
 }
 
 func (s Service) sampleSession(ctx context.Context, session Session) (metricSample, error) {
-	endpoint, err := s.sessionEndpoint(ctx, session, sessionPorts(session.ID, session.Generation).control)
+	endpoint, err := s.sessionEndpoint(ctx, session, sessionPorts(session.ID, session.Seq).control)
 	if err != nil {
 		return metricSample{}, err
 	}
