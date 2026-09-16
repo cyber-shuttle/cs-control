@@ -1,11 +1,11 @@
-// OIDC identity validation, layered under MicrosoftOAuthValidator, backed by discovery and JWKS.
+// OIDC identity validation, layered under Validator, backed by discovery and JWKS.
 // A signature failure against a known key is hostile input, not evidence of rotation.
 // Only an unknown kid inside its cooldown earns a key refresh.
 //
-//	MicrosoftOAuthValidator
+//	Validator
 //	oidcMetadata, oidcKeySet, cachedOIDCKeys, oidcRefreshCall, oidcValidator, idTokenHeader, idTokenClaims
 //	makeOIDCValidator, newOIDCValidator, parseSignedIDToken, verifyIDTokenSignature
-//	NewMicrosoftOAuthValidator
+//	NewValidator
 package authn
 
 import (
@@ -33,9 +33,10 @@ const (
 	oidcUnknownKIDCooldown = 30 * time.Second
 )
 
-type MicrosoftOAuthValidator struct {
+type Validator struct {
 	access   *devTunnelOAuthValidator
 	identity *oidcValidator
+	github   *githubValidator
 }
 
 type oidcMetadata struct {
@@ -313,7 +314,7 @@ func (v *oidcValidator) fetchKeys(ctx context.Context, endpoint string) (map[str
 	return keys, nil
 }
 
-func NewMicrosoftOAuthValidator(devTunnelBaseURL, authority, clientID string, client *http.Client) (*MicrosoftOAuthValidator, error) {
+func NewValidator(devTunnelBaseURL, authority, clientID string, client *http.Client) (*Validator, error) {
 	access, err := newDevTunnelOAuthValidator(devTunnelBaseURL, client)
 	if err != nil {
 		return nil, err
@@ -322,15 +323,21 @@ func NewMicrosoftOAuthValidator(devTunnelBaseURL, authority, clientID string, cl
 	if err != nil {
 		return nil, err
 	}
-	return &MicrosoftOAuthValidator{access: access, identity: identity}, nil
+	return &Validator{access: access, identity: identity, github: newGitHubValidator(githubUserEndpoint, client)}, nil
 }
 
-func (v *MicrosoftOAuthValidator) Validate(ctx context.Context, credentials OAuthCredentials) (Principal, error) {
-	if v == nil || v.access == nil || v.identity == nil || !validOAuthToken(credentials.AccessToken) || !validOAuthToken(credentials.IDToken) {
+func (v *Validator) Validate(ctx context.Context, credentials OAuthCredentials) (Principal, error) {
+	if v == nil || v.access == nil || v.identity == nil || v.github == nil || !validOAuthToken(credentials.AccessToken) {
 		return Principal{}, errors.New("OAuth credentials are invalid")
 	}
-	if err := v.access.ValidateAccess(ctx, credentials.AccessToken); err != nil {
+	if err := v.access.ValidateAccess(ctx, credentials.Scheme, credentials.AccessToken); err != nil {
 		return Principal{}, err
+	}
+	if credentials.Scheme == SchemeGitHub {
+		return v.github.Validate(ctx, credentials.AccessToken)
+	}
+	if !validOAuthToken(credentials.IDToken) {
+		return Principal{}, errors.New("OAuth credentials are invalid")
 	}
 	return v.identity.Validate(ctx, credentials.IDToken)
 }

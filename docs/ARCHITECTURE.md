@@ -206,13 +206,15 @@ OAuth credentials and tunnel host and manage-ports credentials are never persist
 - **Exact origins.** At least one origin is required; HTTPS and loopback HTTP only, no wildcards. A browser
   request carrying any other `Origin` is refused. Native clients may omit `Origin` on the authenticated API,
   but the pre-authentication device routes require an exact allowed browser origin.
-- **Two independent bearers.** HTTP requests carry a Dev Tunnels access token in `Authorization` and a signed
-  Microsoft ID token in `X-CyberShuttle-Identity`. The access token is a remotely validated Dev Tunnels
-  capability; the cryptographically validated ID token is the sole identity bearer. No subject or `at_hash`
-  binding is claimed between them.
-- **Ownership** is the stable subject and tenant derived only from the validated ID token. Dev Tunnels access
-  validation is an independent capability check and supplies no identity claims. Session lists and their log
-  tails are filtered to the owner; item and access reads reject a different principal.
+- **Two independent bearers, or one GitHub token.** A Microsoft request carries a Dev Tunnels access token in
+  `Authorization` and a signed Microsoft ID token in `X-CyberShuttle-Identity`. The access token is a remotely
+  validated Dev Tunnels capability; the cryptographically validated ID token is the sole identity bearer. No
+  subject or `at_hash` binding is claimed between them. A GitHub request carries one token under the `github`
+  scheme: Dev Tunnels validates it as a capability and GitHub's user endpoint names the identity.
+- **Ownership** is the stable subject and tenant derived only from the validated ID token, or the GitHub user
+  id under the tenant `github`. Dev Tunnels access validation is an independent capability check and supplies
+  no identity claims. Session lists and their log tails are filtered to the owner; item and access reads
+  reject a different principal.
 - **No ambient authentication.** There are no cookies, browser sign-in state, token URLs or static file serving, and
   the only unauthenticated routes are the two device-code routes.
 - **The device-code broker** retains the device code in bounded process memory only, enforces polling

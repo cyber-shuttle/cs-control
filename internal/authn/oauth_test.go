@@ -1,11 +1,11 @@
 // Tests the OAuth boundary's origins, its two credential channels, redirect and claim rejection, and poll headers.
 //
-//	testIdentityToken, testPrincipal, oauthValidatorFunc, testBaseURL, oauthCredentialsValidatorFunc
+//	testIdentityToken, testPrincipal, oauthValidatorFunc, oauthCredentialsValidatorFunc, testBaseURL
 //	browserWebSocketProtocols, browserUpgradeRequest
 //	TestOAuthBoundaryExactOriginsBearerAndNative, TestOAuthBoundaryWebSocketSubprotocolBearer
 //	TestOAuthBoundaryWebSocketRejectsHeaderCredentialChannels, TestOAuthValidatorAcceptsEncryptedDevTunnelsAccessToken
 //	TestOAuthValidatorDoesNotFollowBearerToUntrustedRedirect, TestOAuthValidatorRejectsUnvalidatedClaimsAndRedacts
-//	TestOAuthBoundaryConditionalPollHeaders
+//	TestOAuthBoundaryConditionalPollHeaders, TestOAuthBoundaryAcceptsAGitHubTokenAloneOverHeadersAndSubprotocol
 package authn
 
 import (
@@ -29,6 +29,8 @@ var testPrincipal = Principal{Subject: "test-owner", Tenant: "test-tenant"}
 
 type oauthValidatorFunc func(context.Context, string) (Principal, error)
 
+type oauthCredentialsValidatorFunc func(context.Context, OAuthCredentials) (Principal, error)
+
 func testBaseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	base, err := devtunnel.ParseBaseURL(raw, "test base URL")
@@ -39,8 +41,6 @@ func testBaseURL(t *testing.T, raw string) *url.URL {
 func (f oauthValidatorFunc) Validate(ctx context.Context, credentials OAuthCredentials) (Principal, error) {
 	return f(ctx, credentials.AccessToken)
 }
-
-type oauthCredentialsValidatorFunc func(context.Context, OAuthCredentials) (Principal, error)
 
 func (f oauthCredentialsValidatorFunc) Validate(ctx context.Context, credentials OAuthCredentials) (Principal, error) {
 	return f(ctx, credentials)
@@ -67,7 +67,7 @@ func browserUpgradeRequest(token string) *http.Request {
 func TestOAuthBoundaryExactOriginsBearerAndNative(t *testing.T) {
 	const token = "delegated-secret-token"
 	validator := oauthCredentialsValidatorFunc(func(_ context.Context, got OAuthCredentials) (Principal, error) {
-		if got != (OAuthCredentials{AccessToken: token, IDToken: testIdentityToken}) {
+		if got != (OAuthCredentials{Scheme: SchemeBearer, AccessToken: token, IDToken: testIdentityToken}) {
 			t.Fatalf("credentials were not passed exactly")
 		}
 		return Principal{Subject: "owner", Tenant: "tenant"}, nil
@@ -184,7 +184,7 @@ func TestOAuthValidatorAcceptsEncryptedDevTunnelsAccessToken(t *testing.T) {
 	}))
 	defer server.Close()
 	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client())
-	testutil.Check(t, validator.ValidateAccess(context.Background(), token))
+	testutil.Check(t, validator.ValidateAccess(context.Background(), SchemeBearer, token))
 	if !called {
 		t.Fatal("Dev Tunnels validation endpoint was not called")
 	}
@@ -206,7 +206,7 @@ func TestOAuthValidatorDoesNotFollowBearerToUntrustedRedirect(t *testing.T) {
 	}))
 	defer origin.Close()
 	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, origin.URL), origin.Client())
-	if err := validator.ValidateAccess(context.Background(), token); err == nil {
+	if err := validator.ValidateAccess(context.Background(), SchemeBearer, token); err == nil {
 		t.Fatal("redirect response accepted")
 	}
 	if hostileCalled {
@@ -221,7 +221,7 @@ func TestOAuthValidatorRejectsUnvalidatedClaimsAndRedacts(t *testing.T) {
 	}))
 	defer server.Close()
 	validator := newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client())
-	err := validator.ValidateAccess(context.Background(), secret)
+	err := validator.ValidateAccess(context.Background(), SchemeBearer, secret)
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("error = %v", err)
 	}
@@ -260,4 +260,45 @@ func TestOAuthBoundaryConditionalPollHeaders(t *testing.T) {
 	if rr.Code != http.StatusNotModified || rr.Header().Get("Access-Control-Expose-Headers") != "ETag" {
 		t.Fatalf("code=%d headers=%v", rr.Code, rr.Header())
 	}
+}
+
+func TestOAuthBoundaryAcceptsAGitHubTokenAloneOverHeadersAndSubprotocol(t *testing.T) {
+	const token = "gho_github_secret_token"
+	validator := oauthCredentialsValidatorFunc(func(_ context.Context, got OAuthCredentials) (Principal, error) {
+		if got != (OAuthCredentials{Scheme: SchemeGitHub, AccessToken: token}) {
+			t.Fatalf("credentials = %#v", got)
+		}
+		return Principal{Subject: "17297498", Tenant: SchemeGitHub}, nil
+	})
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth, err := TunnelAuthorizationFromContext(r.Context())
+		if err != nil || auth.Authorization() != "github "+token || auth.Principal.Tenant != SchemeGitHub {
+			t.Fatalf("tunnel authorization = %#v, %v", auth, err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler, err := NewOAuthBoundary(next, validator, []string{"https://workspace.example.edu"})
+	testutil.Check(t, err)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
+	request.Header.Set("Authorization", "github "+token)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	testutil.Equal(t, response.Code, http.StatusNoContent, "github header")
+
+	request.Header.Set(ControlIdentityHeader, testIdentityToken)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	testutil.Equal(t, response.Code, http.StatusUnauthorized, "github token with a stray identity header")
+
+	upgrade := browserUpgradeRequest(token)
+	upgrade.Header.Set("Sec-WebSocket-Protocol", ControlWebSocketProtocol+", "+WebSocketGitHubPrefix+base64.RawURLEncoding.EncodeToString([]byte(token)))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, upgrade)
+	testutil.Equal(t, response.Code, http.StatusNoContent, "github subprotocol")
+
+	upgrade.Header.Set("Sec-WebSocket-Protocol", browserWebSocketProtocols(token)+", "+WebSocketGitHubPrefix+base64.RawURLEncoding.EncodeToString([]byte(token)))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, upgrade)
+	testutil.Equal(t, response.Code, http.StatusUnauthorized, "both credential shapes at once")
 }

@@ -63,21 +63,21 @@ func Do(client *http.Client, request *http.Request, limit int64) ([]byte, int, e
 	return body, response.StatusCode, nil
 }
 
-func NewRequest(ctx context.Context, method, endpoint, bearer string, body io.Reader) (*http.Request, error) {
+func NewRequest(ctx context.Context, method, endpoint, authorization string, body io.Reader) (*http.Request, error) {
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("User-Agent", UserAgent)
-	if bearer != "" {
-		request.Header.Set("Authorization", "Bearer "+bearer)
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
 	}
 	return request, nil
 }
 
-func GetJSON(ctx context.Context, client *http.Client, endpoint, bearer string, limit int64, destination any) error {
-	request, err := NewRequest(ctx, http.MethodGet, endpoint, bearer, nil)
+func GetJSON(ctx context.Context, client *http.Client, endpoint, authorization string, limit int64, destination any) error {
+	request, err := NewRequest(ctx, http.MethodGet, endpoint, authorization, nil)
 	if err != nil {
 		return err
 	}

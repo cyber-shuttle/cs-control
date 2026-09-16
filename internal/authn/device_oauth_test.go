@@ -4,6 +4,7 @@
 //	newTestDeviceBroker, deviceRequest, startDeviceAuthorization
 //	TestDeviceBrokerExactCORSAndPinnedAuthority, TestDeviceBrokerPendingSlowDownSuccessAndSecretHandling
 //	TestDeviceBrokerExpiryGuessOriginBindingAndCleanup, TestDeviceBrokerStartRateAndGlobalBound
+//	TestDeviceBrokerGitHubProviderNeedsNoIdentityToken
 package authn
 
 import (
@@ -246,4 +247,50 @@ func TestDeviceBrokerStartRateAndGlobalBound(t *testing.T) {
 	capacity := httptest.NewRecorder()
 	broker.ServeHTTP(capacity, deviceRequest(http.MethodPost, "/api/v1/oauth/device/start", deviceTestOrigin))
 	testutil.Equal(t, capacity.Code, http.StatusServiceUnavailable, "capacity status")
+}
+
+func TestDeviceBrokerGitHubProviderNeedsNoIdentityToken(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	transport := deviceRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		body, _ := io.ReadAll(request.Body)
+		seen = append(seen, request.URL.String()+" "+string(body))
+		if strings.HasSuffix(request.URL.Path, "/device/code") {
+			return deviceJSONResponse(200, `{"device_code":"gh-device-code","user_code":"ABCD-EFGH","verification_uri":"https://github.com/login/device","expires_in":899,"interval":5}`), nil
+		}
+		return deviceJSONResponse(200, `{"access_token":"gho_secret","token_type":"bearer","scope":""}`), nil
+	})
+	broker, now := newTestDeviceBroker(t, transport)
+
+	unknown := httptest.NewRecorder()
+	request := deviceRequest(http.MethodPost, "/api/v1/oauth/device/start", deviceTestOrigin)
+	request.Body = io.NopCloser(strings.NewReader(`{"provider":"gitlab"}`))
+	broker.ServeHTTP(unknown, request)
+	testutil.Equal(t, unknown.Code, http.StatusBadRequest, "unknown provider")
+
+	response := httptest.NewRecorder()
+	request = deviceRequest(http.MethodPost, "/api/v1/oauth/device/start", deviceTestOrigin)
+	request.Body = io.NopCloser(strings.NewReader(`{"provider":"github"}`))
+	broker.ServeHTTP(response, request)
+	testutil.Equal(t, response.Code, http.StatusOK, "github start")
+	var started deviceStartResponse
+	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &started))
+	testutil.Equal(t, started.VerificationURI, "https://github.com/login/device", "verification uri")
+
+	*now = now.Add(6 * time.Second)
+	poll := httptest.NewRecorder()
+	broker.ServeHTTP(poll, deviceRequest(http.MethodPost, "/api/v1/oauth/device/poll/"+started.Handle, deviceTestOrigin))
+	testutil.Equal(t, poll.Code, http.StatusOK, "github poll")
+	var tokens devicePollResponse
+	testutil.Check(t, json.Unmarshal(poll.Body.Bytes(), &tokens))
+	if tokens.Scheme != SchemeGitHub || tokens.AccessToken != "gho_secret" || tokens.IDToken != "" || tokens.ExpiresInSeconds != githubTokenLifetime {
+		t.Fatalf("github tokens = %#v", tokens)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 || !strings.HasPrefix(seen[0], githubDeviceEndpoint+" client_id="+DevTunnelsGitHubClientID) || strings.Contains(seen[0], "scope") || !strings.HasPrefix(seen[1], githubGrantEndpoint+" ") {
+		t.Fatalf("upstream calls = %q", seen)
+	}
 }

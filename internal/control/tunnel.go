@@ -138,7 +138,7 @@ func (s Service) createSessionTunnel(ctx context.Context, session *Session, auth
 	durationSeconds := sessionTunnelDurationSeconds(session.Resources.WallMinutes)
 	ports := sessionPorts(session.ID, seq)
 	record, err := s.Tunnels.Create(ctx, devtunnel.CreateRequest{
-		OAuthToken: auth.OAuthToken, TunnelID: tunnelID, DurationSeconds: durationSeconds,
+		Scheme: auth.Scheme, OAuthToken: auth.OAuthToken, TunnelID: tunnelID, DurationSeconds: durationSeconds,
 		Ports: []devtunnel.PortSpec{
 			{PortNumber: ports.control, Description: controlPortDescription},
 			{PortNumber: ports.jupyter, Description: jupyterPortDescription, Anonymous: true},
@@ -175,7 +175,7 @@ func (s Service) releaseSessionTunnel(auth authn.TunnelAuthorization, sessionID 
 	defer cancel()
 	var deleteErr error
 	if s.Tunnels != nil && tunnel.ID != "" {
-		if err := s.Tunnels.Delete(ctx, devtunnel.DeleteRequest{OAuthToken: auth.OAuthToken, TunnelID: tunnel.ID, ClusterID: tunnel.ClusterID}); err != nil {
+		if err := s.Tunnels.Delete(ctx, devtunnel.DeleteRequest{Scheme: auth.Scheme, OAuthToken: auth.OAuthToken, TunnelID: tunnel.ID, ClusterID: tunnel.ClusterID}); err != nil {
 			deleteErr = apierr.Redact("compensate session Dev Tunnel", err, auth.OAuthToken)
 		}
 	}

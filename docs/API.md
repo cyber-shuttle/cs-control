@@ -6,7 +6,9 @@ for hosts or sessions.
 
 ## Authentication
 
-Every request except the two device-code routes carries two independent credentials:
+Every request except the two device-code routes carries credentials in one of two shapes.
+
+A Microsoft caller sends two independent credentials:
 
 | Header | Value |
 | --- | --- |
@@ -16,13 +18,24 @@ Every request except the two device-code routes carries two independent credenti
 The access token is validated remotely as a Dev Tunnels capability; the ID token is validated
 cryptographically and is the only source of caller identity. Exactly one of each header is accepted.
 
-The SSH authentication WebSocket cannot send headers from a browser, so it carries the same two credentials as
-subprotocols. A client offers exactly three, in any order:
+A GitHub caller sends one token, `Authorization: github <GitHub token>`, and no identity header. It is
+validated remotely as a Dev Tunnels capability under that scheme; the identity is the GitHub user id it
+resolves to, held five minutes per token.
+
+The SSH authentication WebSocket cannot send headers from a browser, so it carries the same credentials as
+subprotocols. A Microsoft client offers exactly three, in any order:
 
 ```
 cybershuttle.v1
 bearer.<base64url of the access token, unpadded>
 identity.<base64url of the ID token, unpadded>
+```
+
+A GitHub client offers exactly two:
+
+```
+cybershuttle.v1
+github.<base64url of the GitHub token, unpadded>
 ```
 
 The server negotiates `cybershuttle.v1`. Any other set — a missing version, a fourth protocol, a padded or
@@ -443,12 +456,19 @@ end cleanly; both are absent rather than empty when there is nothing to report.
 
 ## Device-code sign-in
 
-The only two routes in front of the authentication boundary. They broker pinned Microsoft device-code requests
-for exact allowed browser origins, keep the device code in bounded process memory, enforce polling intervals,
-and discard refresh tokens. Both require an allowed `Origin` header and accept `POST` only, with no body and no
-query string.
+The only two routes in front of the authentication boundary. They broker pinned device-code requests against
+the configured Microsoft authority or GitHub for exact allowed browser origins, keep the device code in
+bounded process memory, enforce polling intervals, and discard refresh tokens. Both require an allowed
+`Origin` header and accept `POST` only, with no query string.
 
 ### `POST /api/v1/oauth/device/start` → 200
+
+An optional body names the provider, `microsoft` (the default) or `github`; any other name is
+`400 unknown_provider`.
+
+```json
+{ "provider": "github" }
+```
 
 ```json
 {
@@ -474,9 +494,12 @@ Still waiting, `202`:
 Complete, `200`:
 
 ```json
-{ "status": "complete", "accessToken": "...", "idToken": "...", "expiresInSeconds": 3599 }
+{ "status": "complete", "scheme": "Bearer", "accessToken": "...", "idToken": "...", "expiresInSeconds": 3599 }
 ```
 
-Polling faster than `intervalSeconds` is `429 rate_limited` with `Retry-After`. A denied authorization is
+`scheme` is `Bearer` for a Microsoft authorization, which carries an `idToken`, or `github`, which carries
+none and an `expiresInSeconds` of one day, since GitHub states no lifetime. Polling faster than
+`intervalSeconds` is `429 rate_limited` with `Retry-After`. A denied authorization is
 `403 authorization_denied`; an expired one is `410 authorization_expired`. The handle is discarded on any
-terminal outcome, so a completed poll cannot be replayed. The two tokens are the pair every other route needs.
+terminal outcome, so a completed poll cannot be replayed. The result is what every other route needs, in the
+shape its scheme dictates above.
