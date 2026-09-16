@@ -356,7 +356,7 @@ func (s Service) recordSubmittedJob(sessionID, jobID string) (*Session, bool, er
 }
 
 func (s Service) scancelWithOwnTimeout(host, jobID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
+	ctx, cancel := s.ownTimeout()
 	defer cancel()
 	_, err := s.Runner.Run(ctx, host, nil, "scancel", jobID)
 	return err
@@ -456,7 +456,7 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 	var narration []string
 	if reconcilable(snapshot.State) {
 		s.sessionStatus(id, "Requesting scheduler cancellation")
-		stopCtx, cancel := context.WithTimeout(context.Background(), s.Runner.EffectiveTimeout())
+		stopCtx, cancel := s.ownTimeout()
 		candidates, lines := s.reconcileSnapshots(stopCtx, []Session{snapshot})
 		cancel()
 		candidate, narration = candidates[0], lines[0]
