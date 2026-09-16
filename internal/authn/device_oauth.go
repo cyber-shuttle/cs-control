@@ -1,14 +1,16 @@
-// The device-code broker serves the two routes a browser drives before it has a token.
-// It keeps the device code only in bounded process memory, and discards it once delivered or expired.
+// The device-code broker serves the two routes a browser drives before it has a token, against the Microsoft
+// authority or GitHub as each start chooses. It keeps the device code only in bounded process memory, and
+// discards it once delivered or expired.
 //
-//	deviceHandlePattern, deviceBrokerEntry, DeviceCodeBroker
-//	deviceStartResponse, devicePollResponse
+//	deviceHandlePattern, deviceProvider, deviceBrokerEntry, DeviceCodeBroker
+//	deviceStartRequest, deviceStartResponse, devicePollResponse
 //	pollOutcome, devicePollOutcomes
 //	writeDeviceError, validDeviceAuthorization, newDeviceHandle
 //	NewDeviceCodeBroker, NewDeviceCodeRoutes
 package authn
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -29,8 +31,12 @@ import (
 
 const (
 	DevTunnelsNativeClientID = "c0df98ca-23b4-4bce-bb9f-72039b28d3a5"
+	DevTunnelsGitHubClientID = "Iv1.e7b89e013f801f03"
 	devTunnelsDeviceScope    = "openid profile offline_access 46da2f7e-b5ef-422a-88d4-2a7f9de6a0b2/.default"
 	deviceGrantType          = "urn:ietf:params:oauth:grant-type:device_code"
+	githubDeviceEndpoint     = "https://github.com/login/device/code"
+	githubGrantEndpoint      = "https://github.com/login/oauth/access_token"
+	githubTokenLifetime      = 86400
 	maxDeviceBrokerEntries   = 256
 	maxDeviceResponse        = 64 << 10
 	deviceStartInterval      = time.Second
@@ -39,7 +45,16 @@ const (
 
 var deviceHandlePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
+type deviceProvider struct {
+	scheme         string
+	deviceEndpoint string
+	tokenEndpoint  string
+	clientID       string
+	scope          string
+}
+
 type deviceBrokerEntry struct {
+	provider   deviceProvider
 	deviceCode []byte
 	origin     string
 	expiresAt  time.Time
@@ -52,13 +67,16 @@ type DeviceCodeBroker struct {
 	mu              sync.Mutex
 	entries         map[string]*deviceBrokerEntry
 	nextOriginStart map[string]time.Time
-	deviceEndpoint  string
-	tokenEndpoint   string
+	providers       map[string]deviceProvider
 	origins         map[string]struct{}
 	client          *http.Client
 	now             clock
 	ctx             context.Context
 	cancel          context.CancelFunc
+}
+
+type deviceStartRequest struct {
+	Provider string `json:"provider"`
 }
 
 type deviceStartResponse struct {
@@ -72,6 +90,7 @@ type deviceStartResponse struct {
 type devicePollResponse struct {
 	Status           string `json:"status"`
 	IntervalSeconds  int64  `json:"intervalSeconds,omitempty"`
+	Scheme           string `json:"scheme,omitempty"`
 	AccessToken      string `json:"accessToken,omitempty"`
 	IDToken          string `json:"idToken,omitempty"`
 	ExpiresInSeconds int64  `json:"expiresInSeconds,omitempty"`
@@ -128,13 +147,15 @@ func NewDeviceCodeBroker(authority string, allowedOrigins []string, client *http
 	broker := &DeviceCodeBroker{
 		entries:         make(map[string]*deviceBrokerEntry),
 		nextOriginStart: make(map[string]time.Time),
-		deviceEndpoint:  base.ResolveReference(&url.URL{Path: "oauth2/v2.0/devicecode"}).String(),
-		tokenEndpoint:   base.ResolveReference(&url.URL{Path: "oauth2/v2.0/token"}).String(),
-		origins:         origins,
-		client:          bounded,
-		now:             time.Now,
-		ctx:             ctx,
-		cancel:          cancel,
+		providers: map[string]deviceProvider{
+			"microsoft": {scheme: SchemeBearer, deviceEndpoint: base.ResolveReference(&url.URL{Path: "oauth2/v2.0/devicecode"}).String(), tokenEndpoint: base.ResolveReference(&url.URL{Path: "oauth2/v2.0/token"}).String(), clientID: DevTunnelsNativeClientID, scope: devTunnelsDeviceScope},
+			"github":    {scheme: SchemeGitHub, deviceEndpoint: githubDeviceEndpoint, tokenEndpoint: githubGrantEndpoint, clientID: DevTunnelsGitHubClientID},
+		},
+		origins: origins,
+		client:  bounded,
+		now:     time.Now,
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 	go broker.cleanupLoop()
 	return broker, nil
@@ -197,6 +218,18 @@ func (b *DeviceCodeBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *DeviceCodeBroker) handleStart(w http.ResponseWriter, r *http.Request, origin string) {
+	start := deviceStartRequest{Provider: "microsoft"}
+	if body, _ := io.ReadAll(io.LimitReader(r.Body, maxDeviceResponse)); len(bytes.TrimSpace(body)) > 0 {
+		if err := apierr.DecodeStrict(bytes.NewReader(body), &start); err != nil {
+			writeDeviceError(w, http.StatusBadRequest, "invalid_json", "request body is invalid")
+			return
+		}
+	}
+	provider, known := b.providers[start.Provider]
+	if !known {
+		writeDeviceError(w, http.StatusBadRequest, "unknown_provider", "sign-in provider is not offered")
+		return
+	}
 	now := b.now()
 	b.mu.Lock()
 	b.cleanupLocked(now)
@@ -213,8 +246,11 @@ func (b *DeviceCodeBroker) handleStart(w http.ResponseWriter, r *http.Request, o
 	b.nextOriginStart[origin] = now.Add(deviceStartInterval)
 	b.mu.Unlock()
 
-	form := url.Values{"client_id": {DevTunnelsNativeClientID}, "scope": {devTunnelsDeviceScope}}
-	value, status, err := b.postForm(r.Context(), b.deviceEndpoint, form, oauthRequestTimeout)
+	form := url.Values{"client_id": {provider.clientID}}
+	if provider.scope != "" {
+		form.Set("scope", provider.scope)
+	}
+	value, status, err := b.postForm(r.Context(), provider.deviceEndpoint, form, oauthRequestTimeout)
 	if err != nil || status < 200 || status >= 300 {
 		writeDeviceError(w, http.StatusBadGateway, "upstream_unavailable", "authorization service is unavailable")
 		return
@@ -239,7 +275,7 @@ func (b *DeviceCodeBroker) handleStart(w http.ResponseWriter, r *http.Request, o
 		return
 	}
 	now = b.now()
-	entry := &deviceBrokerEntry{deviceCode: []byte(result.DeviceCode), origin: origin, expiresAt: now.Add(time.Duration(result.ExpiresIn) * time.Second), interval: time.Duration(result.Interval) * time.Second, nextPoll: now.Add(time.Duration(result.Interval) * time.Second)}
+	entry := &deviceBrokerEntry{provider: provider, deviceCode: []byte(result.DeviceCode), origin: origin, expiresAt: now.Add(time.Duration(result.ExpiresIn) * time.Second), interval: time.Duration(result.Interval) * time.Second, nextPoll: now.Add(time.Duration(result.Interval) * time.Second)}
 	b.mu.Lock()
 	if len(b.entries) >= maxDeviceBrokerEntries {
 		b.mu.Unlock()
@@ -279,11 +315,12 @@ func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, or
 	}
 	entry.inFlight = true
 	entry.nextPoll = now.Add(entry.interval)
+	provider := entry.provider
 	deviceCode := string(entry.deviceCode)
 	remaining := entry.expiresAt.Sub(now)
 	b.mu.Unlock()
 
-	value, status, err := b.postForm(r.Context(), b.tokenEndpoint, url.Values{"grant_type": {deviceGrantType}, "client_id": {DevTunnelsNativeClientID}, "device_code": {deviceCode}}, remaining)
+	value, status, err := b.postForm(r.Context(), provider.tokenEndpoint, url.Values{"grant_type": {deviceGrantType}, "client_id": {provider.clientID}, "device_code": {deviceCode}}, remaining)
 	if err != nil {
 		b.settle(w, handle, pollOutcome{status: http.StatusBadGateway, code: "upstream_unavailable", message: "authorization service is unavailable"})
 		return
@@ -305,11 +342,15 @@ func (b *DeviceCodeBroker) handlePoll(w http.ResponseWriter, r *http.Request, or
 		IDToken     string `json:"id_token"`
 		ExpiresIn   int64  `json:"expires_in"`
 	}
-	if json.Unmarshal(value, &tokens) != nil || !validOAuthToken(tokens.AccessToken) || !validOAuthToken(tokens.IDToken) || tokens.ExpiresIn <= 0 || tokens.ExpiresIn > 86400 {
+	identity := provider.scheme == SchemeBearer
+	if err := json.Unmarshal(value, &tokens); err == nil && !identity && tokens.ExpiresIn == 0 {
+		tokens.ExpiresIn = githubTokenLifetime
+	}
+	if !validOAuthToken(tokens.AccessToken) || identity != validOAuthToken(tokens.IDToken) || tokens.ExpiresIn <= 0 || tokens.ExpiresIn > 86400 {
 		b.settle(w, handle, pollOutcome{remove: true, status: http.StatusBadGateway, code: "upstream_invalid", message: "authorization service returned an invalid response"})
 		return
 	}
-	b.deliverTokens(w, handle, tokens.AccessToken, tokens.IDToken, tokens.ExpiresIn)
+	b.deliverTokens(w, handle, provider.scheme, tokens.AccessToken, tokens.IDToken, tokens.ExpiresIn)
 }
 
 func (b *DeviceCodeBroker) settle(w http.ResponseWriter, handle string, outcome pollOutcome) {
@@ -338,8 +379,8 @@ func (b *DeviceCodeBroker) postForm(parent context.Context, endpoint string, for
 	return httpx.Do(b.client, request, maxDeviceResponse)
 }
 
-func (b *DeviceCodeBroker) deliverTokens(w http.ResponseWriter, handle, accessToken, idToken string, expiresIn int64) {
-	apierr.WriteJSON(w, http.StatusOK, devicePollResponse{Status: "complete", AccessToken: accessToken, IDToken: idToken, ExpiresInSeconds: expiresIn})
+func (b *DeviceCodeBroker) deliverTokens(w http.ResponseWriter, handle, scheme, accessToken, idToken string, expiresIn int64) {
+	apierr.WriteJSON(w, http.StatusOK, devicePollResponse{Status: "complete", Scheme: scheme, AccessToken: accessToken, IDToken: idToken, ExpiresInSeconds: expiresIn})
 	b.finishPoll(handle, true, 0)
 }
 

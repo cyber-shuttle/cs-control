@@ -100,7 +100,7 @@ func (components *serveComponents) close() {
 }
 
 func newServeComponents(service control.Service, allowedOrigins []string, oauthAuthority string) (*serveComponents, error) {
-	validator, err := authn.NewMicrosoftOAuthValidator(defaultDevTunnelManagementURL, oauthAuthority, authn.DevTunnelsNativeClientID, nil)
+	validator, err := authn.NewValidator(defaultDevTunnelManagementURL, oauthAuthority, authn.DevTunnelsNativeClientID, nil)
 	if err != nil {
 		return nil, err
 	}

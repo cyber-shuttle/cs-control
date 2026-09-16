@@ -1,7 +1,7 @@
-// Tests MicrosoftOAuthValidator and the OIDC validator it wraps: bearers, rejection, key refresh, and tenant policy.
+// Tests Validator and the OIDC validator it wraps: bearers, rejection, key refresh, and tenant policy.
 //
 //	writeTestJSON, testRSAKey, testJWK, testJWKS, signIDToken, changedClaim, withoutClaim, oidcServer, jwksRoute
-//	TestMicrosoftOAuthValidatorAcceptsIndependentCapabilityAndIdentityBearers
+//	TestValidatorAcceptsIndependentCapabilityAndIdentityBearers
 //	TestOIDCValidatorRejectsInvalidIdentityTokensWithoutLeaks
 //	TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey
 //	TestOIDCValidatorRejectsWrongJWKAlgorithmAndEncryptionUse, TestProductionOIDCAuthorityIsRestricted
@@ -102,7 +102,7 @@ func jwksRoute(t *testing.T, kid string, public *rsa.PublicKey) http.HandlerFunc
 	return func(w http.ResponseWriter, _ *http.Request) { writeTestJSON(t, w, testJWKS(kid, public)) }
 }
 
-func TestMicrosoftOAuthValidatorAcceptsIndependentCapabilityAndIdentityBearers(t *testing.T) {
+func TestValidatorAcceptsIndependentCapabilityAndIdentityBearers(t *testing.T) {
 	key := testRSAKey(t)
 	const kid = "identity-key"
 	server := oidcServer(t, map[string]http.HandlerFunc{
@@ -117,13 +117,13 @@ func TestMicrosoftOAuthValidatorAcceptsIndependentCapabilityAndIdentityBearers(t
 
 	identity, err := makeOIDCValidator(testBaseURL(t, server.URL), "client-id", server.Client(), false)
 	testutil.Check(t, err)
-	validator := &MicrosoftOAuthValidator{access: newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client()), identity: identity}
+	validator := &Validator{access: newDevTunnelOAuthValidatorForBase(testBaseURL(t, server.URL), server.Client()), identity: identity, github: newGitHubValidator(server.URL+"/user", server.Client())}
 	now := time.Now().Unix()
 	idToken := signIDToken(t, key, map[string]any{
 		"iss": server.URL + "/issuer", "aud": "client-id", "exp": now + 300, "nbf": now - 1,
 		"oid": "11111111-1111-1111-1111-111111111111", "tid": "22222222-2222-2222-2222-222222222222",
 	}, map[string]any{"alg": "RS256", "kid": kid, "typ": "JWT"})
-	principal, err := validator.Validate(context.Background(), OAuthCredentials{AccessToken: "protected.encrypted-key.iv.ciphertext.tag", IDToken: idToken})
+	principal, err := validator.Validate(context.Background(), OAuthCredentials{Scheme: SchemeBearer, AccessToken: "protected.encrypted-key.iv.ciphertext.tag", IDToken: idToken})
 	testutil.Check(t, err)
 	if principal != (Principal{Subject: "11111111-1111-1111-1111-111111111111", Tenant: "22222222-2222-2222-2222-222222222222"}) {
 		t.Fatalf("principal = %#v", principal)

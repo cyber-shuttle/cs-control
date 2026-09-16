@@ -1,11 +1,13 @@
 // Package authn is the identity boundary.
-// It validates the Dev Tunnels access capability and the Microsoft ID token, and brokers the device-code flow.
-// Every request carries both tokens, and the WebSocket route folds its own into a subprotocol handshake.
+// It validates the Dev Tunnels access capability and the caller's identity, and brokers the device-code flow.
+// A Microsoft caller carries an access token and a signed ID token; a GitHub caller carries one token under
+// the github scheme, at once the capability and the identity. The WebSocket route folds the same credentials
+// into a subprotocol handshake.
 //
 //	Principal, clock, OAuthCredentials, oAuthValidator, oauthBoundary
 //	devTunnelOAuthValidator, TunnelAuthorization, tunnelAuthorizationContextKey, tenantSegment
 //	canonicalBase64URL, validOAuthToken, validateControlOrigin, validatedOriginSet, allowOrigin
-//	preflightHeadersAllowed, validPreflight, writePreflightAllow, bearerToken
+//	preflightHeadersAllowed, validPreflight, writePreflightAllow, authorizationToken
 //	controlWebSocketRoute, controlWebSocketProtocols, decodeWebSocketCredential, controlWebSocketAuthorization
 //	httpOAuthCredentials, withTunnelAuthorization, newDevTunnelOAuthValidatorForBase, newDevTunnelOAuthValidator
 //	parseTenantAuthority
@@ -13,6 +15,7 @@
 package authn
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -42,6 +45,9 @@ const (
 	ControlWebSocketProtocol            = "cybershuttle.v1"
 	WebSocketBearerPrefix               = "bearer."
 	WebSocketIdentityPrefix             = "identity."
+	WebSocketGitHubPrefix               = "github."
+	SchemeBearer                        = "Bearer"
+	SchemeGitHub                        = "github"
 	maxWebSocketCredentialProtocolBytes = (devtunnel.MaxToken*8 + 5) / 6
 )
 
@@ -53,6 +59,7 @@ type Principal struct {
 type clock func() time.Time
 
 type OAuthCredentials struct {
+	Scheme      string
 	AccessToken string
 	IDToken     string
 }
@@ -73,6 +80,7 @@ type devTunnelOAuthValidator struct {
 }
 
 type TunnelAuthorization struct {
+	Scheme     string
 	OAuthToken string
 	Principal  Principal
 }
@@ -171,12 +179,18 @@ func writePreflightAllow(w http.ResponseWriter, methods, headers string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func bearerToken(header string) (string, bool) {
+func authorizationToken(header string) (string, string, bool) {
 	fields := strings.Fields(header)
-	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") || !validOAuthToken(fields[1]) {
-		return "", false
+	if len(fields) != 2 || !validOAuthToken(fields[1]) {
+		return "", "", false
 	}
-	return fields[1], true
+	switch {
+	case strings.EqualFold(fields[0], SchemeBearer):
+		return SchemeBearer, fields[1], true
+	case fields[0] == SchemeGitHub:
+		return SchemeGitHub, fields[1], true
+	}
+	return "", "", false
 }
 
 func controlWebSocketRoute(request *http.Request) bool {
@@ -222,7 +236,7 @@ func controlWebSocketAuthorization(request *http.Request) (OAuthCredentials, *ht
 	if !valid {
 		return OAuthCredentials{}, request, http.StatusBadRequest
 	}
-	versionCount, bearerCount, identityCount := 0, 0, 0
+	versionCount, bearerCount, identityCount, githubCount := 0, 0, 0, 0
 	var encodedAccess, encodedIdentity string
 	for _, protocol := range protocols {
 		switch {
@@ -234,42 +248,58 @@ func controlWebSocketAuthorization(request *http.Request) (OAuthCredentials, *ht
 		case strings.HasPrefix(protocol, WebSocketIdentityPrefix):
 			identityCount++
 			encodedIdentity = strings.TrimPrefix(protocol, WebSocketIdentityPrefix)
+		case strings.HasPrefix(protocol, WebSocketGitHubPrefix):
+			githubCount++
+			encodedAccess = strings.TrimPrefix(protocol, WebSocketGitHubPrefix)
 		default:
 			return OAuthCredentials{}, request, http.StatusBadRequest
 		}
 	}
-	if versionCount != 1 || len(protocols) != 3 {
+	if versionCount != 1 || len(protocols) < 2 || len(protocols) != 1+bearerCount+identityCount+githubCount {
 		return OAuthCredentials{}, request, http.StatusBadRequest
 	}
-	if bearerCount != 1 || identityCount != 1 {
+	microsoft := bearerCount == 1 && identityCount == 1 && githubCount == 0
+	github := githubCount == 1 && bearerCount == 0 && identityCount == 0
+	if !microsoft && !github {
 		return OAuthCredentials{}, request, http.StatusUnauthorized
 	}
-	accessToken, ok := decodeWebSocketCredential(encodedAccess)
-	if !ok {
+	credentials := OAuthCredentials{Scheme: SchemeBearer}
+	if github {
+		credentials.Scheme = SchemeGitHub
+	}
+	var ok bool
+	if credentials.AccessToken, ok = decodeWebSocketCredential(encodedAccess); !ok {
 		return OAuthCredentials{}, request, http.StatusUnauthorized
 	}
-	identityToken, ok := decodeWebSocketCredential(encodedIdentity)
-	if !ok {
-		return OAuthCredentials{}, request, http.StatusUnauthorized
+	if microsoft {
+		if credentials.IDToken, ok = decodeWebSocketCredential(encodedIdentity); !ok {
+			return OAuthCredentials{}, request, http.StatusUnauthorized
+		}
 	}
 	clean := request.Clone(request.Context())
 	clean.Header = request.Header.Clone()
 	clean.Header.Del("Authorization")
 	clean.Header.Del(ControlIdentityHeader)
 	clean.Header.Set("Sec-WebSocket-Protocol", ControlWebSocketProtocol)
-	return OAuthCredentials{AccessToken: accessToken, IDToken: identityToken}, clean, 0
+	return credentials, clean, 0
 }
 
 func httpOAuthCredentials(header http.Header) (OAuthCredentials, bool) {
-	if len(header.Values("Authorization")) != 1 || len(header.Values(ControlIdentityHeader)) != 1 {
+	if len(header.Values("Authorization")) != 1 {
 		return OAuthCredentials{}, false
 	}
-	accessToken, ok := bearerToken(header.Get("Authorization"))
-	identityToken := header.Get(ControlIdentityHeader)
-	if !ok || !validOAuthToken(identityToken) {
+	scheme, accessToken, ok := authorizationToken(header.Get("Authorization"))
+	if !ok {
 		return OAuthCredentials{}, false
 	}
-	return OAuthCredentials{AccessToken: accessToken, IDToken: identityToken}, true
+	identities := header.Values(ControlIdentityHeader)
+	if scheme == SchemeGitHub {
+		return OAuthCredentials{Scheme: scheme, AccessToken: accessToken}, len(identities) == 0
+	}
+	if len(identities) != 1 || !validOAuthToken(identities[0]) {
+		return OAuthCredentials{}, false
+	}
+	return OAuthCredentials{Scheme: scheme, AccessToken: accessToken, IDToken: identities[0]}, true
 }
 
 func withTunnelAuthorization(ctx context.Context, auth TunnelAuthorization) context.Context {
@@ -321,7 +351,7 @@ func (b *oauthBoundary) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	ctx := withTunnelAuthorization(request.Context(), TunnelAuthorization{OAuthToken: credentials.AccessToken, Principal: principal})
+	ctx := withTunnelAuthorization(request.Context(), TunnelAuthorization{Scheme: credentials.Scheme, OAuthToken: credentials.AccessToken, Principal: principal})
 	b.next.ServeHTTP(w, request.WithContext(ctx))
 }
 
@@ -338,8 +368,8 @@ func newDevTunnelOAuthValidator(baseURL string, client *http.Client) (*devTunnel
 	return newDevTunnelOAuthValidatorForBase(base, client), nil
 }
 
-func (v *devTunnelOAuthValidator) ValidateAccess(ctx context.Context, token string) error {
-	if _, ok := bearerToken("Bearer " + token); !ok {
+func (v *devTunnelOAuthValidator) ValidateAccess(ctx context.Context, scheme, token string) error {
+	if _, _, ok := authorizationToken(scheme + " " + token); !ok {
 		return errors.New("delegated token is invalid")
 	}
 	endpoint, _ := url.Parse(v.baseURL)
@@ -349,7 +379,7 @@ func (v *devTunnelOAuthValidator) ValidateAccess(ctx context.Context, token stri
 	endpoint.RawQuery = query.Encode()
 
 	var limits []json.RawMessage
-	if err := httpx.GetJSON(ctx, v.client, endpoint.String(), token, maxOAuthResponse, &limits); err != nil {
+	if err := httpx.GetJSON(ctx, v.client, endpoint.String(), scheme+" "+token, maxOAuthResponse, &limits); err != nil {
 		return fmt.Errorf("validate delegated token with Dev Tunnels: %w", err)
 	}
 	return nil
@@ -406,4 +436,8 @@ func TunnelAuthorizationFromContext(ctx context.Context) (TunnelAuthorization, e
 		return TunnelAuthorization{}, apierr.New("tunnel_authorization_required", "fresh delegated Dev Tunnel authorization is required", 401)
 	}
 	return auth, nil
+}
+
+func (a TunnelAuthorization) Authorization() string {
+	return cmp.Or(a.Scheme, SchemeBearer) + " " + a.OAuthToken
 }

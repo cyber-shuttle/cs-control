@@ -26,9 +26,10 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
 - **Go 1.24 or newer.** Building from source is the only install path.
 - **A Microsoft Entra tenant.** `--oauth-authority` accepts only `https://login.microsoftonline.com/<tenant>/`
   with no port; the multi-tenant aliases `common`, `consumers` and `organizations` are rejected.
-- **A Microsoft account entitled to
+- **A Microsoft or GitHub account entitled to
   [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview).** Sign-in uses the
-  Dev Tunnels first-party client, and each session creates a tunnel against that account.
+  Dev Tunnels first-party clients, through the tenant above or through GitHub, and each session creates a
+  tunnel against that account.
 - **An SSH-reachable Linux Slurm cluster** whose login node provides `sacctmgr`, `sinfo`, `sbatch`, `squeue`,
   `sacct`, `scancel`, `curl`, `tar`, `base64`, `od`, `install`, `printenv`, `sed` and `sort -V`, and whose
   nodes run Linux `x86_64` or `arm64` with `curl`.

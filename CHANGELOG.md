@@ -7,6 +7,11 @@ Notable changes to CyberShuttle Control. The format follows
 
 ### Added
 
+- GitHub sign-in. `POST /api/v1/oauth/device/start` takes `{"provider":"github"}` and brokers GitHub's device
+  flow with the Dev Tunnels GitHub client; the poll answers `scheme` beside the token. A GitHub caller sends
+  `Authorization: github <token>` alone, over HTTP or as the `github.` subprotocol, and Dev Tunnels calls carry
+  that scheme. Its principal is the GitHub user id under tenant `github`, held five minutes per token.
+
 - Stored login keys. `GET`, `POST /api/v1/keys` and `DELETE /api/v1/keys/{name}` list, upload and remove a
   caller's private keys, held under their own hosts directory at mode `0600`. A host add or update takes a
   `key` name; the host then carries the key as its `IdentityFile` with `IdentitiesOnly yes`, so every login,
