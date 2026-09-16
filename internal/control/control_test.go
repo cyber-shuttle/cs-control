@@ -138,6 +138,8 @@ case "$command" in
     ;;
   "scancel "*)
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s\n' "$command" >> "$FAKE_SCANCEL_LOG"
+    [ -z "${FAKE_SCANCEL_STARTED:-}" ] || : > "$FAKE_SCANCEL_STARTED"
+    while [ -n "${FAKE_SCANCEL_RELEASE:-}" ] && [ ! -e "$FAKE_SCANCEL_RELEASE" ]; do sleep .01; done
     [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ] || { echo 'scheduler temporarily unavailable' >&2; exit 1; }
     printf 'CANCELLED\n' > "$FAKE_STATUS"
     ;;

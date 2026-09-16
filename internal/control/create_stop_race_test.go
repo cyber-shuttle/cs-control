@@ -122,6 +122,10 @@ func TestCreatePersistsCancelFailureAndLaterBatchRetries(t *testing.T) {
 
 func TestCreateCancelsUnsavedJobEvenWithACancelledRequestContext(t *testing.T) {
 	service, started, release, cancellations := createStopRaceService(t)
+	cancelStarted := filepath.Join(t.TempDir(), "scancel-started")
+	cancelRelease := filepath.Join(t.TempDir(), "scancel-release")
+	t.Setenv("FAKE_SCANCEL_STARTED", cancelStarted)
+	t.Setenv("FAKE_SCANCEL_RELEASE", cancelRelease)
 	ctx, cancel := context.WithCancel(testTunnelContext())
 	request := newTestCreateRequest()
 	errs := make(chan error, 1)
@@ -133,19 +137,9 @@ func TestCreateCancelsUnsavedJobEvenWithACancelledRequestContext(t *testing.T) {
 	testutil.Check(t, os.Chmod(service.Store.Dir, 0o500))
 	t.Cleanup(func() { _ = os.Chmod(service.Store.Dir, 0o700) })
 	testutil.Check(t, os.WriteFile(release, nil, 0o600))
-	waitFor(t, errs, `status "Session submitted to Slurm"`, func() bool {
-		tail, ok := service.Logs.Tail(request.ID)
-		if !ok {
-			return false
-		}
-		for _, line := range tail.Lines {
-			if line.Text == "Session submitted to Slurm" {
-				return true
-			}
-		}
-		return false
-	})
+	waitFor(t, errs, "compensation scancel started", func() bool { _, err := os.Stat(cancelStarted); return err == nil })
 	cancel()
+	testutil.Check(t, os.WriteFile(cancelRelease, nil, 0o600))
 
 	err := <-errs
 	if err == nil || !strings.Contains(err.Error(), "job was cancelled") {
