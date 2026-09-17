@@ -54,7 +54,6 @@ func hostRequest(t *testing.T, handler http.Handler, method, path, body string, 
 	}
 	request.Header.Set("Origin", mixedOwnerOrigin)
 	request.Header.Set("Authorization", "Bearer delegated-token")
-	request.Header.Set(authn.ControlIdentityHeader, testIdentityToken)
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}

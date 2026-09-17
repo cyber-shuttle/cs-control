@@ -1,11 +1,11 @@
-// OIDC identity validation, layered under Validator, backed by discovery and JWKS.
+// OIDC token validation, layered under Validator, backed by discovery and JWKS.
 // A signature failure against a known key is hostile input, not evidence of rotation.
-// Only an unknown kid inside its cooldown earns a key refresh.
+// Only an unknown kid inside its cooldown earns a key refresh. Discovery is also where Validator's sign-in
+// relay reads the authorization and token endpoints, so both share one cache and one refresh.
 //
-//	Validator
 //	oidcMetadata, oidcKeySet, cachedOIDCKeys, oidcRefreshCall, oidcValidator, idTokenHeader, idTokenClaims
 //	makeOIDCValidator, newOIDCValidator, parseSignedIDToken, verifyIDTokenSignature
-//	NewValidator
+//	Discovery
 package authn
 
 import (
@@ -33,15 +33,11 @@ const (
 	oidcUnknownKIDCooldown = 30 * time.Second
 )
 
-type Validator struct {
-	access   *devTunnelOAuthValidator
-	identity *oidcValidator
-	github   *githubValidator
-}
-
 type oidcMetadata struct {
-	Issuer  string `json:"issuer"`
-	JWKSURI string `json:"jwks_uri"`
+	Issuer                string `json:"issuer"`
+	JWKSURI               string `json:"jwks_uri"`
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
 }
 
 type oidcKeySet struct {
@@ -70,7 +66,6 @@ type oidcValidator struct {
 	authority          *url.URL
 	clientID           string
 	client             *http.Client
-	production         bool
 	now                clock
 	mu                 sync.Mutex
 	cache              cachedOIDCKeys
@@ -89,25 +84,23 @@ type idTokenClaims struct {
 	Audience  string `json:"aud"`
 	Expires   *int64 `json:"exp"`
 	NotBefore *int64 `json:"nbf"`
-	Subject   string `json:"oid"`
-	Tenant    string `json:"tid"`
+	Subject   string `json:"sub"`
 }
 
-func makeOIDCValidator(authority *url.URL, clientID string, client *http.Client, production bool) (*oidcValidator, error) {
+func makeOIDCValidator(authority *url.URL, clientID string, client *http.Client) (*oidcValidator, error) {
 	if !validIdentityValue(clientID) {
-		return nil, errors.New("OAuth client ID is invalid")
+		return nil, errors.New("OIDC client ID is invalid")
 	}
 	bounded := httpx.GuardedClient(client, oauthRequestTimeout, httpx.SameOriginRedirect)
-	return &oidcValidator{authority: authority, clientID: clientID, client: bounded, production: production, now: time.Now}, nil
+	return &oidcValidator{authority: authority, clientID: clientID, client: bounded, now: time.Now}, nil
 }
 
-func newOIDCValidator(authority, clientID string, client *http.Client) (*oidcValidator, error) {
-	parsed, tenant, err := parseTenantAuthority(authority)
-	if err != nil {
-		return nil, err
+func newOIDCValidator(issuer, clientID string, client *http.Client) (*oidcValidator, error) {
+	parsed, err := url.Parse(issuer)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("OIDC issuer must be an HTTPS URL")
 	}
-	parsed.Path = "/" + tenant + "/v2.0"
-	return makeOIDCValidator(parsed, clientID, client, true)
+	return makeOIDCValidator(parsed, clientID, client)
 }
 
 func parseSignedIDToken(token string) (idTokenHeader, idTokenClaims, string, []byte, error) {
@@ -145,45 +138,41 @@ func verifyIDTokenSignature(key *rsa.PublicKey, signingInput string, signature [
 	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature)
 }
 
-func (v *oidcValidator) Validate(ctx context.Context, token string) (Principal, error) {
+func (v *oidcValidator) Validate(ctx context.Context, token string) error {
 	header, claims, signingInput, signature, err := parseSignedIDToken(token)
 	if err != nil {
-		return Principal{}, errors.New("ID token is invalid")
+		return errors.New("ID token is invalid")
 	}
 	cache, err := v.loadKeys(ctx)
 	if err != nil {
-		return Principal{}, err
+		return err
 	}
 	key := cache.keys[header.Kid]
 	if key == nil {
 		cache, err = v.refreshUnknownKID(ctx, header.Kid)
 		if err != nil {
-			return Principal{}, err
+			return err
 		}
 		key = cache.keys[header.Kid]
 		if key == nil {
-			return Principal{}, errors.New("ID token signing key is unknown")
+			return errors.New("ID token signing key is unknown")
 		}
 	}
 	if err := verifyIDTokenSignature(key, signingInput, signature); err != nil {
-		return Principal{}, errors.New("ID token signature is invalid")
+		return errors.New("ID token signature is invalid")
 	}
-	if err := v.validateClaims(claims, cache.metadata.Issuer); err != nil {
-		return Principal{}, err
-	}
-	return Principal{Subject: claims.Subject, Tenant: claims.Tenant}, nil
+	return v.validateClaims(claims, cache.metadata.Issuer)
 }
 
 func (v *oidcValidator) validateClaims(claims idTokenClaims, configuredIssuer string) error {
-	if claims.Audience != v.clientID || claims.Expires == nil || claims.NotBefore == nil || !validIdentityValue(claims.Subject) || !validIdentityValue(claims.Tenant) {
+	if claims.Issuer != configuredIssuer || claims.Audience != v.clientID || claims.Expires == nil || !validIdentityValue(claims.Subject) {
 		return errors.New("ID token claims are invalid")
 	}
-	expectedIssuer := strings.ReplaceAll(configuredIssuer, "{tenantid}", claims.Tenant)
-	if claims.Issuer != expectedIssuer {
-		return errors.New("ID token issuer is invalid")
-	}
 	now := v.now().Unix()
-	if *claims.Expires <= now || *claims.NotBefore > now {
+	if *claims.Expires <= now {
+		return errors.New("ID token is outside its validity period")
+	}
+	if claims.NotBefore != nil && *claims.NotBefore > now {
 		return errors.New("ID token is outside its validity period")
 	}
 	return nil
@@ -270,15 +259,18 @@ func (v *oidcValidator) fetchMetadata(ctx context.Context) (oidcMetadata, error)
 	}
 	issuer, issuerErr := url.Parse(metadata.Issuer)
 	jwks, jwksErr := url.Parse(metadata.JWKSURI)
-	if issuerErr != nil || jwksErr != nil || metadata.Issuer == "" || metadata.JWKSURI == "" || issuer.User != nil || jwks.User != nil {
+	authorization, authErr := url.Parse(metadata.AuthorizationEndpoint)
+	token, tokenErr := url.Parse(metadata.TokenEndpoint)
+	if issuerErr != nil || jwksErr != nil || authErr != nil || tokenErr != nil ||
+		metadata.Issuer == "" || metadata.JWKSURI == "" || metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" ||
+		issuer.User != nil || jwks.User != nil || authorization.User != nil || token.User != nil {
 		return metadata, errors.New("OIDC discovery metadata is invalid")
 	}
-	if v.production {
-		if issuer.Scheme != "https" || issuer.Host != "login.microsoftonline.com" || jwks.Scheme != "https" || jwks.Host != "login.microsoftonline.com" {
-			return metadata, errors.New("OIDC discovery endpoints are not recognized")
-		}
-	} else if issuer.Scheme != v.authority.Scheme || issuer.Host != v.authority.Host || jwks.Scheme != v.authority.Scheme || jwks.Host != v.authority.Host {
-		return metadata, errors.New("OIDC discovery endpoints do not match the test authority")
+	sameOrigin := func(candidate *url.URL) bool {
+		return candidate.Scheme == v.authority.Scheme && candidate.Host == v.authority.Host
+	}
+	if !sameOrigin(issuer) || !sameOrigin(jwks) || !sameOrigin(authorization) || !sameOrigin(token) {
+		return metadata, errors.New("OIDC discovery endpoints do not match the configured issuer")
 	}
 	return metadata, nil
 }
@@ -290,7 +282,10 @@ func (v *oidcValidator) fetchKeys(ctx context.Context, endpoint string) (map[str
 	}
 	keys := make(map[string]*rsa.PublicKey, len(set.Keys))
 	for _, jwk := range set.Keys {
-		if jwk.Kty != "RSA" || (jwk.Use != "" && jwk.Use != "sig") || (jwk.Alg != "" && jwk.Alg != "RS256") || !validIdentityValue(jwk.Kid) || keys[jwk.Kid] != nil {
+		if jwk.Kty != "RSA" || (jwk.Use != "" && jwk.Use != "sig") || (jwk.Alg != "" && jwk.Alg != "RS256") {
+			continue
+		}
+		if !validIdentityValue(jwk.Kid) || keys[jwk.Kid] != nil {
 			return nil, errors.New("OIDC signing key is invalid")
 		}
 		n, errN := base64.RawURLEncoding.Strict().DecodeString(jwk.N)
@@ -314,30 +309,8 @@ func (v *oidcValidator) fetchKeys(ctx context.Context, endpoint string) (map[str
 	return keys, nil
 }
 
-func NewValidator(devTunnelBaseURL, authority, clientID string, client *http.Client) (*Validator, error) {
-	access, err := newDevTunnelOAuthValidator(devTunnelBaseURL, client)
-	if err != nil {
-		return nil, err
-	}
-	identity, err := newOIDCValidator(authority, clientID, client)
-	if err != nil {
-		return nil, err
-	}
-	return &Validator{access: access, identity: identity, github: newGitHubValidator(githubUserEndpoint, client)}, nil
-}
-
-func (v *Validator) Validate(ctx context.Context, credentials OAuthCredentials) (Principal, error) {
-	if v == nil || v.access == nil || v.identity == nil || v.github == nil || !validOAuthToken(credentials.AccessToken) {
-		return Principal{}, errors.New("OAuth credentials are invalid")
-	}
-	if err := v.access.ValidateAccess(ctx, credentials.Scheme, credentials.AccessToken); err != nil {
-		return Principal{}, err
-	}
-	if credentials.Scheme == SchemeGitHub {
-		return v.github.Validate(ctx, credentials.AccessToken)
-	}
-	if !validOAuthToken(credentials.IDToken) {
-		return Principal{}, errors.New("OAuth credentials are invalid")
-	}
-	return v.identity.Validate(ctx, credentials.IDToken)
+// Discovery answers the cached authorization and token endpoints the sign-in relay redeems codes against.
+func (v *oidcValidator) Discovery(ctx context.Context) (oidcMetadata, error) {
+	cache, err := v.loadKeys(ctx)
+	return cache.metadata, err
 }

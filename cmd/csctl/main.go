@@ -37,6 +37,7 @@ import (
 const (
 	Version                       = "0.1.0"
 	defaultDevTunnelManagementURL = "https://global.rel.tunnels.api.visualstudio.com"
+	defaultOIDCIssuer             = "https://cilogon.org"
 	sshTimeout                    = 20 * time.Second
 	serveReadHeaderTimeout        = 10 * time.Second
 	serveShutdownTimeout          = 25 * time.Second
@@ -54,9 +55,16 @@ func (s *stringList) Set(value string) error {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  csctl [global options] serve --oauth-authority AUTHORITY --allowed-origin ORIGIN [--allowed-origin ORIGIN ...]
+  csctl [global options] serve --oidc-client-id CLIENT_ID --custos-url URL \
+      --allowed-origin ORIGIN [--allowed-origin ORIGIN ...]
   csctl help
   csctl version
+
+Identity (Custos login):
+  --oidc-issuer ISSUER (default https://cilogon.org)
+  --oidc-client-id CLIENT_ID (required)
+  --custos-url URL (required), e.g. https://custos.cybershuttle.org
+  CSCTL_OIDC_CLIENT_SECRET=SECRET (required, for the sign-in relay's token exchange)
 
 Trusted session configuration:
   --linkspan PATH or CSCTL_LINKSPAN=PATH
@@ -99,26 +107,29 @@ func (components *serveComponents) close() {
 	}
 }
 
-func newServeComponents(service control.Service, allowedOrigins []string, oauthAuthority string) (*serveComponents, error) {
-	validator, err := authn.NewValidator(defaultDevTunnelManagementURL, oauthAuthority, authn.DevTunnelsNativeClientID, nil)
+func newServeComponents(service control.Service, allowedOrigins []string, oidcIssuer, oidcClientID, custosURL, oidcClientSecret string) (*serveComponents, error) {
+	validator, err := authn.NewValidator(custosURL, oidcIssuer, oidcClientID, nil)
 	if err != nil {
 		return nil, err
 	}
+	key, err := authn.LoadOrCreateTunnelLinkKey(filepath.Join(service.Store.Dir, authn.TunnelLinkKeyFileName))
+	if err != nil {
+		return nil, err
+	}
+	linkBroker, err := authn.NewLinkBroker(service.Config.HostsDir, key, nil)
+	if err != nil {
+		return nil, err
+	}
+	service.TunnelLinks = linkBroker
 	auth := gateway.NewSSHAuthManager(service.Runner)
 	api := control.NewHTTPHandler(service, auth)
-	components := &serveComponents{closers: []func(){auth.Close, api.Close}}
+	components := &serveComponents{closers: []func(){linkBroker.Close, auth.Close, api.Close}}
 	oauthHandler, err := authn.NewOAuthBoundary(api, validator, allowedOrigins)
 	if err != nil {
 		components.close()
 		return nil, err
 	}
-	broker, err := authn.NewDeviceCodeBroker(oauthAuthority, allowedOrigins, nil)
-	if err != nil {
-		components.close()
-		return nil, err
-	}
-	components.closers = append([]func(){broker.Close}, components.closers...)
-	handler, err := authn.NewDeviceCodeRoutes(oauthHandler, broker)
+	handler, err := authn.NewSignInRoutes(oauthHandler, validator, oidcClientSecret, allowedOrigins)
 	if err != nil {
 		components.close()
 		return nil, err
@@ -130,7 +141,9 @@ func newServeComponents(service control.Service, allowedOrigins []string, oauthA
 func runServe(ctx context.Context, service control.Service, args []string, listen func(string, string) (net.Listener, error)) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listenAddress := flags.String("listen", "127.0.0.1:8045", "loopback listen address")
-	oauthAuthority := flags.String("oauth-authority", "", "tenant-specific Microsoft Entra authority used for device authorization and OIDC discovery")
+	oidcIssuer := flags.String("oidc-issuer", defaultOIDCIssuer, "OIDC issuer validated against its own discovery document and JWKS")
+	oidcClientID := flags.String("oidc-client-id", "", "OIDC client ID pinned as the ID token audience")
+	custosURL := flags.String("custos-url", "", "Custos base URL resolving a validated ID token to a user via GET {custos-url}/me")
 	var allowedOrigins stringList
 	flags.Var(&allowedOrigins, "allowed-origin", "exact browser origin allowed to call the API (repeatable)")
 	if err := flags.Parse(args); err != nil {
@@ -145,13 +158,20 @@ func runServe(ctx context.Context, service control.Service, args []string, liste
 	if err := control.ValidateLoopbackListen(*listenAddress); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*oauthAuthority) == "" {
-		return errors.New("--oauth-authority is required")
+	if strings.TrimSpace(*oidcClientID) == "" {
+		return errors.New("--oidc-client-id is required")
+	}
+	if strings.TrimSpace(*custosURL) == "" {
+		return errors.New("--custos-url is required")
+	}
+	oidcClientSecret := os.Getenv("CSCTL_OIDC_CLIENT_SECRET")
+	if strings.TrimSpace(oidcClientSecret) == "" {
+		return errors.New("CSCTL_OIDC_CLIENT_SECRET is required")
 	}
 	if err := safeio.EnsurePrivateDir(service.Store.Dir); err != nil {
 		return err
 	}
-	components, err := newServeComponents(service, allowedOrigins, *oauthAuthority)
+	components, err := newServeComponents(service, allowedOrigins, *oidcIssuer, *oidcClientID, *custosURL, oidcClientSecret)
 	if err != nil {
 		return err
 	}

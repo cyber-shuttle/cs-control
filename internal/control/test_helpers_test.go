@@ -2,9 +2,10 @@
 // It also holds the tunnel-authorized context every request needs.
 // The rest are small polling and stub-script helpers.
 //
-//	testConnectToken, testHostToken, testJupyterToken, testPrincipal, testIdentityToken
+//	testConnectToken, testHostToken, testJupyterToken, testPrincipal
 //	noopAuth, ServeWebSocket
 //	oauthValidatorFunc, Validate
+//	testLinkBroker, newTestLinkBroker, Status, Start, Poll, Credential, Delete
 //	reconciledList
 //	reconciledGet
 //	testTunnelManager, Create, Get, Delete
@@ -31,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cyber-shuttle/cs-control/internal/apierr"
 	"github.com/cyber-shuttle/cs-control/internal/authn"
 	"github.com/cyber-shuttle/cs-control/internal/credentialstore"
 	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
@@ -45,8 +47,6 @@ const testJupyterToken = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 var testPrincipal = authn.Principal{Subject: "test-owner", Tenant: "test-tenant"}
 
-const testIdentityToken = "signed-test-identity-token"
-
 type noopAuth struct{}
 
 func (noopAuth) ServeWebSocket(http.ResponseWriter, *http.Request, string, sshexec.Runner) {}
@@ -54,7 +54,48 @@ func (noopAuth) ServeWebSocket(http.ResponseWriter, *http.Request, string, sshex
 type oauthValidatorFunc func(context.Context, string) (authn.Principal, error)
 
 func (f oauthValidatorFunc) Validate(ctx context.Context, credentials authn.OAuthCredentials) (authn.Principal, error) {
-	return f(ctx, credentials.AccessToken)
+	return f(ctx, credentials.IDToken)
+}
+
+type testLinkBroker struct {
+	mu    sync.Mutex
+	links map[authn.Principal]authn.TunnelCredential
+}
+
+func newTestLinkBroker() *testLinkBroker {
+	return &testLinkBroker{links: map[authn.Principal]authn.TunnelCredential{testPrincipal: {Scheme: authn.SchemeBearer, Token: "test-tunnel-link-token"}}}
+}
+
+func (b *testLinkBroker) Status(authn.Principal) (authn.TunnelLinkStatus, error) {
+	return authn.TunnelLinkStatus{}, nil
+}
+
+func (b *testLinkBroker) Start(context.Context, authn.Principal, string) (authn.TunnelLinkStart, error) {
+	return authn.TunnelLinkStart{}, nil
+}
+
+func (b *testLinkBroker) Poll(_ context.Context, _ authn.Principal, handle string) (authn.TunnelLinkPoll, error) {
+	if handle == "pending" {
+		return authn.TunnelLinkPoll{Pending: true, IntervalSeconds: 5}, nil
+	}
+	return authn.TunnelLinkPoll{Status: authn.TunnelLinkStatus{Linked: true, Provider: "github", Account: "octocat"}}, nil
+}
+
+func (b *testLinkBroker) Credential(_ context.Context, principal authn.Principal) (authn.TunnelCredential, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	link, ok := b.links[principal]
+	if !ok {
+		return authn.TunnelCredential{}, apierr.New("tunnel_link_required", "a Dev Tunnels link is required", http.StatusConflict)
+	}
+	return link, nil
+}
+
+func (b *testLinkBroker) Delete(principal authn.Principal) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.links, principal)
+	return nil
 }
 
 func reconciledList(ctx context.Context, service Service) ([]Session, error) {
@@ -119,7 +160,7 @@ func (m *testTunnelManager) Delete(_ context.Context, request devtunnel.DeleteRe
 }
 
 func testTunnelContextFrom(ctx context.Context) context.Context {
-	return authn.WithTunnelAuthorization(ctx, authn.TunnelAuthorization{OAuthToken: "test-oauth-token", Principal: testPrincipal})
+	return authn.WithPrincipal(ctx, testPrincipal)
 }
 
 func testTunnelContext() context.Context {
@@ -150,6 +191,9 @@ func configureTestTunnel(t *testing.T, service *Service) *testTunnelManager {
 	manager := &testTunnelManager{}
 	service.Tunnels = manager
 	service.Credentials = credentialstore.Store{Dir: t.TempDir() + "/credentials"}
+	if service.TunnelLinks == nil {
+		service.TunnelLinks = newTestLinkBroker()
+	}
 	if service.HostPreparations == nil {
 		service.HostPreparations = &sync.Map{}
 	}

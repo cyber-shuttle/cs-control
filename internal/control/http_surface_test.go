@@ -39,7 +39,8 @@ func TestHTTPRouteSurfaceRetainsRequiredControlOperations(t *testing.T) {
 	configDir := t.TempDir()
 	service := Service{
 		Store: Store{Dir: t.TempDir()}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics(),
-		Runner: sshexec.Runner{Hosts: sshconfig.Config{UserPath: filepath.Join(configDir, "user_ssh_config")}},
+		Runner:      sshexec.Runner{Hosts: sshconfig.Config{UserPath: filepath.Join(configDir, "user_ssh_config")}},
+		TunnelLinks: newTestLinkBroker(),
 	}
 	api := NewHTTPHandler(service, noopAuth{})
 	t.Cleanup(api.Close)
@@ -71,6 +72,10 @@ func TestHTTPRouteSurfaceRetainsRequiredControlOperations(t *testing.T) {
 		{http.MethodGet, "/api/v1/keys", http.StatusOK},
 		{http.MethodPost, "/api/v1/keys", http.StatusBadRequest},
 		{http.MethodDelete, "/api/v1/keys/delta-key", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/tunnel/link", http.StatusOK},
+		{http.MethodPost, "/api/v1/tunnel/link/start", http.StatusBadRequest},
+		{http.MethodPost, "/api/v1/tunnel/link/poll/handle", http.StatusOK},
+		{http.MethodDelete, "/api/v1/tunnel/link", http.StatusOK},
 	} {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {
 			request := httptest.NewRequest(test.method, test.path, nil).WithContext(testTunnelContext())
@@ -183,5 +188,22 @@ func TestSessionListDropsAnotherOwnersSessionsAndLogs(t *testing.T) {
 	missingItem := hostRequest(t, handler, http.MethodGet, "/api/v1/sessions/s-333333333333", "")
 	if missingItem.Code != http.StatusNotFound || !strings.Contains(missingItem.Body.String(), `"code":"session_not_found"`) {
 		t.Fatalf("missing item = %d %s", missingItem.Code, missingItem.Body.String())
+	}
+}
+
+func TestTunnelLinkPollAnswersPendingThenLinked(t *testing.T) {
+	service := Service{Store: Store{Dir: t.TempDir()}, Logs: NewSessionLogs(), TunnelLinks: newTestLinkBroker()}
+	api := NewHTTPHandler(service, noopAuth{})
+	t.Cleanup(api.Close)
+	for handle, want := range map[string]string{
+		"pending": `{"status":"pending","intervalSeconds":5}`,
+		"done":    `{"linked":true,"provider":"github","account":"octocat"}`,
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/tunnel/link/poll/"+handle, nil).WithContext(testTunnelContext())
+		response := httptest.NewRecorder()
+		api.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != want {
+			t.Fatalf("poll %s = %d %s, want 200 %s", handle, response.Code, response.Body.String(), want)
+		}
 	}
 }

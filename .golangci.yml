@@ -33,6 +33,16 @@ linters:
       - path: internal/devtunnel/devtunnel\.go
         linters: [staticcheck]
         text: "ST1005"
+      # Custos is a proper noun, not the start of a generic error sentence.
+      - path: internal/authn/custos\.go
+        linters: [staticcheck]
+        text: "ST1005"
+      # These are OAuth endpoint URLs, not literal credentials; the constant name says what it is reached
+      # for, not a secret it holds (G101). The struct is JSON-marshaled only to be sealed with secretbox in
+      # the same call, never written or logged in the clear (G117).
+      - path: internal/authn/tunnellink\.go
+        linters: [gosec]
+        text: "G101|G117"
       # Chmods and opens a path this process already verified with PrivateDir/EnsurePrivateDir; the directory
       # mode is 0700 by design, tighter than gosec's file-permission floor, and every open is of a path under
       # this user's own state directory (G302, G304).
