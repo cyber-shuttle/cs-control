@@ -7,8 +7,9 @@
 //	sessionTunnelDurationSeconds
 //	sessionPortURI
 //	tunnelEndpoint
+//	tunnelLinker
 //	Service
-//	sessionEndpoint, sessionAccess
+//	sessionEndpoint, tunnelCredential, sessionAccess
 //	createSessionTunnel
 //	releaseSessionTunnel
 package control
@@ -87,6 +88,15 @@ type tunnelEndpoint struct {
 	expiresAt  time.Time
 }
 
+// tunnelLinker is the Dev Tunnels link broker's surface this package uses; *authn.LinkBroker satisfies it.
+type tunnelLinker interface {
+	Status(principal authn.Principal) (authn.TunnelLinkStatus, error)
+	Start(ctx context.Context, principal authn.Principal, provider string) (authn.TunnelLinkStart, error)
+	Poll(ctx context.Context, principal authn.Principal, handle string) (authn.TunnelLinkPoll, error)
+	Credential(ctx context.Context, principal authn.Principal) (authn.TunnelCredential, error)
+	Delete(principal authn.Principal) error
+}
+
 func (s Service) sessionEndpoint(ctx context.Context, session Session, number uint16) (tunnelEndpoint, error) {
 	if s.Tunnels == nil || !idPattern.MatchString(session.ID) || session.Seq < 1 {
 		return tunnelEndpoint{}, errors.New("the session is not addressable")
@@ -109,6 +119,13 @@ func (s Service) sessionEndpoint(ctx context.Context, session Session, number ui
 	return tunnelEndpoint{uri: uri, credential: credential, expiresAt: record.ExpiresAt.UTC()}, nil
 }
 
+func (s Service) tunnelCredential(ctx context.Context, principal authn.Principal) (authn.TunnelCredential, error) {
+	if s.TunnelLinks == nil {
+		return authn.TunnelCredential{}, errors.New("Dev Tunnels link is unavailable")
+	}
+	return s.TunnelLinks.Credential(ctx, principal)
+}
+
 func (s Service) sessionAccess(ctx context.Context, session Session) (*sessionAccessResponse, error) {
 	unavailable := func(reason string) (*sessionAccessResponse, error) {
 		return nil, apierr.New("session_access_unavailable", "Session access is unavailable: "+reason, http.StatusConflict)
@@ -126,7 +143,7 @@ func (s Service) sessionAccess(ctx context.Context, session Session) (*sessionAc
 	}, nil
 }
 
-func (s Service) createSessionTunnel(ctx context.Context, session *Session, auth authn.TunnelAuthorization, seq int) (devtunnel.Record, string, error) {
+func (s Service) createSessionTunnel(ctx context.Context, session *Session, principal authn.Principal, link authn.TunnelCredential, seq int) (devtunnel.Record, string, error) {
 	if s.Tunnels == nil || s.Credentials.Dir == "" {
 		return devtunnel.Record{}, "", errors.New("Dev Tunnel lifecycle dependencies are unavailable")
 	}
@@ -138,45 +155,45 @@ func (s Service) createSessionTunnel(ctx context.Context, session *Session, auth
 	durationSeconds := sessionTunnelDurationSeconds(session.Resources.WallMinutes)
 	ports := sessionPorts(session.ID, seq)
 	record, err := s.Tunnels.Create(ctx, devtunnel.CreateRequest{
-		Scheme: auth.Scheme, OAuthToken: auth.OAuthToken, TunnelID: tunnelID, DurationSeconds: durationSeconds,
+		Scheme: link.Scheme, OAuthToken: link.Token, TunnelID: tunnelID, DurationSeconds: durationSeconds,
 		Ports: []devtunnel.PortSpec{
 			{PortNumber: ports.control, Description: controlPortDescription},
 			{PortNumber: ports.jupyter, Description: jupyterPortDescription, Anonymous: true},
 		},
 	})
 	if err != nil {
-		createErr := apierr.Redact("create session Dev Tunnel", err, auth.OAuthToken)
-		cleanupErr := s.releaseSessionTunnel(auth, session.ID, seq, tunnelMetadata{ID: tunnelID})
+		createErr := apierr.Redact("create session Dev Tunnel", err, link.Token)
+		cleanupErr := s.releaseSessionTunnel(link, session.ID, seq, tunnelMetadata{ID: tunnelID})
 		return devtunnel.Record{}, "", errors.Join(createErr, cleanupErr)
 	}
 	if record.ID != tunnelID || !devtunnel.ValidClusterID(record.ClusterID) || !devtunnel.ValidToken(record.HostToken) || !devtunnel.ValidToken(record.ConnectToken) || !record.ExpiresAt.After(requestedAt) {
-		cleanupErr := s.releaseSessionTunnel(auth, session.ID, seq, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID})
+		cleanupErr := s.releaseSessionTunnel(link, session.ID, seq, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID})
 		return devtunnel.Record{}, "", errors.Join(errors.New("created Dev Tunnel metadata is invalid"), cleanupErr)
 	}
 	jupyterToken, err := newJupyterToken()
 	if err != nil {
-		return devtunnel.Record{}, "", errors.Join(err, s.releaseSessionTunnel(auth, session.ID, seq, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
+		return devtunnel.Record{}, "", errors.Join(err, s.releaseSessionTunnel(link, session.ID, seq, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
 	}
 	candidate := *session
 	candidate.Seq = seq
 	candidate.JobName = jobName(session.ID, seq)
-	candidate.Owner = auth.Principal
+	candidate.Owner = principal
 	candidate.Tunnel = tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID, ExpiresAt: record.ExpiresAt.UTC()}
 	credential := credentialstore.Credential{ConnectToken: record.ConnectToken, JupyterToken: jupyterToken}
 	if err := s.Credentials.Put(session.ID, seq, credential); err != nil {
-		return devtunnel.Record{}, "", errors.Join(err, s.releaseSessionTunnel(auth, session.ID, seq, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
+		return devtunnel.Record{}, "", errors.Join(err, s.releaseSessionTunnel(link, session.ID, seq, tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID}))
 	}
 	*session = candidate
 	return record, jupyterToken, nil
 }
 
-func (s Service) releaseSessionTunnel(auth authn.TunnelAuthorization, sessionID string, seq int, tunnel tunnelMetadata) error {
+func (s Service) releaseSessionTunnel(credential authn.TunnelCredential, sessionID string, seq int, tunnel tunnelMetadata) error {
 	ctx, cancel := s.ownTimeout()
 	defer cancel()
 	var deleteErr error
-	if s.Tunnels != nil && tunnel.ID != "" {
-		if err := s.Tunnels.Delete(ctx, devtunnel.DeleteRequest{Scheme: auth.Scheme, OAuthToken: auth.OAuthToken, TunnelID: tunnel.ID, ClusterID: tunnel.ClusterID}); err != nil {
-			deleteErr = apierr.Redact("compensate session Dev Tunnel", err, auth.OAuthToken)
+	if s.Tunnels != nil && tunnel.ID != "" && credential.Token != "" {
+		if err := s.Tunnels.Delete(ctx, devtunnel.DeleteRequest{Scheme: credential.Scheme, OAuthToken: credential.Token, TunnelID: tunnel.ID, ClusterID: tunnel.ClusterID}); err != nil {
+			deleteErr = apierr.Redact("compensate session Dev Tunnel", err, credential.Token)
 		}
 	}
 	return errors.Join(deleteErr, s.Credentials.Delete(sessionID, seq))

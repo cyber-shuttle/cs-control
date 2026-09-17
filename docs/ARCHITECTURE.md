@@ -4,9 +4,9 @@
 commands for hosts or sessions: `serve` starts the HTTP API and a browser or editor client drives everything
 over it.
 
-The handler stack is `authn.NewDeviceCodeRoutes(authn.NewOAuthBoundary(control.NewHTTPHandler(...)))`. The two
-device-code routes are answered by the broker in front of the OAuth boundary; every other request passes
-through it.
+The handler stack is `authn.NewSignInRoutes(authn.NewOAuthBoundary(control.NewHTTPHandler(...)))`. The three
+sign-in routes are answered by the relay in front of the OAuth boundary; every other request, including the
+Dev Tunnels link routes, passes through it.
 
 ## Packages
 
@@ -20,7 +20,8 @@ sshconfig            reads the per-principal hosts config, writes only its own m
 sshexec              argument vectors, control socket, bounded output
 devtunnel            Dev Tunnels management client and its URI/host policy
 credentialstore      one seq's connect and Jupyter tokens, held as one private file per seq
-authn                OAuth boundary, OIDC validation, device-code broker
+authn                OAuth boundary, OIDC validation, Custos identity resolution, the sign-in relay, and the
+                     Dev Tunnels link broker with its sealed per-principal store
 control              session domain, store, reconcile, discovery, HTTP, marker-delimited remote output
 gateway              SSH authentication WebSocket route and its frames
 cmd/csctl            composition root
@@ -156,11 +157,26 @@ treated as uncertain server-side creation: the deterministic tunnel ID is idempo
 authority before the error is returned. Tunnel expiry is the final cleanup backstop after ungraceful process or
 job failure.
 
-Create and delete use the delegated OAuth bearer. The management read behind `/access` uses
+Create and delete use the caller's linked Dev Tunnels credential, resolved and refreshed on use by the Dev
+Tunnels link broker, never the request's own bearer. The management read behind `/access` uses
 `Authorization: tunnel <connect token>`, and the metrics read reaches Linkspan on the control port with the
 same connect token in `X-Tunnel-Authorization`, which is how Dev Tunnels authorizes a non-anonymous port. The
 edge answers `200` with an interstitial page once the host is gone, so a body that parses is the liveness
 signal rather than the status.
+
+## Dev Tunnels link
+
+Sessions never run over the request's own bearer: that bearer identifies the caller to Custos, nothing more.
+A session instead runs over a Microsoft or GitHub Dev Tunnels account the caller links once through a device-
+code authorization the broker runs on their behalf, bound to their principal from the moment it starts. The
+credential the authorization produces is sealed with `nacl/secretbox` under a key generated once at
+`<state>/tunnel-link.key` and held at `<state>/hosts/<principal>/tunnel-link`, beside that principal's SSH
+host configuration and under the same per-principal hash. `Service.tunnelCredential` loads it, refreshing a
+Microsoft link within two minutes of expiry and rotating the stored refresh token; a GitHub token does not
+expire. `POST /api/v1/sessions` and `.../start` fail with 409 `tunnel_link_required` before anything is
+provisioned when the caller has linked nothing; `stop` and `delete` release best-effort, skipping the Dev
+Tunnels call rather than failing when no usable credential is available, and leave tunnel expiry as the
+backstop.
 
 ## SSH configuration
 
@@ -194,10 +210,12 @@ what establishes that master.
 | Path | Contents |
 | --- | --- |
 | `state.json` | non-secret scheduler, session and tunnel metadata, and the bounded record of what finished sessions did |
-| `hosts/` | one SSH host configuration per principal, and the login keys they uploaded under `keys/`, mode `0600` under a `0700` directory |
+| `hosts/` | one SSH host configuration per principal, the login keys they uploaded under `keys/`, and each principal's sealed `tunnel-link`, mode `0600` under a `0700` directory |
 | `credentials/` | per-seq Dev Tunnel connect token and Jupyter token, mode `0600` under a `0700` directory |
+| `tunnel-link.key` | the 32-byte key every `tunnel-link` file is sealed with, mode `0600`, generated once at boot |
 
-OAuth credentials and tunnel host and manage-ports credentials are never persisted.
+The request's own bearer, and tunnel host and manage-ports credentials, are never persisted; the linked Dev
+Tunnels credential is the one third-party credential this daemon keeps, and only sealed.
 
 ## Trust boundaries
 
@@ -205,29 +223,32 @@ OAuth credentials and tunnel host and manage-ports credentials are never persist
   before anything binds a port.
 - **Exact origins.** At least one origin is required; HTTPS and loopback HTTP only, no wildcards. A browser
   request carrying any other `Origin` is refused. Native clients may omit `Origin` on the authenticated API,
-  but the pre-authentication device routes require an exact allowed browser origin.
-- **Two independent bearers, or one GitHub token.** A Microsoft request carries a Dev Tunnels access token in
-  `Authorization` and a signed Microsoft ID token in `X-CyberShuttle-Identity`. The access token is a remotely
-  validated Dev Tunnels capability; the cryptographically validated ID token is the sole identity bearer. No
-  subject or `at_hash` binding is claimed between them. A GitHub request carries one token under the `github`
-  scheme: Dev Tunnels validates it as a capability and GitHub's user endpoint names the identity.
-- **Ownership** is the stable subject and tenant derived only from the validated ID token, or the GitHub user
-  id under the tenant `github`. Dev Tunnels access validation is an independent capability check and supplies
-  no identity claims. Session lists and their log tails are filtered to the owner; item and access reads
-  reject a different principal.
+  but the pre-authentication sign-in routes require an exact allowed browser origin.
+- **One bearer, one identity authority.** Every request carries a signed OIDC ID token, cryptographically
+  validated against the configured issuer's discovery document and JWKS with the audience pinned to the
+  configured client ID. That is not itself the principal: the daemon calls `GET {custos-url}/me` with the
+  same bearer, and Custos is the sole authority over who that token belongs to. A token Custos does not
+  recognise is refused `401 identity_not_linked`.
+- **Ownership** is the Custos user id the token resolves to, under the fixed tenant `custos`. Session lists
+  and their log tails are filtered to the owner; item and access reads reject a different principal.
 - **No ambient authentication.** There are no cookies, browser sign-in state, token URLs or static file serving, and
-  the only unauthenticated routes are the two device-code routes.
-- **The device-code broker** retains the device code in bounded process memory only, enforces polling
-  intervals, and discards refresh tokens and terminal state. It brokers pinned Microsoft requests for exact
-  allowed browser origins.
+  the only unauthenticated routes are the three sign-in routes.
+- **The sign-in relay** holds the one client secret CILogon's token endpoint requires and never returns it;
+  it validates `redirectUri` against the same allowed-origin set as everything else and maps a rejected code
+  or refresh token to `400 invalid_grant` without repeating the issuer's own error text.
+- **The Dev Tunnels link broker** retains the device code in bounded process memory only, enforces polling
+  intervals, and never answers a poll with the linked token — only the daemon's own sealed store ever holds
+  it, and only Microsoft's rotated refresh token replaces what came before.
 - **OIDC key refresh** is coalesced, runs outside the cache lock, and is limited to cooldown-bounded unknown
   `kid` values; a signature failure against a known key never triggers a fetch.
 - **Validation precedes construction.** SSH aliases, scheduler values, node names, paths, tunnel metadata,
   direct URIs and ports are validated before they reach a command line or persistent state. Remote scripts are
-  constants and values reach them as arguments. Delegated OAuth credentials and the validated principal travel
-  in the request context, not in lifecycle request or state structs.
-- **Redaction.** OAuth, host, connect and Jupyter tokens are redacted from errors, logs, scripts and session
-  responses. The Jupyter token appears only in the job environment and in the session-access response.
+  constants and values reach them as arguments. The validated principal travels in the request context, not
+  in lifecycle request or state structs; the linked Dev Tunnels credential is resolved fresh from its sealed
+  store rather than carried from the request that needs it.
+- **Redaction.** Dev Tunnels, host, connect and Jupyter tokens are redacted from errors, logs, scripts and
+  session responses. The Jupyter token appears only in the job environment and in the session-access
+  response.
 - **No proxying.** The owner-authenticated `/access` response returns the session's direct Jupyter URI and
   its token; cs-control proxies no session data and creates no login-host port forward. The one WebSocket
   carries interactive SSH authentication prompts as untyped bytes and never forwards session data.

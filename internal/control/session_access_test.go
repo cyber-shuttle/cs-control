@@ -42,7 +42,7 @@ func TestCreateSessionTunnelPersistsCapabilityOnlyInPrivateCredential(t *testing
 	manager := &testTunnelManager{}
 	service := Service{Tunnels: manager, Credentials: credentialstore.Store{Dir: t.TempDir() + "/credentials"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
 	session := pendingSession("s-012345abcdef", "delta", "")
-	record, jupyterToken, err := service.createSessionTunnel(context.Background(), &session, authn.TunnelAuthorization{OAuthToken: "oauth-token", Principal: testPrincipal}, 1)
+	record, jupyterToken, err := service.createSessionTunnel(context.Background(), &session, testPrincipal, authn.TunnelCredential{Scheme: authn.SchemeBearer, Token: "oauth-token"}, 1)
 	testutil.Check(t, err)
 	stored, err := service.Credentials.Get(session.ID, session.Seq)
 	if err != nil || stored.ConnectToken != record.ConnectToken {
@@ -109,7 +109,7 @@ func TestSessionAccessIsOwnerOnly(t *testing.T) {
 	api := NewHTTPHandler(service, noopAuth{})
 	defer api.Close()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+session.ID+"/access", nil)
-	request = request.WithContext(authn.WithTunnelAuthorization(request.Context(), authn.TunnelAuthorization{OAuthToken: "test-oauth-token", Principal: authn.Principal{Subject: "other", Tenant: testPrincipal.Tenant}}))
+	request = request.WithContext(authn.WithPrincipal(request.Context(), authn.Principal{Subject: "other", Tenant: testPrincipal.Tenant}))
 	response := httptest.NewRecorder()
 	api.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden || strings.Contains(response.Body.String(), testJupyterToken) {
@@ -181,7 +181,7 @@ func TestCreateSessionTunnelCompensatesUncertainCreateError(t *testing.T) {
 		Runner: sshexec.Runner{Timeout: 5 * time.Second}, Tunnels: manager,
 		Credentials: credentialstore.Store{Dir: credentialDir},
 	}
-	_, _, err := service.createSessionTunnel(context.Background(), &session, authn.TunnelAuthorization{OAuthToken: oauth, Principal: authn.Principal{Subject: "owner", Tenant: "tenant"}}, 1)
+	_, _, err := service.createSessionTunnel(context.Background(), &session, authn.Principal{Subject: "owner", Tenant: "tenant"}, authn.TunnelCredential{Scheme: authn.SchemeBearer, Token: oauth}, 1)
 	if err == nil || strings.Contains(err.Error(), oauth) || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("create/cleanup error = %v", err)
 	}

@@ -99,7 +99,7 @@ var testPrincipal = authn.Principal{Subject: "test-owner", Tenant: "test-tenant"
 type oauthValidatorFunc func(context.Context, string) (authn.Principal, error)
 
 func (f oauthValidatorFunc) Validate(ctx context.Context, credentials authn.OAuthCredentials) (authn.Principal, error) {
-	return f(ctx, credentials.AccessToken)
+	return f(ctx, credentials.IDToken)
 }
 
 func serveSSHRoute(auth *SSHAuthManager) http.Handler {
@@ -188,7 +188,7 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	server := httptest.NewUnstartedServer(nil)
 	const approvedOrigin = "https://workspace.example.edu"
 	handler, err := authn.NewOAuthBoundary(api, oauthValidatorFunc(func(_ context.Context, token string) (authn.Principal, error) {
-		if token != "service-token-service-token-1234" {
+		if token != testIdentityToken {
 			return authn.Principal{}, errors.New("invalid delegated token")
 		}
 		return testPrincipal, nil
@@ -205,7 +205,7 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/ssh/delta/auth"
 	dialer := *websocket.DefaultDialer
-	dialer.Subprotocols = []string{authn.ControlWebSocketProtocol, authn.WebSocketBearerPrefix + base64.RawURLEncoding.EncodeToString([]byte("service-token-service-token-1234")), authn.WebSocketIdentityPrefix + base64.RawURLEncoding.EncodeToString([]byte(testIdentityToken))}
+	dialer.Subprotocols = []string{authn.ControlWebSocketProtocol, authn.WebSocketBearerPrefix + base64.RawURLEncoding.EncodeToString([]byte(testIdentityToken))}
 	hostile := http.Header{"Origin": {"https://evil.example"}}
 	if connection, response, dialErr := dialer.Dial(url, hostile); dialErr == nil || response == nil || response.StatusCode != http.StatusForbidden {
 		if connection != nil {

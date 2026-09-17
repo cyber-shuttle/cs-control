@@ -177,11 +177,15 @@ func (s Service) create(ctx context.Context, request createRequest) (_ *Session,
 			s.forgetUnpersistedBuffers(request.ID)
 		}
 	}()
-	auth, err := authn.TunnelAuthorizationFromContext(ctx)
+	principal, err := authn.PrincipalFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	reused, err := s.reusableSession(request, auth.Principal)
+	credential, err := s.tunnelCredential(ctx, principal)
+	if err != nil {
+		return nil, err
+	}
+	reused, err := s.reusableSession(request, principal)
 	if err != nil || reused != nil {
 		return reused, err
 	}
@@ -193,7 +197,7 @@ func (s Service) create(ctx context.Context, request createRequest) (_ *Session,
 		return nil, err
 	}
 
-	idempotent, previous, err := s.claimCreateSlot(request, auth.Principal)
+	idempotent, previous, err := s.claimCreateSlot(request, principal)
 	if err != nil {
 		return nil, err
 	}
@@ -202,18 +206,18 @@ func (s Service) create(ctx context.Context, request createRequest) (_ *Session,
 	}
 
 	intent, nextSeq := buildSubmitIntent(*prepared, previous, s.now())
-	record, jupyterToken, err := s.createSessionTunnel(ctx, &intent, auth, nextSeq)
+	record, jupyterToken, err := s.createSessionTunnel(ctx, &intent, principal, credential, nextSeq)
 	if err != nil {
 		return nil, err
 	}
 	prepared.script = buildScript(intent, prepared.linkspan)
 	if err := s.persistSubmitIntent(request.ID, previous, intent); err != nil {
-		return nil, errors.Join(err, s.releaseSessionTunnel(auth, intent.ID, intent.Seq, intent.Tunnel))
+		return nil, errors.Join(err, s.releaseSessionTunnel(credential, intent.ID, intent.Seq, intent.Tunnel))
 	}
 
 	if err := s.provisionSession(ctx, request.SSHHost, intent, prepared.home, prepared.linkspan); err != nil {
 		s.sessionStatus(intent.ID, "Session environment preparation failed")
-		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent, request.relaunch))
+		return nil, errors.Join(err, s.abandonSubmitIntent(credential, intent, request.relaunch))
 	}
 
 	s.sessionStatus(intent.ID, "Submitting session to Slurm")
@@ -224,7 +228,7 @@ func (s Service) create(ctx context.Context, request createRequest) (_ *Session,
 			return nil, err
 		}
 		s.sessionStatus(intent.ID, "Session submission failed")
-		return nil, errors.Join(err, s.abandonSubmitIntent(auth, intent, request.relaunch))
+		return nil, errors.Join(err, s.abandonSubmitIntent(credential, intent, request.relaunch))
 	}
 	s.sessionStatus(intent.ID, "Session submitted to Slurm")
 	created, superseded, err := s.recordSubmittedJob(intent.ID, jobID)
@@ -393,7 +397,7 @@ func (s Service) cancelSupersededJob(host, sessionID, jobID string) (*Session, e
 }
 
 func (s Service) start(ctx context.Context, id string) (*Session, error) {
-	auth, err := authn.TunnelAuthorizationFromContext(ctx)
+	principal, err := authn.PrincipalFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -401,14 +405,18 @@ func (s Service) start(ctx context.Context, id string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if session.Owner != auth.Principal {
+	if session.Owner != principal {
 		return nil, errOwnerMismatch
 	}
 	if !terminalSession(session.State) {
 		return nil, errSessionRunning
 	}
 	if session.Tunnel.ID != "" {
-		if err := s.releaseSessionTunnel(auth, session.ID, session.Seq, session.Tunnel); err != nil {
+		credential, err := s.tunnelCredential(ctx, principal)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.releaseSessionTunnel(credential, session.ID, session.Seq, session.Tunnel); err != nil {
 			return nil, err
 		}
 	}
@@ -422,7 +430,7 @@ func (s Service) start(ctx context.Context, id string) (*Session, error) {
 }
 
 func (s Service) stop(ctx context.Context, id string) (*Session, error) {
-	auth, err := authn.TunnelAuthorizationFromContext(ctx)
+	principal, err := authn.PrincipalFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +441,7 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 		if session == nil {
 			return errSessionNotFound
 		}
-		if session.Owner != auth.Principal {
+		if session.Owner != principal {
 			return errOwnerMismatch
 		}
 		alreadyStopped = terminalSession(session.State)
@@ -451,7 +459,10 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 	if !alreadyStopped {
 		s.sessionStatus(id, "Stopping session")
 	}
-	managementErr := s.releaseSessionTunnel(auth, snapshot.ID, snapshot.Seq, snapshot.Tunnel)
+	// A stop always proceeds locally even without a usable link: releaseSessionTunnel skips the Dev Tunnels
+	// call when the token is empty, leaving the tunnel for its own expiry to clean up.
+	credential, _ := s.tunnelCredential(ctx, principal)
+	managementErr := s.releaseSessionTunnel(credential, snapshot.ID, snapshot.Seq, snapshot.Tunnel)
 	candidate := snapshot
 	var narration []string
 	if reconcilable(snapshot.State) {
@@ -520,7 +531,7 @@ func (s Service) delete(ctx context.Context, id string) (*Session, error) {
 	if stopped == nil || !terminalSession(stopped.State) {
 		return nil, apierr.New("session_not_stopped", "session is still stopping; delete it once the scheduler has released the job", http.StatusConflict)
 	}
-	auth, err := authn.TunnelAuthorizationFromContext(ctx)
+	principal, err := authn.PrincipalFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -530,7 +541,7 @@ func (s Service) delete(ctx context.Context, id string) (*Session, error) {
 		if session == nil {
 			return errSessionNotFound
 		}
-		if session.Owner != auth.Principal {
+		if session.Owner != principal {
 			return errOwnerMismatch
 		}
 		if !terminalSession(session.State) {
@@ -680,8 +691,8 @@ func (s Service) loadSession(id string) (*Session, error) {
 	return result, err
 }
 
-func (s Service) abandonSubmitIntent(auth authn.TunnelAuthorization, intent Session, relaunched bool) error {
-	compensateErr := s.releaseSessionTunnel(auth, intent.ID, intent.Seq, intent.Tunnel)
+func (s Service) abandonSubmitIntent(credential authn.TunnelCredential, intent Session, relaunched bool) error {
+	compensateErr := s.releaseSessionTunnel(credential, intent.ID, intent.Seq, intent.Tunnel)
 	deleted := false
 	stateErr := s.Store.withLock(func(current *state) error {
 		currentSession := current.Sessions[intent.ID]

@@ -85,8 +85,7 @@ func caller[T any](a *httpAPI, status int, produce func(Service, *http.Request) 
 }
 
 func requestPrincipal(request *http.Request) (authn.Principal, error) {
-	auth, err := authn.TunnelAuthorizationFromContext(request.Context())
-	return auth.Principal, err
+	return authn.PrincipalFromContext(request.Context())
 }
 
 func sessionsOwnedBy(sessions []Session, principal authn.Principal) []Session {
@@ -320,14 +319,17 @@ func (a *httpAPI) mux() *http.ServeMux {
 		"/api/v1/ssh/{alias}/test": {http.MethodPost: caller(a, http.StatusOK, func(service Service, request *http.Request) (hostTest, error) {
 			return service.testHost(request.Context(), request.PathValue("alias"))
 		})},
-		"/api/v1/sessions":              {http.MethodGet: a.listSessions, http.MethodPost: caller(a, http.StatusCreated, createSession)},
-		"/api/v1/sessions/validate":     {http.MethodPost: caller(a, http.StatusOK, validateSession)},
-		"/api/v1/sessions/history":      {http.MethodGet: answer(a.listRuns)},
-		"/api/v1/sessions/{id}":         {http.MethodGet: answer(a.getSession), http.MethodDelete: caller(a, http.StatusOK, sessionAction(Service.delete))},
-		"/api/v1/sessions/{id}/start":   {http.MethodPost: caller(a, http.StatusOK, sessionAction(Service.start))},
-		"/api/v1/sessions/{id}/stop":    {http.MethodPost: caller(a, http.StatusOK, sessionAction(Service.stop))},
-		"/api/v1/sessions/{id}/access":  {http.MethodGet: answer(a.sessionAccess)},
-		"/api/v1/sessions/{id}/metrics": {http.MethodGet: answer(a.getSessionMetrics)},
+		"/api/v1/sessions":                  {http.MethodGet: a.listSessions, http.MethodPost: caller(a, http.StatusCreated, createSession)},
+		"/api/v1/sessions/validate":         {http.MethodPost: caller(a, http.StatusOK, validateSession)},
+		"/api/v1/sessions/history":          {http.MethodGet: answer(a.listRuns)},
+		"/api/v1/sessions/{id}":             {http.MethodGet: answer(a.getSession), http.MethodDelete: caller(a, http.StatusOK, sessionAction(Service.delete))},
+		"/api/v1/sessions/{id}/start":       {http.MethodPost: caller(a, http.StatusOK, sessionAction(Service.start))},
+		"/api/v1/sessions/{id}/stop":        {http.MethodPost: caller(a, http.StatusOK, sessionAction(Service.stop))},
+		"/api/v1/sessions/{id}/access":      {http.MethodGet: answer(a.sessionAccess)},
+		"/api/v1/sessions/{id}/metrics":     {http.MethodGet: answer(a.getSessionMetrics)},
+		"/api/v1/tunnel/link":               {http.MethodGet: caller(a, http.StatusOK, getTunnelLink), http.MethodDelete: caller(a, http.StatusOK, deleteTunnelLink)},
+		"/api/v1/tunnel/link/start":         {http.MethodPost: caller(a, http.StatusOK, startTunnelLink)},
+		"/api/v1/tunnel/link/poll/{handle}": {http.MethodPost: caller(a, http.StatusOK, pollTunnelLink)},
 	} {
 		mux.Handle(pattern, route(handlers))
 	}

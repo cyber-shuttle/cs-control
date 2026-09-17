@@ -70,7 +70,7 @@ func TestStartRefusesSessionsItMayNotRun(t *testing.T) {
 	retire(t, service, created.ID)
 
 	stranger := authn.Principal{Subject: "other-owner", Tenant: "test-tenant"}
-	ctx := authn.WithTunnelAuthorization(context.Background(), authn.TunnelAuthorization{OAuthToken: "other-token", Principal: stranger})
+	ctx := authn.WithPrincipal(context.Background(), stranger)
 	if _, err := service.start(ctx, created.ID); err == nil || apierr.For(err).Code != "session_owner_mismatch" {
 		t.Fatalf("another principal ran this session: %v", err)
 	}

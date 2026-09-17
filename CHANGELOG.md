@@ -5,20 +5,31 @@ Notable changes to CyberShuttle Control. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- GitHub sign-in. `POST /api/v1/oauth/device/start` takes `{"provider":"github"}` and brokers GitHub's device
-  flow with the Dev Tunnels GitHub client; the poll answers `scheme` beside the token. A GitHub caller sends
-  `Authorization: github <token>` alone, over HTTP or as the `github.` subprotocol, and Dev Tunnels calls carry
-  that scheme. Its principal is the GitHub user id under tenant `github`, held five minutes per token.
-
-- Stored login keys. `GET`, `POST /api/v1/keys` and `DELETE /api/v1/keys/{name}` list, upload and remove a
-  caller's private keys, held under their own hosts directory at mode `0600`. A host add or update takes a
-  `key` name; the host then carries the key as its `IdentityFile` with `IdentitiesOnly yes`, so every login,
-  test, discovery and session on that host uses it. The host answers with `key`, and deleting a key unassigns
-  it from the hosts that carried it.
-
 ### Changed
+
+- **Custos login replaces Microsoft and GitHub sign-in.** Every request now carries one
+  `Authorization: Bearer <ID token>`, validated against a configured OIDC issuer and audience
+  (`--oidc-issuer`, default `https://cilogon.org`; `--oidc-client-id`, required) and then resolved to a
+  principal through Custos (`--custos-url`, required; `GET {custos-url}/me`), under the fixed tenant
+  `custos`. `--oauth-authority` is gone. The SSH authentication WebSocket now offers exactly
+  `cybershuttle.v1` and `bearer.<id token>`; the `X-CyberShuttle-Identity` header, the `github` Authorization
+  scheme, and the `identity.`/`github.` subprotocols are gone. A new sign-in relay, origin-gated like the
+  routes it replaces, finishes the browser's own CILogon authorization-code-with-PKCE flow:
+  `GET /api/v1/oauth/config`, `POST /api/v1/oauth/exchange` and `POST /api/v1/oauth/refresh`, needing
+  `CSCTL_OIDC_CLIENT_SECRET`. The old `POST /api/v1/oauth/device/start` and `poll` routes are gone.
+
+  **Breaking.** Every existing token is refused; every client must re-implement sign-in against CILogon (or
+  another OIDC issuer configured this way) and hold a linked Dev Tunnels account (below) before creating a
+  session.
+
+- **Dev Tunnels is now a one-time link, not the sign-in credential.** A session runs over a Microsoft or
+  GitHub Dev Tunnels account the caller links once through `POST /api/v1/tunnel/link/start` and
+  `POST /api/v1/tunnel/link/poll/{handle}`, the same device-code flow sign-in used to use, now bound to the
+  caller's principal and sealed to disk (`nacl/secretbox`, key at `<state>/tunnel-link.key`) rather than
+  returned. `GET /api/v1/tunnel/link` and `DELETE /api/v1/tunnel/link` read and forget it. A Microsoft link
+  refreshes silently within two minutes of expiry; a GitHub token does not expire.
+  `POST /api/v1/sessions` and `.../start` refuse with `409 tunnel_link_required` before provisioning anything
+  when nothing is linked; `validate` does not need one.
 
 - **Generation is seq.** A session's attempt counter is a plain integer: `seq` replaces the random
   `generation` string (`g-<16 hex>`) everywhere it appeared -- the `seq` field on a session, a run and the
@@ -56,6 +67,12 @@ Notable changes to CyberShuttle Control. The format follows
   said belongs to the run that said it, and a session record outlives its runs.
 
 ### Added
+
+- Stored login keys. `GET`, `POST /api/v1/keys` and `DELETE /api/v1/keys/{name}` list, upload and remove a
+  caller's private keys, held under their own hosts directory at mode `0600`. A host add or update takes a
+  `key` name; the host then carries the key as its `IdentityFile` with `IdentitiesOnly yes`, so every login,
+  test, discovery and session on that host uses it. The host answers with `key`, and deleting a key unassigns
+  it from the hosts that carried it.
 
 - `PUT /api/v1/ssh/{alias}`: replace a managed host with what a pasted `ssh` command now says, so a login whose
   host, port, user or jump changed is corrected in place instead of being removed and re-added.

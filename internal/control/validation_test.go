@@ -56,7 +56,7 @@ func TestCreateRevalidatesExactScriptBeforeSubmit(t *testing.T) {
 func TestCreateValidationFailureDoesNotPersistOrSubmit(t *testing.T) {
 	ssh, _, commandLog := fakeSSH(t)
 	store := Store{Dir: t.TempDir()}
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: store, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	service := Service{Runner: sshexec.Runner{SSHBin: ssh}, Store: store, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics(), TunnelLinks: newTestLinkBroker()}
 	t.Setenv("FAKE_VALIDATION_FAIL", "1")
 	t.Setenv("FAKE_VALIDATION_STDERR", "sbatch: error: rejected")
 	_, err := service.create(testTunnelContext(), newTestCreateRequest())

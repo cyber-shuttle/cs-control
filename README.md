@@ -24,12 +24,18 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
 
 - **macOS or Linux**, with an OpenSSH client on `PATH`. CI covers Linux only.
 - **Go 1.24 or newer.** Building from source is the only install path.
-- **A Microsoft Entra tenant.** `--oauth-authority` accepts only `https://login.microsoftonline.com/<tenant>/`
-  with no port; the multi-tenant aliases `common`, `consumers` and `organizations` are rejected.
+- **A [CILogon](https://www.cilogon.org/) client, or another OIDC issuer configured the same way.** The
+  client must have the device flow disabled and PKCE enabled, since the browser runs an authorization-code
+  flow with PKCE and `csctl` finishes it. `--oidc-issuer` defaults to `https://cilogon.org`; the client ID
+  goes on `--oidc-client-id` and the client secret in `CSCTL_OIDC_CLIENT_SECRET`, since only the daemon holds
+  it.
+- **A [Custos](https://custos.cyberinfrastructure.org/) instance** the resolved identity is checked against:
+  `--custos-url` names it, and the daemon calls `GET {custos-url}/me` with the caller's bearer to resolve the
+  principal.
 - **A Microsoft or GitHub account entitled to
-  [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview).** Sign-in uses the
-  Dev Tunnels first-party clients, through the tenant above or through GitHub, and each session creates a
-  tunnel against that account.
+  [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview),** linked once through
+  `POST /api/v1/tunnel/link/start` and kept sealed under the caller's principal. Sessions run over that
+  account; a caller with no link is refused at session creation.
 - **An SSH-reachable Linux Slurm cluster** whose login node provides `sacctmgr`, `sinfo`, `sbatch`, `squeue`,
   `sacct`, `scancel`, `curl`, `tar`, `base64`, `od`, `install`, `printenv`, `sed` and `sort -V`, and whose
   nodes run Linux `x86_64` or `arm64` with `curl`.
@@ -39,8 +45,8 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
   `github.com` and `pypi.org`, which Linkspan installs `uv`, its Python and packages from, and to
   `tunnelsassetsprod.blob.core.windows.net`, which Linkspan fetches Microsoft's `devtunnel` CLI from, and to
   `*.rel.tunnels.api.visualstudio.com` and `*.devtunnels.ms`, which it hosts the tunnel through; and from
-  your own machine to `login.microsoftonline.com`, `*.rel.tunnels.api.visualstudio.com` and
-  `*.devtunnels.ms`. See
+  your own machine to the configured OIDC issuer, the configured Custos URL, `*.rel.tunnels.api.visualstudio.com`
+  and `*.devtunnels.ms`, plus `login.microsoftonline.com` or `github.com` while linking Dev Tunnels. See
   [what it runs on the cluster](#what-it-runs-on-the-cluster).
 
 ## Install
@@ -60,15 +66,18 @@ go build ./cmd/csctl
 ## Quick start
 
 ```bash
+export CSCTL_OIDC_CLIENT_SECRET=...
 csctl serve \
   --listen 127.0.0.1:8045 \
-  --oauth-authority https://login.microsoftonline.com/<tenant>/ \
+  --oidc-client-id cilogon:/client_id/<id> \
+  --custos-url https://custos.cybershuttle.org \
   --allowed-origin https://workspace.example.edu
 ```
 
-`--oauth-authority` is required. `--allowed-origin` is repeatable and at least one is required; HTTPS origins
-and loopback HTTP origins are accepted, wildcards are not. `--listen` defaults to `127.0.0.1:8045` and must be
-an explicit loopback address.
+`--oidc-client-id`, `--custos-url` and `CSCTL_OIDC_CLIENT_SECRET` are required; `--oidc-issuer` defaults to
+`https://cilogon.org`. `--allowed-origin` is repeatable and at least one is required; HTTPS origins and
+loopback HTTP origins are accepted, wildcards are not. `--listen` defaults to `127.0.0.1:8045` and must be an
+explicit loopback address.
 
 There are no CLI commands for hosts or sessions — a client drives the daemon over the API. Confirm it is
 listening and that the authentication boundary is in front of it:
@@ -85,7 +94,10 @@ HTTP/1.1 401 Unauthorized
 | Flag | Environment | Default |
 | --- | --- | --- |
 | `serve --listen` | — | `127.0.0.1:8045` |
-| `serve --oauth-authority` | — | required |
+| `serve --oidc-issuer` | — | `https://cilogon.org` |
+| `serve --oidc-client-id` | — | required |
+| `serve --custos-url` | — | required |
+| — | `CSCTL_OIDC_CLIENT_SECRET` | required |
 | `serve --allowed-origin` (repeatable) | — | required |
 | `--linkspan` | `CSCTL_LINKSPAN` | `$HOME/.cybershuttle/bin/linkspan` |
 | `--devtunnel-management-url` | `CSCTL_DEVTUNNEL_MANAGEMENT_URL` | `https://global.rel.tunnels.api.visualstudio.com` |
@@ -121,6 +133,8 @@ a compute node. The batch script redirects the job's stdout and stderr to
 - `credentials/` — the per-seq Dev Tunnel connect token and Jupyter token, mode `0600`
 - `hosts/<principal>/config` — each caller's own managed SSH host entries, mode `0600`
 - `hosts/<principal>/keys/<name>` — login keys the caller uploaded, mode `0600`
+- `hosts/<principal>/tunnel-link` — the caller's linked Dev Tunnels credential, sealed, mode `0600`
+- `tunnel-link.key` — the 32-byte key sealing every `tunnel-link` file, created at mode `0600` on first boot
 
 Each caller's SSH host entries live in their own `hosts/<principal>/config` inside a managed block; the API
 never reads or writes `~/.ssh/config` for the account `csctl` runs as.

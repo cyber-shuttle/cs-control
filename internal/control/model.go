@@ -7,7 +7,7 @@
 //	sessionList, publicSessions
 //	sessionAccessResponse, sessionJupyterAccess, validationResult, preparedSession, commandResult, state
 //	Config, Store, Service
-//	hostConfigDirName, detached
+//	detached
 //	addHostRequest
 //	hostTest
 //	hostWithKey, addHost
@@ -21,8 +21,6 @@ package control
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,13 +206,9 @@ type Service struct {
 	Metrics          *sessionMetrics
 	Tunnels          devtunnel.Manager
 	Credentials      credentialstore.Store
+	TunnelLinks      tunnelLinker
 	HostPreparations *sync.Map
 	Now              func() time.Time
-}
-
-func hostConfigDirName(principal authn.Principal) string {
-	sum := sha256.Sum256([]byte(principal.Subject + "\x00" + principal.Tenant))
-	return hex.EncodeToString(sum[:16])
 }
 
 func detached(session *Session) *Session {
@@ -237,7 +231,7 @@ func (s Service) hostConfigPath(principal authn.Principal) string {
 	if s.Config.HostsDir == "" {
 		return os.DevNull
 	}
-	return filepath.Join(s.Config.HostsDir, hostConfigDirName(principal), "config")
+	return filepath.Join(s.Config.HostsDir, authn.PrincipalDirName(principal), "config")
 }
 
 func (s Service) linkspanPath() string {

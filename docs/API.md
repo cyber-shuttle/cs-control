@@ -6,39 +6,27 @@ for hosts or sessions.
 
 ## Authentication
 
-Every request except the two device-code routes carries credentials in one of two shapes.
-
-A Microsoft caller sends two independent credentials:
+Every request except the sign-in routes carries one credential:
 
 | Header | Value |
 | --- | --- |
-| `Authorization` | `Bearer <Dev Tunnels access token>` |
-| `X-CyberShuttle-Identity` | the signed Microsoft ID token |
+| `Authorization` | `Bearer <CILogon ID token>` |
 
-The access token is validated remotely as a Dev Tunnels capability; the ID token is validated
-cryptographically and is the only source of caller identity. Exactly one of each header is accepted.
+The token is validated cryptographically against the configured issuer's discovery document and JWKS, with
+the audience pinned to the configured client id, exactly as Custos validates it. The caller's identity is then
+the Custos user the token resolves to: the daemon calls `GET <custos>/me` with the same bearer and takes the
+returned user id as the principal, under the tenant `custos`. The result is held five minutes per token. A
+token Custos does not recognise is refused with `401 identity_not_linked`; any other failure is `401`.
 
-A GitHub caller sends one token, `Authorization: github <GitHub token>`, and no identity header. It is
-validated remotely as a Dev Tunnels capability under that scheme; the identity is the GitHub user id it
-resolves to, held five minutes per token.
-
-The SSH authentication WebSocket cannot send headers from a browser, so it carries the same credentials as
-subprotocols. A Microsoft client offers exactly three, in any order:
+The SSH authentication WebSocket cannot send headers from a browser, so it carries the same credential as a
+subprotocol. A client offers exactly two, in any order:
 
 ```
 cybershuttle.v1
-bearer.<base64url of the access token, unpadded>
-identity.<base64url of the ID token, unpadded>
+bearer.<base64url of the ID token, unpadded>
 ```
 
-A GitHub client offers exactly two:
-
-```
-cybershuttle.v1
-github.<base64url of the GitHub token, unpadded>
-```
-
-The server negotiates `cybershuttle.v1`. Any other set — a missing version, a fourth protocol, a padded or
+The server negotiates `cybershuttle.v1`. Any other set — a missing version, a third protocol, a padded or
 non-canonical encoding — is refused. No other route accepts subprotocol authentication, and an Upgrade-shaped
 request to any other route is not treated as a WebSocket.
 
@@ -50,7 +38,7 @@ wildcards are not. A request whose `Origin` is not in the list is refused with `
 
 When an `Origin` is present the response carries `Access-Control-Allow-Origin`, `Vary: Origin` and
 `Access-Control-Expose-Headers: ETag`. Preflight is answered for `GET`, `POST`, `PUT`, `DELETE` and `OPTIONS`
-with the request headers `Authorization`, `Content-Type`, `If-None-Match` and `X-CyberShuttle-Identity`; a
+with the request headers `Authorization`, `Content-Type` and `If-None-Match`; a
 preflight asking for anything else is refused with `403`.
 
 ## Errors
@@ -66,18 +54,18 @@ Refusals produced by the authentication boundary itself are plain text with the 
 allowed`. A `401` also carries `WWW-Authenticate: Bearer`. The WebSocket credential path answers the same
 way, writing `http.StatusText` of the status with no envelope: `400 Bad Request` for a malformed or
 incomplete `Sec-WebSocket-Protocol` negotiation, `401 Unauthorized` (with `WWW-Authenticate: Bearer`) for a
-missing or undecodable bearer or identity credential in it.
+missing or undecodable bearer credential in it.
 
 An error the API did not classify becomes `500 internal_error`.
 
 | Code | Status |
 | --- | --- |
-| `invalid_json`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed` | 400 |
-| `tunnel_authorization_required` | 401 |
+| `invalid_json`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider` | 400 |
+| `tunnel_authorization_required`, `identity_not_linked` | 401 |
 | `session_owner_mismatch`, `origin_required`, `origin_not_allowed`, `preflight_not_allowed`, `authorization_denied` | 403 |
 | `not_found`, `session_not_found`, `ssh_host_not_found` | 404 |
 | `method_not_allowed` | 405 |
-| `session_exists`, `session_running`, `session_not_stopped`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_host_not_managed`, `ssh_authentication_required`, `ssh_authentication_in_progress` | 409 |
+| `session_exists`, `session_running`, `session_not_stopped`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_host_not_managed`, `ssh_authentication_required`, `ssh_authentication_in_progress`, `tunnel_link_required` | 409 |
 | `authorization_expired` | 410 |
 | `upgrade_required` | 426 |
 | `rate_limited` | 429 |
@@ -454,52 +442,115 @@ it is read again on the sampling tick for ten minutes and then left as it is. `s
 resource samples the same way `logs` carries its narration, and `error` names why the run ended if it did not
 end cleanly; both are absent rather than empty when there is nothing to report.
 
-## Device-code sign-in
+## Sign-in
 
-The only two routes in front of the authentication boundary. They broker pinned device-code requests against
-the configured Microsoft authority or GitHub for exact allowed browser origins, keep the device code in
-bounded process memory, enforce polling intervals, and discard refresh tokens. Both require an allowed
-`Origin` header and accept `POST` only, with no query string.
+The only routes in front of the authentication boundary. The browser runs CILogon's authorization-code flow
+with PKCE itself; these routes finish it, because CILogon's token endpoint requires the client secret, which
+only the daemon holds. All three require an allowed `Origin` header and accept no query string. `GET` answers
+the client's configuration; the two `POST` routes take JSON and answer with `Cache-Control: no-store`.
 
-### `POST /api/v1/oauth/device/start` → 200
+### `GET /api/v1/oauth/config` → 200
 
-An optional body names the provider, `microsoft` (the default) or `github`; any other name is
-`400 unknown_provider`.
+```json
+{
+  "issuer": "https://cilogon.org",
+  "authorizationEndpoint": "https://cilogon.org/authorize",
+  "clientId": "cilogon:/client_id/...",
+  "scope": "openid email profile offline_access"
+}
+```
+
+The browser sends the user to `authorizationEndpoint` with `response_type=code`, this `clientId` and `scope`,
+its own `redirect_uri` on an allowed origin, a `state`, and an S256 `code_challenge`.
+
+### `POST /api/v1/oauth/exchange` → 200
+
+```json
+{ "code": "...", "codeVerifier": "...", "redirectUri": "https://jupyter.cybershuttle.org/lab/index.html" }
+```
+
+`redirectUri` must sit on an allowed origin; the daemon adds the client secret and redeems the code at the
+issuer. The answer is the credential every other route needs:
+
+```json
+{ "idToken": "...", "refreshToken": "...", "expiresInSeconds": 900 }
+```
+
+`refreshToken` is present when the issuer granted `offline_access`. A rejected code is `400 invalid_grant`;
+an unreachable issuer is `502 upstream_unavailable`.
+
+### `POST /api/v1/oauth/refresh` → 200
+
+```json
+{ "refreshToken": "..." }
+```
+
+Answers the same shape as `exchange`, with a rotated `refreshToken` when the issuer rotates it. A refused
+refresh is `400 invalid_grant`.
+
+## Dev Tunnels link
+
+Sessions run over the caller's own Dev Tunnels account, which is a Microsoft or GitHub identity linked once
+and kept by the daemon under the caller's principal, sealed with a key the daemon holds. Nothing here returns
+the linked token. These routes sit behind the authentication boundary.
+
+### `GET /api/v1/tunnel/link` → 200
+
+```json
+{ "linked": true, "provider": "github", "account": "octocat", "linkedAt": "2026-09-17T10:00:00Z" }
+```
+
+`{ "linked": false }` when nothing is linked. `provider` is `microsoft` or `github`; `account` is the
+Microsoft username or the GitHub login when known.
+
+### `POST /api/v1/tunnel/link/start` → 200
 
 ```json
 { "provider": "github" }
 ```
 
+Starts a device-code authorization with that provider's Dev Tunnels client: `microsoft` through the common
+Microsoft authority, or `github`. Any other name is `400 unknown_provider`. The answer is the device
+authorization the browser shows:
+
 ```json
 {
   "handle": "<43-character opaque handle>",
   "userCode": "ABCD-EFGH",
-  "verificationUri": "https://microsoft.com/devicelogin",
+  "verificationUri": "https://github.com/login/device",
   "expiresInSeconds": 900,
   "intervalSeconds": 5
 }
 ```
 
 `handle` is this daemon's own reference to the authorization; the device code itself never reaches the client.
-More than one start per second per origin is `429 rate_limited`.
+More than one start per second per caller is `429 rate_limited`.
 
-### `POST /api/v1/oauth/device/poll/{handle}` → 200 or 202
+### `POST /api/v1/tunnel/link/poll/{handle}` → 200
 
-Still waiting, `202`:
+Still waiting:
 
 ```json
 { "status": "pending", "intervalSeconds": 5 }
 ```
 
-Complete, `200`:
+Complete: the daemon has stored the credential and answers what `GET /api/v1/tunnel/link` would.
 
 ```json
-{ "status": "complete", "scheme": "Bearer", "accessToken": "...", "idToken": "...", "expiresInSeconds": 3599 }
+{ "linked": true, "provider": "microsoft", "account": "someone@outlook.com", "linkedAt": "..." }
 ```
 
-`scheme` is `Bearer` for a Microsoft authorization, which carries an `idToken`, or `github`, which carries
-none and an `expiresInSeconds` of one day, since GitHub states no lifetime. Polling faster than
-`intervalSeconds` is `429 rate_limited` with `Retry-After`. A denied authorization is
-`403 authorization_denied`; an expired one is `410 authorization_expired`. The handle is discarded on any
-terminal outcome, so a completed poll cannot be replayed. The result is what every other route needs, in the
-shape its scheme dictates above.
+A Microsoft link keeps the refresh token and is renewed silently on use; a GitHub token does not expire.
+Polling faster than `intervalSeconds` is `429 rate_limited`. A denied authorization is
+`403 authorization_denied`; an expired one is `410 authorization_expired`. The handle is bound to the caller
+that started it and is discarded on any terminal outcome.
+
+### `DELETE /api/v1/tunnel/link` → 200
+
+Forgets the linked credential. Answers `{ "linked": false }`; deleting when nothing is linked is the same.
+
+### Sessions without a link
+
+`POST /api/v1/sessions` and `POST /api/v1/sessions/{id}/start` refuse with `409 tunnel_link_required` when
+the caller has no linked credential, before anything is provisioned. `POST /api/v1/sessions/validate` does
+not need one.
