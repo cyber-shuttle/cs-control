@@ -86,8 +86,7 @@ func TestDiscoveryFailureReachesTheHandlerAsItsOwnCode(t *testing.T) {
 	body, err := json.Marshal(newTestCreateRequest())
 	testutil.Check(t, err)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/validate", bytes.NewReader(body)).WithContext(testTunnelContext())
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("a login node missing sinfo answered %d, want %d: %s", response.Code, http.StatusBadGateway, response.Body.String())

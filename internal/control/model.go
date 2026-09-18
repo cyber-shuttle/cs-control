@@ -4,7 +4,7 @@
 //
 //	gres, partition, resource
 //	resources, createRequest, tunnelMetadata, sessionResponse, Session
-//	sessionList, publicSessions
+//	sessionList, public
 //	sessionAccessResponse, sessionJupyterAccess, validationResult, preparedSession, commandResult, state
 //	Config, Store, Service
 //	detached
@@ -132,10 +132,10 @@ type sessionList struct {
 	Logs     []sessionLogTail  `json:"logs"`
 }
 
-func publicSessions(sessions []Session) []sessionResponse {
-	result := make([]sessionResponse, len(sessions))
-	for index := range sessions {
-		result[index] = sessions[index].sessionResponse
+func public[T, R any](items []T, pick func(T) R) []R {
+	result := make([]R, len(items))
+	for index, item := range items {
+		result[index] = pick(item)
 	}
 	return result
 }

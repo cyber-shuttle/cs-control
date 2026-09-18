@@ -1,6 +1,7 @@
 // Package sshexec runs commands on a remote host over OpenSSH.
 // Every entry point resolves the alias's configuration first, which also fingerprints the control socket.
 // Under an interactive master, ControlPersist is off, since persist backgrounds the master on authentication.
+// Exit status 255 is ssh's own, so it says nothing about whether the remote command ran.
 //
 //	Runner, capture, captureStream
 //	newCapture, ensurePrivateControlDirectory, authenticationRequired, utf8Request
@@ -179,7 +180,6 @@ func AuthenticationFailure(message string) bool {
 	return slices.ContainsFunc(authenticationMarkers, func(marker string) bool { return strings.Contains(value, marker) })
 }
 
-// 255 is ssh's own exit code, so it says nothing about whether the remote command ran.
 func AmbiguousExit(err error) bool {
 	if err == nil {
 		return false

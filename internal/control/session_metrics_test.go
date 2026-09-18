@@ -1,4 +1,5 @@
 // The sample window's own discipline: bounded, newest-last, and copied so it shares no memory with the store.
+// Ticks that fire during one slow sacct call must not pile on calls of their own.
 //
 //	sampleFrom
 //	Test*
@@ -94,7 +95,6 @@ func TestSamplerTickDoesNotPileUpRunStatsAndCloseWaitsForOneInFlight(t *testing.
 	sampler.wg.Add(1)
 	go sampler.tick()
 
-	// Many ticks fire while the one slow sacct call is in flight; without the guard each would pile on its own call.
 	time.Sleep(120 * time.Millisecond)
 	sampler.Close()
 

@@ -140,12 +140,9 @@ func preflightHeadersAllowed(raw string, allowed ...string) bool {
 }
 
 func validPreflight(r *http.Request) bool {
-	switch r.Header.Get("Access-Control-Request-Method") {
-	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions:
-	default:
-		return false
-	}
-	return preflightHeadersAllowed(r.Header.Get("Access-Control-Request-Headers"), "authorization", "content-type", "if-none-match")
+	methods := []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions}
+	return slices.Contains(methods, r.Header.Get("Access-Control-Request-Method")) &&
+		preflightHeadersAllowed(r.Header.Get("Access-Control-Request-Headers"), "authorization", "content-type", "if-none-match")
 }
 
 func writePreflightAllow(w http.ResponseWriter, methods, headers string) {

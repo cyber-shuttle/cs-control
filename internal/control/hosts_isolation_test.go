@@ -57,8 +57,7 @@ func hostRequest(t *testing.T, handler http.Handler, method, path, body string, 
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 	return response
 }
 

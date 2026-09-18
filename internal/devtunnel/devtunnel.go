@@ -7,8 +7,7 @@
 //	isAPIHost, safeRedirect, newClientForBase, isPublicHost, validatePublicURI,
 //	validTunnelProtocol, validateTunnelPorts, validToken
 //	createTunnelPorts, ParseBaseURL, ParseProductionBaseURL, NewClient
-//	GuardedClient, ValidToken, ValidatePublicURI
-//	ValidID, ValidClusterID
+//	ValidToken, ValidatePublicURI, ValidID, ValidClusterID
 package devtunnel
 
 import (
@@ -372,10 +371,6 @@ func NewClient(baseURL string, httpClient *http.Client) (*client, error) {
 		return nil, err
 	}
 	return newClientForBase(base, httpClient), nil
-}
-
-func GuardedClient(client *http.Client, fallback time.Duration) *http.Client {
-	return httpx.GuardedClient(client, fallback, safeRedirect)
 }
 
 func ValidToken(token string) bool { return validToken(token) }

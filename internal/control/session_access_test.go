@@ -2,7 +2,7 @@
 // The seq credential itself never leaves the private credential store.
 //
 //	readyAccessSession
-//	accessTestService
+//	accessTestService, readyAccessScenario
 //	Test*
 package control
 
@@ -38,6 +38,20 @@ func accessTestService(t *testing.T, manager devtunnel.Manager, now time.Time) S
 	return Service{Store: Store{Dir: t.TempDir()}, Tunnels: manager, Credentials: credentialstore.Store{Dir: t.TempDir() + "/credentials"}, Now: func() time.Time { return now }, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
 }
 
+func readyAccessScenario(t *testing.T, jupyterURI string) (Session, *testTunnelManager, Service) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	session := readyAccessSession(now)
+	manager := &testTunnelManager{getResponse: &devtunnel.Record{
+		ID: session.Tunnel.ID, ClusterID: session.Tunnel.ClusterID, ExpiresAt: session.Tunnel.ExpiresAt,
+		Ports: []devtunnel.PortRecord{{PortNumber: sessionPorts(session.ID, session.Seq).jupyter, Protocol: "http", PortForwardingURIs: []string{jupyterURI}}},
+	}}
+	service := accessTestService(t, manager, now)
+	testutil.Check(t, service.Credentials.Put(session.ID, session.Seq, credential()))
+	putSessions(t, service, session)
+	return session, manager, service
+}
+
 func TestCreateSessionTunnelPersistsCapabilityOnlyInPrivateCredential(t *testing.T) {
 	manager := &testTunnelManager{}
 	service := Service{Tunnels: manager, Credentials: credentialstore.Store{Dir: t.TempDir() + "/credentials"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
@@ -61,20 +75,11 @@ func TestCreateSessionTunnelPersistsCapabilityOnlyInPrivateCredential(t *testing
 }
 
 func TestSessionAccessDiscoversOwnerJupyterWithoutCallingTheSession(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	session := readyAccessSession(now)
-	manager := &testTunnelManager{getResponse: &devtunnel.Record{
-		ID: session.Tunnel.ID, ClusterID: session.Tunnel.ClusterID, ExpiresAt: session.Tunnel.ExpiresAt,
-		Ports: []devtunnel.PortRecord{{PortNumber: sessionPorts(session.ID, session.Seq).jupyter, Protocol: "http", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
-	}}
-	service := accessTestService(t, manager, now)
-	testutil.Check(t, service.Credentials.Put(session.ID, session.Seq, credential()))
-	putSessions(t, service, session)
+	session, manager, service := readyAccessScenario(t, "https://31001.use.devtunnels.ms/")
 	api := NewHTTPHandler(service, noopAuth{})
 	defer api.Close()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+session.ID+"/access", nil).WithContext(testTunnelContext())
-	response := httptest.NewRecorder()
-	api.ServeHTTP(response, request)
+	response := testutil.Serve(api, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("access status = %d: %s", response.Code, response.Body.String())
 	}
@@ -100,18 +105,12 @@ func TestSessionAccessDiscoversOwnerJupyterWithoutCallingTheSession(t *testing.T
 }
 
 func TestSessionAccessIsOwnerOnly(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	session := readyAccessSession(now)
-	manager := &testTunnelManager{getResponse: &devtunnel.Record{ID: session.Tunnel.ID, ClusterID: session.Tunnel.ClusterID, ExpiresAt: session.Tunnel.ExpiresAt, Ports: []devtunnel.PortRecord{{PortNumber: sessionPorts(session.ID, session.Seq).jupyter, Protocol: "http", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms"}}}}}
-	service := accessTestService(t, manager, now)
-	testutil.Check(t, service.Credentials.Put(session.ID, session.Seq, credential()))
-	putSessions(t, service, session)
+	session, manager, service := readyAccessScenario(t, "https://31001.use.devtunnels.ms")
 	api := NewHTTPHandler(service, noopAuth{})
 	defer api.Close()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+session.ID+"/access", nil)
 	request = request.WithContext(authn.WithPrincipal(request.Context(), authn.Principal{Subject: "other", Tenant: testPrincipal.Tenant}))
-	response := httptest.NewRecorder()
-	api.ServeHTTP(response, request)
+	response := testutil.Serve(api, request)
 	if response.Code != http.StatusForbidden || strings.Contains(response.Body.String(), testJupyterToken) {
 		t.Fatalf("owner mismatch = %d %s", response.Code, response.Body.String())
 	}

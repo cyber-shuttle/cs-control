@@ -1,5 +1,6 @@
 // Tests that For hides an unclassified error's own text, and passes a classified error through unchanged.
 // Tests that Redact truncates without splitting a rune and never leaks a secret it was given.
+// One truncation case straddles a multi-byte rune, one byte before the boundary.
 //
 //	TestUnclassifiedErrorDoesNotCarryItsOwnText
 //	TestRedactTruncatesWithoutSplittingARuneAndHidesSecrets
@@ -31,7 +32,6 @@ func TestUnclassifiedErrorDoesNotCarryItsOwnText(t *testing.T) {
 }
 
 func TestRedactTruncatesWithoutSplittingARuneAndHidesSecrets(t *testing.T) {
-	// Place a multi-byte rune straddling the truncation boundary, one byte before it.
 	filler := strings.Repeat("a", maxRedactedError-len(": ")-1)
 	err := Redact("", errors.New(filler+"€"))
 	if !utf8.ValidString(err.Error()) {

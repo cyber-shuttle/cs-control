@@ -1,4 +1,6 @@
 // The HTTP surface's own tests: every route the mux must dispatch, and the shared strict JSON body decoding.
+// Every route is reached by an authorized caller against an empty service, so each expected status is what a
+// missing session or unmanaged host produces, not a routing failure.
 //
 //	mixedOwnerOrigin, otherTestPrincipal, mixedOwnerSession
 //	Test*
@@ -45,8 +47,6 @@ func TestHTTPRouteSurfaceRetainsRequiredControlOperations(t *testing.T) {
 	api := NewHTTPHandler(service, noopAuth{})
 	t.Cleanup(api.Close)
 
-	// Every route is reached with a tunnel-authorized caller and an otherwise empty service, so the
-	// status below is what an unknown session or unmanaged host alias produces, not a routing failure.
 	for _, test := range []struct {
 		method string
 		path   string
@@ -79,8 +79,7 @@ func TestHTTPRouteSurfaceRetainsRequiredControlOperations(t *testing.T) {
 	} {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {
 			request := httptest.NewRequest(test.method, test.path, nil).WithContext(testTunnelContext())
-			response := httptest.NewRecorder()
-			api.ServeHTTP(response, request)
+			response := testutil.Serve(api, request)
 			if response.Code != test.status {
 				t.Fatalf("route %s %s = %d, want %d: %s", test.method, test.path, response.Code, test.status, response.Body.String())
 			}
@@ -200,8 +199,7 @@ func TestTunnelLinkPollAnswersPendingThenLinked(t *testing.T) {
 		"done":    `{"linked":true,"provider":"github","account":"octocat"}`,
 	} {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/tunnel/link/poll/"+handle, nil).WithContext(testTunnelContext())
-		response := httptest.NewRecorder()
-		api.ServeHTTP(response, request)
+		response := testutil.Serve(api, request)
 		if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != want {
 			t.Fatalf("poll %s = %d %s, want 200 %s", handle, response.Code, response.Body.String(), want)
 		}

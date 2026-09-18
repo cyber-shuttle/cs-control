@@ -4,6 +4,7 @@
 // rewritten; everything outside that block is read, never touched. ParseCommand turns a pasted ssh command
 // line into the Host that reproduces it. Uploaded login keys sit in KeyDir; a host assigned one carries
 // its path as IdentityFile with IdentitiesOnly, so ssh offers nothing else.
+// An encrypted key is accepted and its passphrase asked at login; removing a key unassigns it from every host.
 //
 //	blockBegin, blockEnd, identitiesOnly, safeNamePattern, valuePattern, allowedOptions*
 //	ErrInvalidAlias, ErrInvalidKeyName, ErrKeyNotFound
@@ -11,6 +12,7 @@
 //	firstField, blockBounds, stanzaEnd, managedStanza, parseFile
 //	errUnmanaged, invalid, validText, option, stanza
 //	publicKeyOf, readKey
+//	commandFlags, parseFlags
 //	SafeName, ValidAlias, ValidKeyName, List, ParseCommand
 //	rewrite, replaceStanza, Add, Remove, Update
 //	ListKeys, PutKey, RemoveKey, WithKey, AssignKey
@@ -247,8 +249,6 @@ func stanza(host Host) []string {
 	return lines
 }
 
-// An encrypted OpenSSH key still exposes its public half, so a passphrase-protected upload is accepted and the
-// passphrase is asked for at login like any other prompt.
 func publicKeyOf(private []byte) (ssh.PublicKey, error) {
 	signer, err := ssh.ParsePrivateKey(private)
 	if err == nil {
@@ -271,6 +271,85 @@ func readKey(path string) (Key, error) {
 		return Key{}, err
 	}
 	return Key{Name: filepath.Base(path), Type: public.Type(), Fingerprint: ssh.FingerprintSHA256(public)}, nil
+}
+
+var commandFlags = map[byte]func(*Host, string) error{
+	'p': func(host *Host, text string) error {
+		port, err := strconv.Atoi(text)
+		if err != nil || port < 1 || port > 65535 {
+			return invalid(fmt.Sprintf("%q is not a port.", text))
+		}
+		host.Port = port
+		return nil
+	},
+	'i': func(host *Host, text string) (err error) {
+		host.IdentityFile, err = validText("identity file path", text)
+		return
+	},
+	'l': func(host *Host, text string) (err error) {
+		host.User, err = validText("user name", text)
+		return
+	},
+	'J': func(host *Host, text string) error {
+		directive, err := option("ProxyJump", text)
+		if err != nil {
+			return err
+		}
+		host.ExtraDirectives = append(host.ExtraDirectives, directive)
+		return nil
+	},
+	'o': func(host *Host, text string) error {
+		key, setting, found := strings.Cut(text, "=")
+		if !found {
+			key, setting, found = strings.Cut(text, " ")
+		}
+		if !found {
+			return invalid(fmt.Sprintf("%q is not an ssh option.", text))
+		}
+		canonical, ok := allowedOptions[strings.ToLower(strings.TrimSpace(key))]
+		if !ok {
+			return invalid(fmt.Sprintf("%s cannot be set from a pasted command.", strings.TrimSpace(key)))
+		}
+		directive, err := option(canonical, strings.TrimSpace(setting))
+		if err != nil {
+			return err
+		}
+		host.ExtraDirectives = append(host.ExtraDirectives, directive)
+		return nil
+	},
+}
+
+func parseFlags(host *Host, fields []string) (string, error) {
+	target := ""
+	for index := 0; index < len(fields); index++ {
+		field := fields[index]
+		switch {
+		case field == "--":
+			continue
+		case len(field) >= 2 && field[0] == '-' && commandFlags[field[1]] != nil:
+			text := field[2:]
+			if text == "" {
+				if index+1 >= len(fields) {
+					return "", invalid(fmt.Sprintf("%s expects a value.", field))
+				}
+				index++
+				text = fields[index]
+			}
+			if err := commandFlags[field[1]](host, text); err != nil {
+				return "", err
+			}
+		case strings.HasPrefix(field, "-"):
+			return "", invalid(fmt.Sprintf("%s is not supported here. Keep the command to the host, user, port, identity, jump host, and -o options.", field))
+		case target == "":
+			target = field
+		default:
+			return "", invalid("Remove the remote command; the entry describes the connection only.")
+		}
+	}
+	if target == "" {
+		return "", invalid("The command names no host.")
+	}
+	return target, nil
 }
 
 func SafeName(value string, max int) bool {
@@ -310,94 +389,11 @@ func ParseCommand(name, command string) (Host, error) {
 		fields = fields[1:]
 	}
 	host := Host{Name: name, Port: 22, ExtraDirectives: []string{}}
-	target := ""
-	for index := 0; index < len(fields); index++ {
-		field := fields[index]
-		value := func() (string, error) {
-			if len(field) > 2 {
-				return field[2:], nil
-			}
-			index++
-			if index >= len(fields) {
-				return "", invalid(fmt.Sprintf("%s expects a value.", field))
-			}
-			return fields[index], nil
-		}
-		switch {
-		case field == "--":
-			continue
-		case strings.HasPrefix(field, "-p"):
-			text, err := value()
-			if err != nil {
-				return Host{}, err
-			}
-			port, convErr := strconv.Atoi(text)
-			if convErr != nil || port < 1 || port > 65535 {
-				return Host{}, invalid(fmt.Sprintf("%q is not a port.", text))
-			}
-			host.Port = port
-		case strings.HasPrefix(field, "-i"):
-			text, err := value()
-			if err != nil {
-				return Host{}, err
-			}
-			host.IdentityFile, err = validText("identity file path", text)
-			if err != nil {
-				return Host{}, err
-			}
-		case strings.HasPrefix(field, "-l"):
-			text, err := value()
-			if err != nil {
-				return Host{}, err
-			}
-			host.User, err = validText("user name", text)
-			if err != nil {
-				return Host{}, err
-			}
-		case strings.HasPrefix(field, "-J"):
-			text, err := value()
-			if err != nil {
-				return Host{}, err
-			}
-			directive, err := option("ProxyJump", text)
-			if err != nil {
-				return Host{}, err
-			}
-			host.ExtraDirectives = append(host.ExtraDirectives, directive)
-		case strings.HasPrefix(field, "-o"):
-			text, err := value()
-			if err != nil {
-				return Host{}, err
-			}
-			key, setting, found := strings.Cut(text, "=")
-			if !found {
-				key, setting, found = strings.Cut(text, " ")
-			}
-			if !found {
-				return Host{}, invalid(fmt.Sprintf("%q is not an ssh option.", text))
-			}
-			canonical, ok := allowedOptions[strings.ToLower(strings.TrimSpace(key))]
-			if !ok {
-				return Host{}, invalid(fmt.Sprintf("%s cannot be set from a pasted command.", strings.TrimSpace(key)))
-			}
-			directive, err := option(canonical, strings.TrimSpace(setting))
-			if err != nil {
-				return Host{}, err
-			}
-			host.ExtraDirectives = append(host.ExtraDirectives, directive)
-		case strings.HasPrefix(field, "-"):
-			return Host{}, invalid(fmt.Sprintf("%s is not supported here. Keep the command to the host, user, port, identity, jump host, and -o options.", field))
-		case target == "":
-			target = field
-		default:
-			return Host{}, invalid("Remove the remote command; the entry describes the connection only.")
-		}
-	}
-	if target == "" {
-		return Host{}, invalid("The command names no host.")
+	target, err := parseFlags(&host, fields)
+	if err != nil {
+		return Host{}, err
 	}
 	if user, hostname, found := strings.Cut(target, "@"); found {
-		var err error
 		if host.User, err = validText("user name", user); err != nil {
 			return Host{}, err
 		}
@@ -520,7 +516,6 @@ func (c Config) PutKey(name string, private []byte) (Key, error) {
 	return Key{Name: name, Type: public.Type(), Fingerprint: ssh.FingerprintSHA256(public)}, nil
 }
 
-// Removing a key also unassigns it, so no host is left naming a file that is gone.
 func (c Config) RemoveKey(name string) error {
 	if !ValidKeyName(name) {
 		return ErrInvalidKeyName

@@ -68,12 +68,7 @@ func TestCreateCancelsJobWhenStopWinsBeforeSbatchReturns(t *testing.T) {
 	}
 	testutil.Check(t, os.WriteFile(release, nil, 0o600))
 
-	select {
-	case err := <-errs:
-		testutil.Check(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("Create did not finish after sbatch was released")
-	}
+	testutil.Within(t, errs, 5*time.Second, "Create did not finish after sbatch was released")
 	created := <-result
 	if created.State != "STOPPING" || created.JobID != "12345" || created.Error != "" {
 		t.Fatalf("Create overwrote stop intent: %#v", created)

@@ -11,7 +11,7 @@
 //	linkHandlePattern
 //	tunnelLinkProvider, tunnelLink, TunnelLinkStatus, TunnelLinkStart, TunnelLinkPoll, TunnelCredential, linkBrokerEntry
 //	LinkBroker
-//	validDeviceAuthorization, newLinkHandle, sealSecret, openSealed, decodeUnverifiedPreferredUsername
+//	validDeviceAuthorization, newLinkHandle, sealSecret, openSealed, decodeUnverifiedPreferredUsername, oauthPollOutcome
 //	LoadOrCreateTunnelLinkKey, NewLinkBroker
 package authn
 
@@ -242,6 +242,19 @@ func (b *LinkBroker) deleteLocked(handle string) {
 	}
 }
 
+type oauthPollOutcome struct {
+	remove   bool
+	slowDown time.Duration
+	err      error
+}
+
+var oauthPollOutcomes = map[string]oauthPollOutcome{
+	"authorization_pending": {},
+	"slow_down":             {slowDown: 5 * time.Second},
+	"access_denied":         {remove: true, err: apierr.New("authorization_denied", "authorization was denied", http.StatusForbidden)},
+	"expired_token":         {remove: true, err: apierr.New("authorization_expired", "authorization expired", http.StatusGone)},
+}
+
 func (b *LinkBroker) finishPoll(handle string, remove bool, slowDown time.Duration) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -428,23 +441,15 @@ func (b *LinkBroker) Poll(ctx context.Context, principal Principal, handle strin
 	}
 	_ = json.Unmarshal(body, &oauthError)
 	if status < 200 || status >= 300 || oauthError.Error != "" {
-		switch oauthError.Error {
-		case "authorization_pending":
-			interval := b.finishPoll(handle, false, 0)
-			return TunnelLinkPoll{Pending: true, IntervalSeconds: int64(interval / time.Second)}, nil
-		case "slow_down":
-			interval := b.finishPoll(handle, false, 5*time.Second)
-			return TunnelLinkPoll{Pending: true, IntervalSeconds: int64(interval / time.Second)}, nil
-		case "access_denied":
-			b.finishPoll(handle, true, 0)
-			return TunnelLinkPoll{}, apierr.New("authorization_denied", "authorization was denied", http.StatusForbidden)
-		case "expired_token":
-			b.finishPoll(handle, true, 0)
-			return TunnelLinkPoll{}, apierr.New("authorization_expired", "authorization expired", http.StatusGone)
-		default:
-			b.finishPoll(handle, true, 0)
-			return TunnelLinkPoll{}, apierr.New("upstream_failure", "authorization service rejected the request", http.StatusBadGateway)
+		outcome, known := oauthPollOutcomes[oauthError.Error]
+		if !known {
+			outcome = oauthPollOutcome{remove: true, err: apierr.New("upstream_failure", "authorization service rejected the request", http.StatusBadGateway)}
 		}
+		interval := b.finishPoll(handle, outcome.remove, outcome.slowDown)
+		if outcome.err != nil {
+			return TunnelLinkPoll{}, outcome.err
+		}
+		return TunnelLinkPoll{Pending: true, IntervalSeconds: int64(interval / time.Second)}, nil
 	}
 	var tokens struct {
 		AccessToken  string `json:"access_token"`

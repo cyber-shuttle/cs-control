@@ -1,8 +1,9 @@
 // The end-to-end shape of a session's lifecycle against a fake SSH and scheduler.
 // Covers discovery, create, idempotency, cancellation, ownership, and the loopback listen policy.
+// The idempotency race pauses A past its own check while B completes, before A re-checks under the lock.
 //
 //	fakeSSH
-//	testService
+//	fakeSSHService, testService
 //	newTestCreateRequest
 //	assertScriptRedirectsToTheSessionsSeqLog
 //	Test*
@@ -188,6 +189,11 @@ esac
 	return path, scriptLog, commandLog
 }
 
+func fakeSSHService(t *testing.T, ssh string) Service {
+	t.Helper()
+	return Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+}
+
 func testService(t *testing.T, now ...func() time.Time) Service {
 	t.Helper()
 	clock := func() time.Time { return time.Unix(1, 0).UTC() }
@@ -195,7 +201,8 @@ func testService(t *testing.T, now ...func() time.Time) Service {
 		clock = now[0]
 	}
 	ssh, _, _ := fakeSSH(t)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Now: clock, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	service := fakeSSHService(t, ssh)
+	service.Now = clock
 	configureTestTunnel(t, &service)
 	return service
 }
@@ -296,7 +303,7 @@ func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 	ssh, scriptLog, _ := fakeSSH(t)
 	cancellations := filepath.Join(t.TempDir(), "cancellations")
 	t.Setenv("FAKE_SCANCEL_LOG", cancellations)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	service := fakeSSHService(t, ssh)
 	configureTestTunnel(t, &service)
 	session, err := service.create(testTunnelContext(), newTestCreateRequest())
 	testutil.Check(t, err)
@@ -342,7 +349,7 @@ func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 func TestSubmittedScriptLogPathMatchesTheSeqTheTailReads(t *testing.T) {
 	ssh, scriptLog, _ := fakeSSH(t)
 	t.Setenv("FAKE_SCANCEL_LOG", filepath.Join(t.TempDir(), "cancellations"))
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	service := fakeSSHService(t, ssh)
 	configureTestTunnel(t, &service)
 
 	session, err := service.create(testTunnelContext(), newTestCreateRequest())
@@ -379,7 +386,7 @@ func TestConcurrentMismatchedCreateInTheIdempotencyWindowAnswersConflict(t *test
 	t.Setenv("FAKE_DISCOVERY_BLOCK_ALIAS", "delta")
 	t.Setenv("FAKE_DISCOVERY_STARTED", started)
 	t.Setenv("FAKE_DISCOVERY_RELEASE", release)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	service := fakeSSHService(t, ssh)
 	configureTestTunnel(t, &service)
 
 	requestA := createRequest{IdempotencyKey: "shared-key", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}}
@@ -393,7 +400,6 @@ func TestConcurrentMismatchedCreateInTheIdempotencyWindowAnswersConflict(t *test
 	}()
 	waitForFile(t, started)
 
-	// B completes fully while A is paused past its own idempotency check but before it re-checks under lock.
 	_, err := service.create(testTunnelContext(), requestB)
 	testutil.Check(t, err)
 	testutil.Check(t, os.WriteFile(release, nil, 0o600))
@@ -426,8 +432,7 @@ func TestHTTPRequiresValidatedPrincipalForSessionInventory(t *testing.T) {
 	handler := NewHTTPHandler(service, noopAuth{})
 	defer handler.Close()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 	testutil.Equal(t, response.Code, http.StatusUnauthorized, "request without validated principal status")
 	request = httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil).WithContext(testTunnelContext())
 	response = httptest.NewRecorder()
@@ -487,7 +492,7 @@ func TestDeleteRemovesATerminalSessionAndItsCredential(t *testing.T) {
 
 func TestStopAndDeleteSurviveADevTunnelsReleaseFailure(t *testing.T) {
 	ssh, _, _ := fakeSSH(t)
-	service := Service{Runner: sshexec.Runner{SSHBin: ssh, Timeout: 5 * time.Second}, Store: Store{Dir: t.TempDir()}, Config: Config{LinkspanPath: "/opt/cybershuttle/linkspan"}, Logs: NewSessionLogs(), Metrics: NewSessionMetrics()}
+	service := fakeSSHService(t, ssh)
 	manager := configureTestTunnel(t, &service)
 	created, err := service.create(testTunnelContext(), newTestCreateRequest())
 	testutil.Check(t, err)
@@ -564,12 +569,7 @@ func TestCreateDoesNotHoldStoreLockDuringTunnelCreate(t *testing.T) {
 
 	lockAvailable := make(chan error, 1)
 	go func() { lockAvailable <- service.Store.withLock(func(*state) error { return nil }) }()
-	select {
-	case err := <-lockAvailable:
-		testutil.Check(t, err)
-	case <-time.After(300 * time.Millisecond):
-		t.Fatal("state lock was held during blocked tunnel create")
-	}
+	testutil.Within(t, lockAvailable, 300*time.Millisecond, "state lock was held during blocked tunnel create")
 
 	close(manager.createBlock)
 	testutil.Check(t, <-done)

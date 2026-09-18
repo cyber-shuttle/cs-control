@@ -8,7 +8,7 @@
 //	runStats
 //	field, parseKiB, humanKiB, hmsSeconds
 //	parseSacctUtil, Complete
-//	publicRuns, recordRun
+//	recordRun
 //	Service
 //	runOf, freezeRun, freezeIfTerminal, listRuns
 //	readRunStats, attachRunStats, pendingRunStats, completeRunStats
@@ -174,14 +174,6 @@ func parseSacctUtil(output string) runStats {
 }
 
 func (s runStats) Complete() bool { return s.MaxRSS != "" }
-
-func publicRuns(runs []runRecord) []runResponse {
-	result := make([]runResponse, len(runs))
-	for index := range runs {
-		result[index] = runs[index].runResponse
-	}
-	return result
-}
 
 func recordRun(current *state, record runRecord) bool {
 	if record.Seq == 0 || slices.ContainsFunc(current.Runs, func(existing runRecord) bool {
