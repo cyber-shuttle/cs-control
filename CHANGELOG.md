@@ -27,7 +27,7 @@ Notable changes to CyberShuttle Control. The format follows
   `POST /api/v1/tunnel/link/poll/{handle}`, the same device-code flow sign-in used to use, now bound to the
   caller's principal and sealed to disk (`nacl/secretbox`, key at `<state>/tunnel-link.key`) rather than
   returned. `GET /api/v1/tunnel/link` and `DELETE /api/v1/tunnel/link` read and forget it. A Microsoft link
-  refreshes silently within two minutes of expiry; a GitHub token does not expire.
+  refreshes silently within two minutes of expiry, whichever provider issued it.
   `POST /api/v1/sessions` and `.../start` refuse with `409 tunnel_link_required` before provisioning anything
   when nothing is linked; `validate` does not need one.
 
