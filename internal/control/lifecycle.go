@@ -1,6 +1,8 @@
 // The session state machine.
 // create persists a durable record first, then provisions and submits, so a poller sees progress as it happens.
 // A conclusive submission failure compensates through abandonSubmitIntent; an ambiguous one stays durable.
+// A stop proceeds locally without a usable link: releaseSessionTunnel skips Dev Tunnels when the token is
+// empty and leaves the tunnel to its own expiry.
 //
 //	assignSessionID, sameCreateRequest, terminalSession, reconcilable, setSessionNode, buildSubmitIntent
 //	backgroundInterval, refreshTimeout
@@ -459,8 +461,6 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 	if !alreadyStopped {
 		s.sessionStatus(id, "Stopping session")
 	}
-	// A stop always proceeds locally even without a usable link: releaseSessionTunnel skips the Dev Tunnels
-	// call when the token is empty, leaving the tunnel for its own expiry to clean up.
 	credential, _ := s.tunnelCredential(ctx, principal)
 	managementErr := s.releaseSessionTunnel(credential, snapshot.ID, snapshot.Seq, snapshot.Tunnel)
 	candidate := snapshot

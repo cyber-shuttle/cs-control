@@ -5,7 +5,7 @@
 //	maxRequestBody, sshAuthRoute
 //	route, requireUpgrade, writeOrError, answer, caller, requestPrincipal, sessionsOwnedBy, decodeJSON, routedSessionID
 //	httpAPI
-//	listHosts, addHost, updateHost, listKeys, addKey
+//	listHosts, decodeAndCall, addHost, updateHost, listKeys, addKey
 //	validateSession
 //	createSession
 //	sessionAction
@@ -160,20 +160,24 @@ func listHosts(service Service, _ *http.Request) (sshconfig.HostList, error) {
 	return sshconfig.HostList{Hosts: hosts}, err
 }
 
-func addHost(service Service, request *http.Request) (sshconfig.Host, error) {
-	var add addHostRequest
-	if err := decodeJSON(request, &add); err != nil {
-		return sshconfig.Host{}, err
+func decodeAndCall[Req, Res any](request *http.Request, call func(Req) (Res, error)) (Res, error) {
+	var body Req
+	if err := decodeJSON(request, &body); err != nil {
+		var zero Res
+		return zero, err
 	}
-	return service.addHost(add)
+	return call(body)
+}
+
+func addHost(service Service, request *http.Request) (sshconfig.Host, error) {
+	return decodeAndCall(request, service.addHost)
 }
 
 func updateHost(service Service, request *http.Request) (sshconfig.Host, error) {
-	var update updateHostRequest
-	if err := decodeJSON(request, &update); err != nil {
-		return sshconfig.Host{}, err
-	}
-	return service.updateHost(request.PathValue("alias"), update)
+	alias := request.PathValue("alias")
+	return decodeAndCall(request, func(update updateHostRequest) (sshconfig.Host, error) {
+		return service.updateHost(alias, update)
+	})
 }
 
 func listKeys(service Service, _ *http.Request) (sshconfig.KeyList, error) {
@@ -182,11 +186,7 @@ func listKeys(service Service, _ *http.Request) (sshconfig.KeyList, error) {
 }
 
 func addKey(service Service, request *http.Request) (sshconfig.Key, error) {
-	var add addKeyRequest
-	if err := decodeJSON(request, &add); err != nil {
-		return sshconfig.Key{}, err
-	}
-	return service.addKey(add)
+	return decodeAndCall(request, service.addKey)
 }
 
 func (a *httpAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
@@ -199,11 +199,9 @@ func (a *httpAPI) sshAuth(writer http.ResponseWriter, request *http.Request) {
 }
 
 func validateSession(service Service, request *http.Request) (*validationResult, error) {
-	var create createRequest
-	if err := decodeJSON(request, &create); err != nil {
-		return nil, err
-	}
-	return service.validate(request.Context(), create)
+	return decodeAndCall(request, func(create createRequest) (*validationResult, error) {
+		return service.validate(request.Context(), create)
+	})
 }
 
 func (a *httpAPI) ownedSessionList(request *http.Request) ([]byte, error) {
@@ -217,7 +215,7 @@ func (a *httpAPI) ownedSessionList(request *http.Request) ([]byte, error) {
 	}
 	owned := sessionsOwnedBy(sessions, principal)
 	a.Refresher.Trigger()
-	return json.Marshal(sessionList{Sessions: publicSessions(owned), Logs: a.Service.ownedSessionTails(owned)})
+	return json.Marshal(sessionList{Sessions: public(owned, func(session Session) sessionResponse { return session.sessionResponse }), Logs: a.Service.ownedSessionTails(owned)})
 }
 
 func (a *httpAPI) listSessions(writer http.ResponseWriter, request *http.Request) {
@@ -238,15 +236,13 @@ func (a *httpAPI) listSessions(writer http.ResponseWriter, request *http.Request
 }
 
 func createSession(service Service, request *http.Request) (sessionResponse, error) {
-	var create createRequest
-	if err := decodeJSON(request, &create); err != nil {
-		return sessionResponse{}, err
-	}
-	session, err := service.create(request.Context(), create)
-	if err != nil {
-		return sessionResponse{}, err
-	}
-	return session.sessionResponse, nil
+	return decodeAndCall(request, func(create createRequest) (sessionResponse, error) {
+		session, err := service.create(request.Context(), create)
+		if err != nil {
+			return sessionResponse{}, err
+		}
+		return session.sessionResponse, nil
+	})
 }
 
 func (a *httpAPI) getSession(request *http.Request) (sessionResponse, error) {
@@ -281,7 +277,7 @@ func (a *httpAPI) listRuns(request *http.Request) (runList, error) {
 	if err != nil {
 		return runList{}, err
 	}
-	return runList{Runs: publicRuns(runs)}, nil
+	return runList{Runs: public(runs, func(run runRecord) runResponse { return run.runResponse })}, nil
 }
 
 func (a *httpAPI) getSessionMetrics(request *http.Request) (sessionSeries, error) {

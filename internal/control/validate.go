@@ -17,6 +17,7 @@ import (
 	"errors"
 	"net/http"
 	pathpkg "path"
+	"slices"
 	"strings"
 
 	"github.com/cyber-shuttle/cs-control/internal/apierr"
@@ -57,12 +58,7 @@ func safeRemotePath(value string) bool {
 }
 
 func homeRootExpression(value string) bool {
-	switch value {
-	case ".", "~", "$HOME", "${HOME}":
-		return true
-	default:
-		return false
-	}
+	return slices.Contains([]string{".", "~", "$HOME", "${HOME}"}, value)
 }
 
 func resolveRemoteExecutable(value, home string) string {

@@ -143,12 +143,7 @@ func TestReconcileDoesNotHoldStoreLockDuringSSHAndDoesNotOverwriteStop(t *testin
 
 	lockAvailable := make(chan error, 1)
 	go func() { lockAvailable <- service.Store.withLock(func(*state) error { return nil }) }()
-	select {
-	case err := <-lockAvailable:
-		testutil.Check(t, err)
-	case <-time.After(300 * time.Millisecond):
-		t.Fatal("state lock was held during blocked SSH")
-	}
+	testutil.Within(t, lockAvailable, 300*time.Millisecond, "state lock was held during blocked SSH")
 	_, err := service.stop(testTunnelContext(), session.ID)
 	testutil.Check(t, err)
 	testutil.Check(t, os.WriteFile(release, []byte("ok"), 0o600))

@@ -250,12 +250,7 @@ func TestOIDCUnknownKIDFloodCoalescesRefreshWithoutBlockingKnownKey(t *testing.T
 
 	knownDone := make(chan error, 1)
 	go func() { knownDone <- validator.Validate(context.Background(), known) }()
-	select {
-	case err := <-knownDone:
-		testutil.Check(t, err)
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("known-key validation was serialized behind OIDC refresh")
-	}
+	testutil.Within(t, knownDone, 200*time.Millisecond, "known-key validation was serialized behind OIDC refresh")
 	close(releaseRefresh)
 	workers.Wait()
 	close(errors)

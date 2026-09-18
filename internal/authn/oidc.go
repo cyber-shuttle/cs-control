@@ -115,7 +115,7 @@ func parseSignedIDToken(token string) (idTokenHeader, idTokenClaims, string, []b
 		if !ok {
 			return errors.New("token encoding")
 		}
-		if err := json.Unmarshal(decoded, destination); err != nil {
+		if json.Unmarshal(decoded, destination) != nil {
 			return errors.New("token JSON")
 		}
 		return nil
@@ -257,20 +257,19 @@ func (v *oidcValidator) fetchMetadata(ctx context.Context) (oidcMetadata, error)
 	if err := httpx.GetJSON(ctx, v.client, endpoint.String(), "", maxOIDCResponse, &metadata); err != nil {
 		return metadata, errors.New("fetch OIDC discovery metadata")
 	}
-	issuer, issuerErr := url.Parse(metadata.Issuer)
-	jwks, jwksErr := url.Parse(metadata.JWKSURI)
-	authorization, authErr := url.Parse(metadata.AuthorizationEndpoint)
-	token, tokenErr := url.Parse(metadata.TokenEndpoint)
-	if issuerErr != nil || jwksErr != nil || authErr != nil || tokenErr != nil ||
-		metadata.Issuer == "" || metadata.JWKSURI == "" || metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" ||
-		issuer.User != nil || jwks.User != nil || authorization.User != nil || token.User != nil {
-		return metadata, errors.New("OIDC discovery metadata is invalid")
+	endpoints := []string{metadata.Issuer, metadata.JWKSURI, metadata.AuthorizationEndpoint, metadata.TokenEndpoint}
+	parsed := make([]*url.URL, len(endpoints))
+	for i, raw := range endpoints {
+		u, err := url.Parse(raw)
+		if err != nil || raw == "" || u.User != nil {
+			return metadata, errors.New("OIDC discovery metadata is invalid")
+		}
+		parsed[i] = u
 	}
-	sameOrigin := func(candidate *url.URL) bool {
-		return candidate.Scheme == v.authority.Scheme && candidate.Host == v.authority.Host
-	}
-	if !sameOrigin(issuer) || !sameOrigin(jwks) || !sameOrigin(authorization) || !sameOrigin(token) {
-		return metadata, errors.New("OIDC discovery endpoints do not match the configured issuer")
+	for _, u := range parsed {
+		if u.Scheme != v.authority.Scheme || u.Host != v.authority.Host {
+			return metadata, errors.New("OIDC discovery endpoints do not match the configured issuer")
+		}
 	}
 	return metadata, nil
 }
@@ -309,7 +308,6 @@ func (v *oidcValidator) fetchKeys(ctx context.Context, endpoint string) (map[str
 	return keys, nil
 }
 
-// Discovery answers the cached authorization and token endpoints the sign-in relay redeems codes against.
 func (v *oidcValidator) Discovery(ctx context.Context) (oidcMetadata, error) {
 	cache, err := v.loadKeys(ctx)
 	return cache.metadata, err

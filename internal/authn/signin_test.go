@@ -45,8 +45,7 @@ func TestSignInConfigAnswersDiscovery(t *testing.T) {
 	handler, server := newTestSignInRelay(t, nil)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/oauth/config", nil)
 	request.Header.Set("Origin", "https://workspace.example.edu")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 	testutil.Equal(t, response.Code, http.StatusOK, "config status")
 	var body oauthConfigResponse
 	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &body))
@@ -68,8 +67,7 @@ func TestSignInExchangeRedeemsACode(t *testing.T) {
 	body := strings.NewReader(`{"code":"the-code","codeVerifier":"the-verifier","redirectUri":"https://workspace.example.edu/callback"}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/exchange", body)
 	request.Header.Set("Origin", "https://workspace.example.edu")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 	testutil.Equal(t, response.Code, http.StatusOK, "exchange status")
 	var tokens tokenResponse
 	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &tokens))
@@ -88,8 +86,7 @@ func TestSignInExchangeRejectsAForeignRedirect(t *testing.T) {
 	body := strings.NewReader(`{"code":"the-code","codeVerifier":"the-verifier","redirectUri":"https://evil.example/callback"}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/exchange", body)
 	request.Header.Set("Origin", "https://workspace.example.edu")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 	testutil.Equal(t, response.Code, http.StatusBadRequest, "foreign redirect status")
 }
 
@@ -104,8 +101,7 @@ func TestSignInRefreshRotatesTokens(t *testing.T) {
 	body := strings.NewReader(`{"refreshToken":"old-refresh-token"}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/refresh", body)
 	request.Header.Set("Origin", "https://workspace.example.edu")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 	testutil.Equal(t, response.Code, http.StatusOK, "refresh status")
 	var tokens tokenResponse
 	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &tokens))
@@ -115,7 +111,6 @@ func TestSignInRefreshRotatesTokens(t *testing.T) {
 func TestSignInRelayPassesThroughOtherRoutes(t *testing.T) {
 	handler, _ := newTestSignInRelay(t, nil)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 	testutil.Equal(t, response.Code, http.StatusTeapot, "pass-through status")
 }

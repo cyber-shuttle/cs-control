@@ -117,8 +117,7 @@ func TestOAuthBoundaryWebSocketSubprotocolBearer(t *testing.T) {
 	}), []string{"https://workspace.example.edu"})
 	testutil.Check(t, err)
 	request := browserUpgradeRequest(token)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 	if response.Code != http.StatusNoContent || validatorCalls != 1 {
 		t.Fatalf("websocket OAuth response = %d calls=%d body=%q", response.Code, validatorCalls, response.Body.String())
 	}
@@ -144,8 +143,7 @@ func TestOAuthBoundaryWebSocketRejectsHeaderCredentialChannels(t *testing.T) {
 	testutil.Check(t, err)
 	request := browserUpgradeRequest(token)
 	request.Header.Set("Authorization", "Bearer "+token)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
+	response := testutil.Serve(handler, request)
 	if response.Code != http.StatusNoContent || calls != 1 {
 		t.Fatalf("protocol-authenticated WebSocket response = %d calls=%d %q", response.Code, calls, response.Body.String())
 	}
@@ -217,8 +215,7 @@ func TestOAuthBoundaryRejectsMalformedCredentials(t *testing.T) {
 		}(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, request)
+			response := testutil.Serve(handler, request)
 			if response.Code != http.StatusUnauthorized && response.Code != http.StatusBadRequest {
 				t.Fatalf("code = %d, want 400 or 401", response.Code)
 			}

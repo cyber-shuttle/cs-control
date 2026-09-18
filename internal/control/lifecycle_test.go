@@ -25,8 +25,7 @@ import (
 func sessionListRequest(t *testing.T, api *httpAPI, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, nil).WithContext(testTunnelContext())
-	response := httptest.NewRecorder()
-	api.ServeHTTP(response, request)
+	response := testutil.Serve(api, request)
 	return response
 }
 

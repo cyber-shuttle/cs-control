@@ -88,7 +88,6 @@ type tunnelEndpoint struct {
 	expiresAt  time.Time
 }
 
-// tunnelLinker is the Dev Tunnels link broker's surface this package uses; *authn.LinkBroker satisfies it.
 type tunnelLinker interface {
 	Status(principal authn.Principal) (authn.TunnelLinkStatus, error)
 	Start(ctx context.Context, principal authn.Principal, provider string) (authn.TunnelLinkStart, error)
