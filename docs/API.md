@@ -540,7 +540,8 @@ Complete: the daemon has stored the credential and answers what `GET /api/v1/tun
 { "linked": true, "provider": "microsoft", "account": "someone@outlook.com", "linkedAt": "..." }
 ```
 
-A Microsoft link keeps the refresh token and is renewed silently on use; a GitHub token does not expire.
+A link keeps its refresh token and is renewed silently on use before it expires; GitHub tokens last eight
+hours and Microsoft tokens one, so neither ever surfaces as an expired credential.
 Polling faster than `intervalSeconds` is `429 rate_limited`. A denied authorization is
 `403 authorization_denied`; an expired one is `410 authorization_expired`. The handle is bound to the caller
 that started it and is discarded on any terminal outcome.

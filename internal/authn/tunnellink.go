@@ -1,8 +1,9 @@
 // The Dev Tunnels link: a Microsoft or GitHub device-code authorization, brokered per principal and sealed to
 // disk once, so sessions run over the caller's own Dev Tunnels account without this daemon ever returning the
 // token that grants it. The broker keeps the device code only in bounded process memory; Poll answers what
-// GET /api/v1/tunnel/link would once linked, never the tokens. A Microsoft link is refreshed on use within two
-// minutes of expiry; a GitHub token does not expire. The sealing key lives beside the state at mode 0600.
+// GET /api/v1/tunnel/link would once linked, never the tokens. A link whose provider issued an expiry is
+// refreshed on use within two minutes of it, Microsoft and GitHub alike. The sealing key sits beside the
+// state at mode 0600.
 //
 //	devTunnelsNativeClientID, devTunnelsGitHubClientID, tunnelLinkDeviceScope, tunnelLinkGrantType
 //	githubDeviceEndpoint, githubTokenEndpoint, githubUserAPI, microsoftDeviceEndpoint, microsoftTokenEndpoint
@@ -292,10 +293,7 @@ func (b *LinkBroker) completeLink(ctx context.Context, principal Principal, prov
 	}
 	now := b.now()
 	link := tunnelLink{Provider: provider.name, Scheme: provider.scheme, AccessToken: accessToken, RefreshToken: refreshToken, Account: account, LinkedAt: now}
-	if provider.name == "microsoft" {
-		if expiresIn <= 0 {
-			expiresIn = 3600
-		}
+	if expiresIn > 0 {
 		link.ExpiresAt = now.Add(time.Duration(expiresIn) * time.Second)
 	}
 	if err := b.saveLink(principal, link); err != nil {
@@ -304,9 +302,13 @@ func (b *LinkBroker) completeLink(ctx context.Context, principal Principal, prov
 	return link.status(), nil
 }
 
-func (b *LinkBroker) refreshMicrosoft(ctx context.Context, principal Principal, link tunnelLink) (tunnelLink, error) {
-	provider := b.providers["microsoft"]
-	body, status, err := postForm(ctx, b.client, provider.tokenEndpoint, url.Values{"grant_type": {"refresh_token"}, "client_id": {provider.clientID}, "refresh_token": {link.RefreshToken}, "scope": {provider.scope}}, oauthRequestTimeout)
+func (b *LinkBroker) refreshLink(ctx context.Context, principal Principal, link tunnelLink) (tunnelLink, error) {
+	provider := b.providers[link.Provider]
+	form := url.Values{"grant_type": {"refresh_token"}, "client_id": {provider.clientID}, "refresh_token": {link.RefreshToken}}
+	if provider.scope != "" {
+		form.Set("scope", provider.scope)
+	}
+	body, status, err := postForm(ctx, b.client, provider.tokenEndpoint, form, oauthRequestTimeout)
 	if err != nil || status < 200 || status >= 300 {
 		return tunnelLink{}, apierr.New("upstream_unavailable", "the Dev Tunnels link could not be refreshed", http.StatusBadGateway)
 	}
@@ -477,8 +479,8 @@ func (b *LinkBroker) Credential(ctx context.Context, principal Principal) (Tunne
 	if !ok {
 		return TunnelCredential{}, apierr.New("tunnel_link_required", "a Dev Tunnels link is required", http.StatusConflict)
 	}
-	if link.Provider == "microsoft" && !link.ExpiresAt.IsZero() && b.now().Add(tunnelLinkRefreshWindow).After(link.ExpiresAt) {
-		refreshed, err := b.refreshMicrosoft(ctx, principal, link)
+	if link.RefreshToken != "" && !link.ExpiresAt.IsZero() && b.now().Add(tunnelLinkRefreshWindow).After(link.ExpiresAt) {
+		refreshed, err := b.refreshLink(ctx, principal, link)
 		if err != nil {
 			return TunnelCredential{}, err
 		}

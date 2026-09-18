@@ -3,7 +3,7 @@
 //
 //	newTestLinkBroker
 //	TestLinkBrokerGitHubStartPollLinksAndTheFileIsSealed
-//	TestLinkBrokerCredentialRequiresALink, TestLinkBrokerRefreshesAnExpiringMicrosoftLinkOnUse
+//	TestLinkBrokerCredentialRequiresALink, TestLinkBrokerRefreshesAnExpiringLinkOnUse
 package authn
 
 import (
@@ -92,36 +92,42 @@ func TestLinkBrokerCredentialRequiresALink(t *testing.T) {
 	}
 }
 
-func TestLinkBrokerRefreshesAnExpiringMicrosoftLinkOnUse(t *testing.T) {
-	broker, _ := newTestLinkBroker(t)
-	principal := Principal{Subject: "owner", Tenant: "custos"}
-	refreshCalls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		refreshCalls++
-		testutil.Check(t, r.ParseForm())
-		if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "old-refresh" {
-			t.Fatalf("refresh request = %v", r.Form)
-		}
-		_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`))
-	}))
-	defer server.Close()
-	broker.providers["microsoft"] = tunnelLinkProvider{name: "microsoft", scheme: SchemeBearer, tokenEndpoint: server.URL, clientID: devTunnelsNativeClientID, scope: tunnelLinkDeviceScope}
-	broker.client = server.Client()
-	fixed := time.Now()
-	broker.now = func() time.Time { return fixed }
-	testutil.Check(t, broker.saveLink(principal, tunnelLink{
-		Provider: "microsoft", Scheme: SchemeBearer, AccessToken: "old-access", RefreshToken: "old-refresh",
-		ExpiresAt: fixed.Add(time.Minute), Account: "someone@outlook.com", LinkedAt: fixed,
-	}))
+func TestLinkBrokerRefreshesAnExpiringLinkOnUse(t *testing.T) {
+	for _, test := range []struct {
+		provider, scheme, scope string
+	}{{"microsoft", SchemeBearer, tunnelLinkDeviceScope}, {"github", "github", ""}} {
+		t.Run(test.provider, func(t *testing.T) {
+			broker, _ := newTestLinkBroker(t)
+			principal := Principal{Subject: "owner", Tenant: "custos"}
+			refreshCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				refreshCalls++
+				testutil.Check(t, r.ParseForm())
+				if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "old-refresh" || r.Form.Get("scope") != test.scope {
+					t.Fatalf("refresh request = %v", r.Form)
+				}
+				_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`))
+			}))
+			defer server.Close()
+			broker.providers[test.provider] = tunnelLinkProvider{name: test.provider, scheme: test.scheme, tokenEndpoint: server.URL, clientID: "client", scope: test.scope}
+			broker.client = server.Client()
+			fixed := time.Now()
+			broker.now = func() time.Time { return fixed }
+			testutil.Check(t, broker.saveLink(principal, tunnelLink{
+				Provider: test.provider, Scheme: test.scheme, AccessToken: "old-access", RefreshToken: "old-refresh",
+				ExpiresAt: fixed.Add(time.Minute), Account: "someone", LinkedAt: fixed,
+			}))
 
-	credential, err := broker.Credential(context.Background(), principal)
-	testutil.Check(t, err)
-	testutil.Equal(t, credential, TunnelCredential{Scheme: SchemeBearer, Token: "new-access"}, "refreshed credential")
-	testutil.Equal(t, refreshCalls, 1, "refresh calls")
+			credential, err := broker.Credential(context.Background(), principal)
+			testutil.Check(t, err)
+			testutil.Equal(t, credential, TunnelCredential{Scheme: test.scheme, Token: "new-access"}, "refreshed credential")
+			testutil.Equal(t, refreshCalls, 1, "refresh calls")
 
-	link, ok, err := broker.loadLink(principal)
-	testutil.Check(t, err)
-	if !ok || link.RefreshToken != "new-refresh" {
-		t.Fatalf("stored link after refresh = %#v", link)
+			link, ok, err := broker.loadLink(principal)
+			testutil.Check(t, err)
+			if !ok || link.RefreshToken != "new-refresh" || !link.ExpiresAt.Equal(fixed.Add(time.Hour)) {
+				t.Fatalf("stored link after refresh = %#v", link)
+			}
+		})
 	}
 }
