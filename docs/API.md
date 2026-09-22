@@ -7,8 +7,7 @@ has no commands for keys, hosts, or sessions.
 | Method | Route |
 | --- | --- |
 | `GET` | `/api/v1/oauth/config` |
-| `POST` | `/api/v1/oauth/exchange`, `/api/v1/oauth/refresh` |
-| `POST` | `/api/v1/oauth/authorizations`, `/api/v1/oauth/authorizations/{handle}/poll` |
+| `POST` | `/api/v1/oauth/exchange`, `/api/v1/oauth/refresh`, `/api/v1/oauth/device` |
 | `GET`, `POST` | `/api/v1/ssh/hosts`, `/api/v1/ssh/keys` |
 | `PUT`, `DELETE` | `/api/v1/ssh/hosts/{alias}` |
 | `DELETE` | `/api/v1/ssh/keys/{name}` |
@@ -79,7 +78,7 @@ An error the API did not classify becomes `500 internal_error`.
 
 | Code | Status |
 | --- | --- |
-| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_name`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider` | 400 |
+| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_name`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `authorization_pending`, `unknown_provider` | 400 |
 | `unauthorized`, `identity_not_linked` | 401 |
 | `session_owner_mismatch`, `origin_required`, `origin_not_allowed`, `preflight_not_allowed`, `authorization_denied` | 403 |
 | `not_found`, `session_not_found`, `ssh_host_not_found`, `ssh_key_not_found` | 404 |
@@ -92,7 +91,6 @@ An error the API did not classify becomes `500 internal_error`.
 | `session_provisioning_failed` | 502 or 504 |
 | `slurm_discovery_failed`, `upstream_unavailable`, `upstream_invalid`, `upstream_failure` | 502 |
 | `service_stopping`, `broker_capacity` | 503 |
-| `device_unsupported` | 501 |
 
 Request bodies are JSON, at most 64 KiB. Unknown fields and trailing data are refused with `invalid_json`.
 
@@ -506,14 +504,14 @@ an unreachable issuer is `502 upstream_unavailable`.
 Answers the same shape as `exchange`, with a rotated `refreshToken` when the issuer rotates it. A refused
 refresh is `400 invalid_grant`.
 
-### `POST /api/v1/oauth/authorizations` → 200
+### `POST /api/v1/oauth/device` → 200
 
 For a client that cannot receive a redirect, such as an editor extension. Takes no body and starts the
-issuer's device grant with the client secret the daemon holds:
+issuer's device grant:
 
 ```json
 {
-  "handle": "...",
+  "deviceCode": "...",
   "userCode": "QFP-7N3-VQF",
   "verificationUri": "https://cilogon.org/device/",
   "verificationUriComplete": "https://cilogon.org/device/?user_code=QFP-7N3-VQF",
@@ -522,21 +520,10 @@ issuer's device grant with the client secret the daemon holds:
 }
 ```
 
-The caller shows `userCode` and opens `verificationUriComplete`. The upstream device code never leaves the
-daemon; `handle` is the only reference a caller holds, and it is the single secret that redeems the sign-in.
-
-### `POST /api/v1/oauth/authorizations/{handle}/poll` → 200
-
-Takes no body, and answers either a still-pending authorization or the same credential `exchange` returns:
-
-```json
-{ "status": "pending", "intervalSeconds": 5 }
-```
-
-Polling faster than `intervalSeconds` is `429 rate_limited`; the issuer asking to slow down lengthens the
-interval it reports. A handle that is unknown or already redeemed is `404 not_found`, one past its lifetime
-is `410 authorization_expired`, and a denied authorization is `400 invalid_grant`. An issuer that does not
-offer the device grant is `501 device_unsupported`.
+The caller shows `userCode`, opens `verificationUriComplete`, and every `intervalSeconds` posts
+`{ "deviceCode": "..." }` to `exchange`. Until the user approves, that answers `400 authorization_pending`, or
+`429 rate_limited` when the issuer asks to slow down; then it answers the usual credential. A denied or
+expired code is `400 invalid_grant`.
 
 ## Dev Tunnels link
 

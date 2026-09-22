@@ -6,28 +6,17 @@ package oauth
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/cyber-shuttle/cs-control/internal/identity"
 	"github.com/cyber-shuttle/cs-control/internal/router"
 	"github.com/cyber-shuttle/cs-control/internal/security"
 )
 
-const (
-	signInScope        = "openid email profile offline_access"
-	maxDeviceEntries   = 256
-	deviceSlowDownStep = 5 * time.Second
-)
-
-var deviceHandlePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+const signInScope = "openid email profile offline_access"
 
 type oauthConfigResponse struct {
 	Issuer                string `json:"issuer"`
@@ -36,7 +25,9 @@ type oauthConfigResponse struct {
 	Scope                 string `json:"scope"`
 }
 
+// exchangeRequest redeems either a browser's authorization code or an approved device code.
 type exchangeRequest struct {
+	DeviceCode   string `json:"deviceCode"`
 	Code         string `json:"code"`
 	CodeVerifier string `json:"codeVerifier"`
 	RedirectURI  string `json:"redirectUri"`
@@ -46,26 +37,13 @@ type refreshRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
-type deviceStart struct {
-	Handle           string `json:"handle"`
+type deviceResponse struct {
+	DeviceCode       string `json:"deviceCode"`
 	UserCode         string `json:"userCode"`
 	VerificationURI  string `json:"verificationUri"`
 	CompleteURI      string `json:"verificationUriComplete"`
 	ExpiresInSeconds int64  `json:"expiresInSeconds"`
 	IntervalSeconds  int64  `json:"intervalSeconds"`
-}
-
-type pendingAuthorization struct {
-	Status          string `json:"status"`
-	IntervalSeconds int64  `json:"intervalSeconds"`
-}
-
-// deviceEntry keeps the upstream device code server-side; a client only ever holds the opaque handle.
-type deviceEntry struct {
-	deviceCode string
-	expiresAt  time.Time
-	interval   time.Duration
-	nextPoll   time.Time
 }
 
 type tokenResponse struct {
@@ -82,9 +60,6 @@ type Service struct {
 	origins      map[string]struct{}
 	// validator is s.validate in production; tests substitute a fake.
 	validator func(context.Context, string) (security.Principal, error)
-	mu        sync.Mutex
-	devices   map[string]*deviceEntry
-	now       func() time.Time
 }
 
 func redirectOriginAllowed(redirectURI string, origins map[string]struct{}) bool {
@@ -109,6 +84,11 @@ func (s *Service) handleExchange(writer http.ResponseWriter, request *http.Reque
 	var body exchangeRequest
 	if err := security.DecodeJSON(request, &body); err != nil {
 		security.WriteError(writer, err)
+		return
+	}
+	if body.DeviceCode != "" {
+		tokens, err := s.oidc.RedeemDevice(request.Context(), s.clientSecret, body.DeviceCode)
+		s.writeTokens(writer, tokens, err)
 		return
 	}
 	if body.Code == "" || body.CodeVerifier == "" || !redirectOriginAllowed(body.RedirectURI, s.origins) {
@@ -137,10 +117,12 @@ func (s *Service) handleRefresh(writer http.ResponseWriter, request *http.Reques
 // same whether it came from an authorization code, a refresh token or a device code.
 func upstreamError(err error) error {
 	switch {
+	case errors.Is(err, identity.ErrAuthorizationPending):
+		return security.New("authorization_pending", "the sign-in has not been approved yet", http.StatusBadRequest)
+	case errors.Is(err, identity.ErrSlowDown):
+		return security.New("rate_limited", "polling too quickly", http.StatusTooManyRequests)
 	case errors.Is(err, identity.ErrGrantRejected):
 		return security.New("invalid_grant", "the grant was rejected", http.StatusBadRequest)
-	case errors.Is(err, identity.ErrDeviceUnsupported):
-		return security.New("device_unsupported", "the identity provider does not offer device sign-in", http.StatusNotImplemented)
 	case errors.Is(err, identity.ErrTokenInvalid):
 		return security.New("upstream_invalid", "the identity provider returned an invalid response", http.StatusBadGateway)
 	default:
@@ -156,103 +138,18 @@ func (s *Service) writeTokens(writer http.ResponseWriter, tokens identity.Tokens
 	security.WriteJSON(writer, http.StatusOK, tokenResponse{IDToken: tokens.IDToken, RefreshToken: tokens.RefreshToken, ExpiresInSeconds: tokens.ExpiresIn})
 }
 
-// handleAuthorize starts the device grant for a client that cannot receive a redirect, such as an editor extension.
-func (s *Service) handleAuthorize(writer http.ResponseWriter, request *http.Request) {
-	s.mu.Lock()
-	full := len(s.devices) >= maxDeviceEntries
-	s.mu.Unlock()
-	if full {
-		security.WriteError(writer, security.New("broker_capacity", "authorization service is busy", http.StatusServiceUnavailable))
-		return
-	}
+// handleDevice starts the device grant for a client that cannot receive a redirect, such as an editor extension;
+// the client then posts the device code to exchange until the user approves it.
+func (s *Service) handleDevice(writer http.ResponseWriter, request *http.Request) {
 	authorization, err := s.oidc.DeviceAuthorize(request.Context(), s.clientSecret, signInScope)
 	if err != nil {
 		security.WriteError(writer, upstreamError(err))
 		return
 	}
-	raw := make([]byte, 32)
-	_, _ = rand.Read(raw)
-	handle := base64.RawURLEncoding.EncodeToString(raw)
-	now := s.now()
-	s.mu.Lock()
-	if len(s.devices) >= maxDeviceEntries {
-		s.mu.Unlock()
-		security.WriteError(writer, security.New("broker_capacity", "authorization service is busy", http.StatusServiceUnavailable))
-		return
-	}
-	s.devices[handle] = &deviceEntry{
-		deviceCode: authorization.DeviceCode, expiresAt: now.Add(authorization.ExpiresIn),
-		interval: authorization.Interval, nextPoll: now,
-	}
-	s.mu.Unlock()
-	security.WriteJSON(writer, http.StatusOK, deviceStart{
-		Handle: handle, UserCode: authorization.UserCode,
-		VerificationURI: authorization.VerificationURI, CompleteURI: authorization.CompleteURI,
-		ExpiresInSeconds: int64(authorization.ExpiresIn / time.Second),
-		IntervalSeconds:  int64(authorization.Interval / time.Second),
+	security.WriteJSON(writer, http.StatusOK, deviceResponse{
+		DeviceCode: authorization.DeviceCode, UserCode: authorization.UserCode, VerificationURI: authorization.VerificationURI,
+		CompleteURI: authorization.CompleteURI, ExpiresInSeconds: authorization.ExpiresIn, IntervalSeconds: authorization.Interval,
 	})
-}
-
-func (s *Service) handlePoll(writer http.ResponseWriter, request *http.Request) {
-	handle := request.PathValue("handle")
-	deviceCode, err := s.claimPoll(handle)
-	if err != nil {
-		security.WriteError(writer, err)
-		return
-	}
-	tokens, err := s.oidc.RedeemDevice(request.Context(), s.clientSecret, deviceCode)
-	switch {
-	case errors.Is(err, identity.ErrAuthorizationPending), errors.Is(err, identity.ErrSlowDown):
-		interval := s.deferPoll(handle, errors.Is(err, identity.ErrSlowDown))
-		security.WriteJSON(writer, http.StatusOK, pendingAuthorization{Status: "pending", IntervalSeconds: interval})
-	default:
-		s.forget(handle)
-		s.writeTokens(writer, tokens, err)
-	}
-}
-
-// claimPoll validates the handle and reserves the next upstream call, so a caller cannot poll faster than the
-// interval the provider asked for.
-func (s *Service) claimPoll(handle string) (string, error) {
-	if !deviceHandlePattern.MatchString(handle) {
-		return "", security.New("not_found", "authorization was not found", http.StatusNotFound)
-	}
-	now := s.now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.devices[handle]
-	if !ok {
-		return "", security.New("not_found", "authorization was not found", http.StatusNotFound)
-	}
-	if !now.Before(entry.expiresAt) {
-		delete(s.devices, handle)
-		return "", security.New("authorization_expired", "authorization expired", http.StatusGone)
-	}
-	if now.Before(entry.nextPoll) {
-		return "", security.New("rate_limited", "polling too quickly", http.StatusTooManyRequests)
-	}
-	entry.nextPoll = now.Add(entry.interval)
-	return entry.deviceCode, nil
-}
-
-func (s *Service) deferPoll(handle string, slowDown bool) int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.devices[handle]
-	if !ok {
-		return int64(deviceSlowDownStep / time.Second)
-	}
-	if slowDown {
-		entry.interval += deviceSlowDownStep
-		entry.nextPoll = s.now().Add(entry.interval)
-	}
-	return int64(entry.interval / time.Second)
-}
-
-func (s *Service) forget(handle string) {
-	s.mu.Lock()
-	delete(s.devices, handle)
-	s.mu.Unlock()
 }
 
 func NewService(custosURL, issuer, clientID, clientSecret string, allowedOrigins []string, client *http.Client) (*Service, error) {
@@ -271,21 +168,17 @@ func NewService(custosURL, issuer, clientID, clientSecret string, allowedOrigins
 	if err != nil {
 		return nil, err
 	}
-	service := &Service{
-		oidc: oidc, custos: custos, clientID: clientID, clientSecret: clientSecret, origins: origins,
-		devices: map[string]*deviceEntry{}, now: time.Now,
-	}
+	service := &Service{oidc: oidc, custos: custos, clientID: clientID, clientSecret: clientSecret, origins: origins}
 	service.validator = service.validate
 	return service, nil
 }
 
 func (s *Service) Routes() router.Routes {
 	return router.Routes{
-		"/api/v1/oauth/config":                       {http.MethodGet: s.handleConfig},
-		"/api/v1/oauth/exchange":                     {http.MethodPost: s.handleExchange},
-		"/api/v1/oauth/refresh":                      {http.MethodPost: s.handleRefresh},
-		"/api/v1/oauth/authorizations":               {http.MethodPost: s.handleAuthorize},
-		"/api/v1/oauth/authorizations/{handle}/poll": {http.MethodPost: s.handlePoll},
+		"/api/v1/oauth/config":   {http.MethodGet: s.handleConfig},
+		"/api/v1/oauth/exchange": {http.MethodPost: s.handleExchange},
+		"/api/v1/oauth/refresh":  {http.MethodPost: s.handleRefresh},
+		"/api/v1/oauth/device":   {http.MethodPost: s.handleDevice},
 	}
 }
 

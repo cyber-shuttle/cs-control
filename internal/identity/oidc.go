@@ -5,6 +5,7 @@
 package identity
 
 import (
+	"cmp"
 	"context"
 	"crypto"
 	"crypto/rsa"
@@ -30,15 +31,11 @@ const (
 	oidcCacheTTL           = 5 * time.Minute
 	oidcUnknownKIDCooldown = 30 * time.Second
 	deviceGrantType        = "urn:ietf:params:oauth:grant-type:device_code"
-	defaultDeviceInterval  = 5
-	maxDeviceInterval      = 60
-	maxDeviceLifetime      = 1800
 )
 
 var (
 	ErrAuthorizationPending = errors.New("OIDC device authorization is pending")
 	ErrSlowDown             = errors.New("OIDC device polling is too fast")
-	ErrDeviceUnsupported    = errors.New("OIDC issuer does not support the device grant")
 	ErrGrantRejected        = errors.New("OIDC grant was rejected")
 	ErrTokenUnavailable     = errors.New("OIDC token service is unavailable")
 	ErrTokenInvalid         = errors.New("OIDC token response is invalid")
@@ -311,12 +308,12 @@ func (v *OIDC) Discovery(ctx context.Context) (Metadata, error) {
 }
 
 type DeviceAuthorization struct {
-	DeviceCode      string
-	UserCode        string
-	VerificationURI string
-	CompleteURI     string
-	ExpiresIn       time.Duration
-	Interval        time.Duration
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
+	VerificationURI string `json:"verification_uri"`
+	CompleteURI     string `json:"verification_uri_complete"`
+	ExpiresIn       int64  `json:"expires_in"`
+	Interval        int64  `json:"interval"`
 }
 
 type Tokens struct {
@@ -336,62 +333,32 @@ func (v *OIDC) Refresh(ctx context.Context, clientSecret, refreshToken string) (
 }
 
 // DeviceAuthorize starts the device grant, which lets a client with no redirect URI sign a user in from a code.
+// The device code is safe to hand out: redeeming it needs the client secret only the daemon holds.
 func (v *OIDC) DeviceAuthorize(ctx context.Context, clientSecret, scope string) (DeviceAuthorization, error) {
 	metadata, err := v.Discovery(ctx)
 	if err != nil {
 		return DeviceAuthorization{}, ErrTokenUnavailable
 	}
-	if metadata.DeviceEndpoint == "" {
-		return DeviceAuthorization{}, ErrDeviceUnsupported
-	}
 	form := url.Values{"client_id": {v.clientID}, "client_secret": {clientSecret}, "scope": {scope}}
 	body, status, err := security.PostForm(ctx, v.client, metadata.DeviceEndpoint, form, oauthRequestTimeout, maxOAuthResponse)
-	if err != nil {
-		return DeviceAuthorization{}, fmt.Errorf("%w: %w", ErrTokenUnavailable, err)
-	}
-	var response struct {
-		Error           string `json:"error"`
-		DeviceCode      string `json:"device_code"`
-		UserCode        string `json:"user_code"`
-		VerificationURI string `json:"verification_uri"`
-		CompleteURI     string `json:"verification_uri_complete"`
-		ExpiresIn       int64  `json:"expires_in"`
-		Interval        int64  `json:"interval"`
-	}
-	if json.Unmarshal(body, &response) != nil {
-		return DeviceAuthorization{}, ErrTokenInvalid
-	}
-	if status < 200 || status >= 300 || response.Error != "" {
+	if err != nil || status < 200 || status >= 300 {
 		return DeviceAuthorization{}, ErrTokenUnavailable
 	}
-	if response.Interval == 0 {
-		response.Interval = defaultDeviceInterval
-	}
-	if response.CompleteURI == "" {
-		response.CompleteURI = response.VerificationURI
-	}
-	if !security.ValidCredential(response.DeviceCode) || !security.ValidCredential(response.UserCode) ||
-		!httpsURL(response.VerificationURI) || !httpsURL(response.CompleteURI) ||
-		response.ExpiresIn <= 0 || response.ExpiresIn > maxDeviceLifetime ||
-		response.Interval < 1 || response.Interval > maxDeviceInterval {
+	var authorization DeviceAuthorization
+	if json.Unmarshal(body, &authorization) != nil {
 		return DeviceAuthorization{}, ErrTokenInvalid
 	}
-	return DeviceAuthorization{
-		DeviceCode: response.DeviceCode, UserCode: response.UserCode,
-		VerificationURI: response.VerificationURI, CompleteURI: response.CompleteURI,
-		ExpiresIn: time.Duration(response.ExpiresIn) * time.Second,
-		Interval:  time.Duration(response.Interval) * time.Second,
-	}, nil
+	authorization.Interval = max(authorization.Interval, 5)
+	authorization.CompleteURI = cmp.Or(authorization.CompleteURI, authorization.VerificationURI)
+	if !security.ValidCredential(authorization.DeviceCode) || !security.ValidCredential(authorization.UserCode) ||
+		!strings.HasPrefix(authorization.CompleteURI, "https://") || authorization.ExpiresIn <= 0 {
+		return DeviceAuthorization{}, ErrTokenInvalid
+	}
+	return authorization, nil
 }
 
-// RedeemDevice exchanges an approved device code; ErrAuthorizationPending means the user has not finished yet.
 func (v *OIDC) RedeemDevice(ctx context.Context, clientSecret, deviceCode string) (Tokens, error) {
 	return v.redeem(ctx, clientSecret, url.Values{"grant_type": {deviceGrantType}, "device_code": {deviceCode}})
-}
-
-func httpsURL(raw string) bool {
-	parsed, err := url.Parse(raw)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
 }
 
 func (v *OIDC) redeem(ctx context.Context, clientSecret string, form url.Values) (Tokens, error) {

@@ -184,7 +184,7 @@ func (b *oauthBoundary) preflight(writer http.ResponseWriter, request *http.Requ
 }
 
 func (b *oauthBoundary) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	_, public := b.publicPaths[b.next.Pattern(request)]
+	_, public := b.publicPaths[request.URL.EscapedPath()]
 	origin := request.Header.Get("Origin")
 	if origin != "" {
 		if !allowOrigin(writer, origin, b.originSet) {

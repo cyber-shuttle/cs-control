@@ -57,15 +57,9 @@ func (r *Registry) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (r *Registry) Methods(request *http.Request) ([]string, bool) {
-	handlers := r.routes[r.Pattern(request)]
-	return slices.Sorted(maps.Keys(handlers)), handlers != nil
-}
-
-// Pattern reports the registered pattern a request matches, so callers can classify a route by its declaration
-// rather than by its concrete path, which a path parameter would never equal.
-func (r *Registry) Pattern(request *http.Request) string {
 	_, pattern := r.mux.Handler(request)
-	return pattern
+	handlers := r.routes[pattern]
+	return slices.Sorted(maps.Keys(handlers)), handlers != nil
 }
 
 func route(handlers map[string]http.HandlerFunc) http.HandlerFunc {

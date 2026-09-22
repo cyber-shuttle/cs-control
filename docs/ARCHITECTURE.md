@@ -6,7 +6,7 @@ over it.
 
 Each subsystem exports its route table. `internal/router` unions them into one registry, rejects duplicate
 method-and-path pairs, and preserves the API's JSON 404 and 405 responses. `oauth.Service` contributes the public
-sign-in routes, including the device grant it brokers for clients that cannot host a redirect, and wraps the
+sign-in routes, including a device grant for clients that cannot host a redirect, and wraps the
 registry once; every other request passes through its identity boundary.
 
 ## Packages
