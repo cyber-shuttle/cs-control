@@ -5,7 +5,7 @@ commands for hosts or sessions: `serve` starts the HTTP API and a browser or edi
 over it.
 
 Each subsystem exports its route table. `internal/router` unions them into one registry, rejects duplicate
-method-and-path pairs, and preserves the API's JSON 404 and 405 responses. `oauth.Service` contributes the
+method-and-path pairs, and preserves the API's JSON 404 and 405 responses. `oauth.Service` contributes the four
 public sign-in routes and wraps the registry once; every other request passes through its identity boundary.
 
 ## Packages
@@ -253,7 +253,7 @@ key writes and deletions and regenerates every rendered config from committed ho
 - **Ownership** is the Custos user id the token resolves to, under the fixed tenant `custos`. Session lists
   and their log tails are filtered to the owner; item and access reads reject a different principal.
 - **No ambient authentication.** There are no cookies, browser sign-in state, token URLs or static file serving, and
-  the only unauthenticated routes are the three sign-in routes.
+  the only unauthenticated routes are the four sign-in routes.
 - **The sign-in relay** holds the one client secret CILogon's token endpoint requires and never returns it;
   it validates `redirectUri` against the same allowed-origin set as everything else and maps a rejected code
   or refresh token to `400 invalid_grant` without repeating the issuer's own error text.

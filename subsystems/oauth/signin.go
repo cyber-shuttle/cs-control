@@ -1,5 +1,5 @@
 // The sign-in relay finishes the browser's CILogon authorization-code flow with PKCE while keeping the client
-// secret server-side. Its three canonical OAuth routes enforce the same exact-origin policy as authenticated API
+// secret server-side. Its four canonical OAuth routes enforce the same exact-origin policy as authenticated API
 // requests and share OIDC discovery with bearer validation. Upstream failures are classified without returning
 // provider details or tokens.
 package oauth
@@ -25,7 +25,6 @@ type oauthConfigResponse struct {
 	Scope                 string `json:"scope"`
 }
 
-// exchangeRequest redeems either a browser's authorization code or an approved device code.
 type exchangeRequest struct {
 	DeviceCode   string `json:"deviceCode"`
 	Code         string `json:"code"`
@@ -33,17 +32,15 @@ type exchangeRequest struct {
 	RedirectURI  string `json:"redirectUri"`
 }
 
-type refreshRequest struct {
-	RefreshToken string `json:"refreshToken"`
+type deviceResponse struct {
+	DeviceCode      string `json:"deviceCode"`
+	UserCode        string `json:"userCode"`
+	CompleteURI     string `json:"verificationUriComplete"`
+	IntervalSeconds int64  `json:"intervalSeconds"`
 }
 
-type deviceResponse struct {
-	DeviceCode       string `json:"deviceCode"`
-	UserCode         string `json:"userCode"`
-	VerificationURI  string `json:"verificationUri"`
-	CompleteURI      string `json:"verificationUriComplete"`
-	ExpiresInSeconds int64  `json:"expiresInSeconds"`
-	IntervalSeconds  int64  `json:"intervalSeconds"`
+type refreshRequest struct {
+	RefreshToken string `json:"refreshToken"`
 }
 
 type tokenResponse struct {
@@ -113,43 +110,30 @@ func (s *Service) handleRefresh(writer http.ResponseWriter, request *http.Reques
 	s.writeTokens(writer, tokens, err)
 }
 
-// upstreamError classifies an identity-provider outcome for every sign-in route, so one grant failure reads the
-// same whether it came from an authorization code, a refresh token or a device code.
-func upstreamError(err error) error {
+func (s *Service) writeTokens(writer http.ResponseWriter, tokens identity.Tokens, err error) {
 	switch {
 	case errors.Is(err, identity.ErrAuthorizationPending):
-		return security.New("authorization_pending", "the sign-in has not been approved yet", http.StatusBadRequest)
-	case errors.Is(err, identity.ErrSlowDown):
-		return security.New("rate_limited", "polling too quickly", http.StatusTooManyRequests)
+		security.WriteError(writer, security.New("authorization_pending", "the sign-in has not been approved yet", http.StatusBadRequest))
 	case errors.Is(err, identity.ErrGrantRejected):
-		return security.New("invalid_grant", "the grant was rejected", http.StatusBadRequest)
+		security.WriteError(writer, security.New("invalid_grant", "the authorization code or refresh token was rejected", http.StatusBadRequest))
 	case errors.Is(err, identity.ErrTokenInvalid):
-		return security.New("upstream_invalid", "the identity provider returned an invalid response", http.StatusBadGateway)
+		security.WriteError(writer, security.New("upstream_invalid", "the identity provider returned an invalid response", http.StatusBadGateway))
+	case err != nil:
+		security.WriteError(writer, security.New("upstream_unavailable", "the identity provider is unavailable", http.StatusBadGateway))
 	default:
-		return security.New("upstream_unavailable", "the identity provider is unavailable", http.StatusBadGateway)
+		security.WriteJSON(writer, http.StatusOK, tokenResponse{IDToken: tokens.IDToken, RefreshToken: tokens.RefreshToken, ExpiresInSeconds: tokens.ExpiresIn})
 	}
 }
 
-func (s *Service) writeTokens(writer http.ResponseWriter, tokens identity.Tokens, err error) {
-	if err != nil {
-		security.WriteError(writer, upstreamError(err))
-		return
-	}
-	security.WriteJSON(writer, http.StatusOK, tokenResponse{IDToken: tokens.IDToken, RefreshToken: tokens.RefreshToken, ExpiresInSeconds: tokens.ExpiresIn})
-}
-
-// handleDevice starts the device grant for a client that cannot receive a redirect, such as an editor extension;
-// the client then posts the device code to exchange until the user approves it.
+// handleDevice starts the device grant for a client that cannot receive a redirect, such as an editor extension; it
+// then posts the device code to exchange until the user approves it.
 func (s *Service) handleDevice(writer http.ResponseWriter, request *http.Request) {
-	authorization, err := s.oidc.DeviceAuthorize(request.Context(), s.clientSecret, signInScope)
+	device, err := s.oidc.DeviceAuthorize(request.Context(), s.clientSecret, signInScope)
 	if err != nil {
-		security.WriteError(writer, upstreamError(err))
+		s.writeTokens(writer, identity.Tokens{}, err)
 		return
 	}
-	security.WriteJSON(writer, http.StatusOK, deviceResponse{
-		DeviceCode: authorization.DeviceCode, UserCode: authorization.UserCode, VerificationURI: authorization.VerificationURI,
-		CompleteURI: authorization.CompleteURI, ExpiresInSeconds: authorization.ExpiresIn, IntervalSeconds: authorization.Interval,
-	})
+	security.WriteJSON(writer, http.StatusOK, deviceResponse{DeviceCode: device.DeviceCode, UserCode: device.UserCode, CompleteURI: device.CompleteURI, IntervalSeconds: device.Interval})
 }
 
 func NewService(custosURL, issuer, clientID, clientSecret string, allowedOrigins []string, client *http.Client) (*Service, error) {

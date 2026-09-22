@@ -5,7 +5,6 @@
 package identity
 
 import (
-	"cmp"
 	"context"
 	"crypto"
 	"crypto/rsa"
@@ -30,12 +29,10 @@ const (
 	oauthRequestTimeout    = 15 * time.Second
 	oidcCacheTTL           = 5 * time.Minute
 	oidcUnknownKIDCooldown = 30 * time.Second
-	deviceGrantType        = "urn:ietf:params:oauth:grant-type:device_code"
 )
 
 var (
 	ErrAuthorizationPending = errors.New("OIDC device authorization is pending")
-	ErrSlowDown             = errors.New("OIDC device polling is too fast")
 	ErrGrantRejected        = errors.New("OIDC grant was rejected")
 	ErrTokenUnavailable     = errors.New("OIDC token service is unavailable")
 	ErrTokenInvalid         = errors.New("OIDC token response is invalid")
@@ -307,15 +304,6 @@ func (v *OIDC) Discovery(ctx context.Context) (Metadata, error) {
 	return cache.metadata, err
 }
 
-type DeviceAuthorization struct {
-	DeviceCode      string `json:"device_code"`
-	UserCode        string `json:"user_code"`
-	VerificationURI string `json:"verification_uri"`
-	CompleteURI     string `json:"verification_uri_complete"`
-	ExpiresIn       int64  `json:"expires_in"`
-	Interval        int64  `json:"interval"`
-}
-
 type Tokens struct {
 	IDToken      string
 	RefreshToken string
@@ -332,33 +320,33 @@ func (v *OIDC) Refresh(ctx context.Context, clientSecret, refreshToken string) (
 	return v.redeem(ctx, clientSecret, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}})
 }
 
-// DeviceAuthorize starts the device grant, which lets a client with no redirect URI sign a user in from a code.
-// The device code is safe to hand out: redeeming it needs the client secret only the daemon holds.
+type DeviceAuthorization struct {
+	DeviceCode  string `json:"device_code"`
+	UserCode    string `json:"user_code"`
+	CompleteURI string `json:"verification_uri_complete"`
+	ExpiresIn   int64  `json:"expires_in"`
+	Interval    int64  `json:"interval"`
+}
+
+// DeviceAuthorize starts the device grant for a client with no redirect URI. The device code is safe to hand out:
+// redeeming it needs the client secret only the daemon holds.
 func (v *OIDC) DeviceAuthorize(ctx context.Context, clientSecret, scope string) (DeviceAuthorization, error) {
+	var authorization DeviceAuthorization
 	metadata, err := v.Discovery(ctx)
 	if err != nil {
-		return DeviceAuthorization{}, ErrTokenUnavailable
+		return authorization, ErrTokenUnavailable
 	}
 	form := url.Values{"client_id": {v.clientID}, "client_secret": {clientSecret}, "scope": {scope}}
 	body, status, err := security.PostForm(ctx, v.client, metadata.DeviceEndpoint, form, oauthRequestTimeout, maxOAuthResponse)
-	if err != nil || status < 200 || status >= 300 {
-		return DeviceAuthorization{}, ErrTokenUnavailable
-	}
-	var authorization DeviceAuthorization
-	if json.Unmarshal(body, &authorization) != nil {
-		return DeviceAuthorization{}, ErrTokenInvalid
+	if err != nil || status != http.StatusOK || json.Unmarshal(body, &authorization) != nil || authorization.DeviceCode == "" {
+		return authorization, ErrTokenUnavailable
 	}
 	authorization.Interval = max(authorization.Interval, 5)
-	authorization.CompleteURI = cmp.Or(authorization.CompleteURI, authorization.VerificationURI)
-	if !security.ValidCredential(authorization.DeviceCode) || !security.ValidCredential(authorization.UserCode) ||
-		!strings.HasPrefix(authorization.CompleteURI, "https://") || authorization.ExpiresIn <= 0 {
-		return DeviceAuthorization{}, ErrTokenInvalid
-	}
 	return authorization, nil
 }
 
 func (v *OIDC) RedeemDevice(ctx context.Context, clientSecret, deviceCode string) (Tokens, error) {
-	return v.redeem(ctx, clientSecret, url.Values{"grant_type": {deviceGrantType}, "device_code": {deviceCode}})
+	return v.redeem(ctx, clientSecret, url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "device_code": {deviceCode}})
 }
 
 func (v *OIDC) redeem(ctx context.Context, clientSecret string, form url.Values) (Tokens, error) {
@@ -382,10 +370,8 @@ func (v *OIDC) redeem(ctx context.Context, clientSecret string, form url.Values)
 		return Tokens{}, ErrTokenInvalid
 	}
 	switch response.Error {
-	case "authorization_pending":
+	case "authorization_pending", "slow_down": // ponytail: slow_down reads as pending; add a backoff if CILogon starts sending it
 		return Tokens{}, ErrAuthorizationPending
-	case "slow_down":
-		return Tokens{}, ErrSlowDown
 	case "invalid_grant", "expired_token", "access_denied":
 		return Tokens{}, ErrGrantRejected
 	}

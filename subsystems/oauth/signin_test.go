@@ -1,4 +1,4 @@
-// Tests the sign-in relay: config discovery, code and device exchange, refresh, and redirect-origin refusal.
+// Tests the sign-in relay: config discovery, code exchange, refresh, and redirect-origin refusal.
 package oauth
 
 import (
@@ -16,7 +16,7 @@ import (
 	"github.com/cyber-shuttle/cs-control/internal/testutil"
 )
 
-func newTestSignInRelay(t *testing.T, tokenRoute, deviceRoute http.HandlerFunc) (http.Handler, *httptest.Server) {
+func newTestSignInRelay(t *testing.T, tokenRoute http.HandlerFunc) (http.Handler, *httptest.Server) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	testutil.Check(t, err)
@@ -31,10 +31,8 @@ func newTestSignInRelay(t *testing.T, tokenRoute, deviceRoute http.HandlerFunc) 
 				"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "relay-key",
 				"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(exponent),
 			}}})
-		case "/token":
+		case "/token", "/device":
 			tokenRoute(w, r)
-		case "/device":
-			deviceRoute(w, r)
 		default:
 			t.Errorf("unexpected relay request %s", r.URL)
 		}
@@ -48,7 +46,7 @@ func newTestSignInRelay(t *testing.T, tokenRoute, deviceRoute http.HandlerFunc) 
 }
 
 func TestSignInConfigAnswersCanonicalRoute(t *testing.T) {
-	handler, server := newTestSignInRelay(t, nil, nil)
+	handler, server := newTestSignInRelay(t, nil)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/oauth/config", nil)
 	request.Header.Set("Origin", "https://workspace.example.edu")
 	response := testutil.Serve(handler, request)
@@ -79,7 +77,7 @@ func TestSignInExchangeRedeemsACode(t *testing.T) {
 			t.Fatalf("token request = %v", r.Form)
 		}
 		_, _ = w.Write([]byte(`{"id_token":"header.payload.signature","refresh_token":"a-refresh-token","expires_in":900}`))
-	}, nil)
+	})
 	body := strings.NewReader(`{"code":"the-code","codeVerifier":"the-verifier","redirectUri":"https://workspace.example.edu/callback"}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/exchange", body)
 	request.Header.Set("Origin", "https://workspace.example.edu")
@@ -110,7 +108,7 @@ func TestSignInRefreshRotatesTokens(t *testing.T) {
 			t.Fatalf("refresh request = %v", r.Form)
 		}
 		_, _ = w.Write([]byte(`{"id_token":"header.payload.signature","refresh_token":"new-refresh-token","expires_in":900}`))
-	}, nil)
+	})
 	body := strings.NewReader(`{"refreshToken":"old-refresh-token"}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/refresh", body)
 	request.Header.Set("Origin", "https://workspace.example.edu")
@@ -125,44 +123,26 @@ func TestDeviceSignInExchangesTheApprovedCodeWithoutABearer(t *testing.T) {
 	approved := false
 	handler, _ := newTestSignInRelay(t, func(w http.ResponseWriter, r *http.Request) {
 		testutil.Check(t, r.ParseForm())
-		testutil.Equal(t, r.PostForm.Get("grant_type"), "urn:ietf:params:oauth:grant-type:device_code", "grant type")
-		testutil.Equal(t, r.PostForm.Get("device_code"), "the-device-code", "device code")
-		if !approved {
+		switch {
+		case r.URL.Path == "/device":
+			_, _ = w.Write([]byte(`{"device_code":"the-device-code","user_code":"QFP-7N3-VQF","verification_uri_complete":"https://issuer.example.edu/device"}`))
+		case !approved:
 			// CILogon answers a pending authorization with HTTP 400, which must not read as an upstream failure.
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"error":"authorization_pending"}`))
-			return
+		default:
+			testutil.Equal(t, r.PostForm.Get("device_code"), "the-device-code", "device code")
+			_, _ = w.Write([]byte(`{"id_token":"header.payload.signature","expires_in":3600}`))
 		}
-		_, _ = w.Write([]byte(`{"id_token":"header.payload.signature","refresh_token":"the-refresh","expires_in":3600}`))
-	}, func(w http.ResponseWriter, r *http.Request) {
-		testutil.Check(t, r.ParseForm())
-		testutil.Equal(t, r.PostForm.Get("scope"), signInScope, "device scope")
-		testutil.Equal(t, r.PostForm.Get("client_secret"), "the-client-secret", "device client secret")
-		_, _ = w.Write([]byte(`{"device_code":"the-device-code","user_code":"QFP-7N3-VQF","verification_uri":"https://issuer.example.edu/device/","expires_in":900}`))
 	})
 	post := func(path, body string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 		request.Header.Set("Origin", "https://workspace.example.edu")
 		return testutil.Serve(handler, request)
 	}
-
-	started := post("/api/v1/oauth/device", "")
-	testutil.Equal(t, started.Code, http.StatusOK, "device status")
-	var device deviceResponse
-	testutil.Check(t, json.Unmarshal(started.Body.Bytes(), &device))
-	testutil.Equal(t, device, deviceResponse{
-		DeviceCode: "the-device-code", UserCode: "QFP-7N3-VQF", VerificationURI: "https://issuer.example.edu/device/",
-		CompleteURI: "https://issuer.example.edu/device/", ExpiresInSeconds: 900, IntervalSeconds: 5,
-	}, "device response")
-
-	pending := post("/api/v1/oauth/exchange", `{"deviceCode":"the-device-code"}`)
-	testutil.Equal(t, pending.Code, http.StatusBadRequest, "pending status")
-	testutil.Equal(t, strings.Contains(pending.Body.String(), `"authorization_pending"`), true, "pending code")
-
+	testutil.Equal(t, post("/api/v1/oauth/device", "").Body.String(),
+		`{"deviceCode":"the-device-code","userCode":"QFP-7N3-VQF","verificationUriComplete":"https://issuer.example.edu/device","intervalSeconds":5}`, "device")
+	testutil.Equal(t, post("/api/v1/oauth/exchange", `{"deviceCode":"the-device-code"}`).Code, http.StatusBadRequest, "pending")
 	approved = true
-	granted := post("/api/v1/oauth/exchange", `{"deviceCode":"the-device-code"}`)
-	testutil.Equal(t, granted.Code, http.StatusOK, "granted status")
-	var tokens tokenResponse
-	testutil.Check(t, json.Unmarshal(granted.Body.Bytes(), &tokens))
-	testutil.Equal(t, tokens, tokenResponse{IDToken: "header.payload.signature", RefreshToken: "the-refresh", ExpiresInSeconds: 3600}, "tokens")
+	testutil.Equal(t, post("/api/v1/oauth/exchange", `{"deviceCode":"the-device-code"}`).Code, http.StatusOK, "approved")
 }

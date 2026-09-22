@@ -506,24 +506,10 @@ refresh is `400 invalid_grant`.
 
 ### `POST /api/v1/oauth/device` → 200
 
-For a client that cannot receive a redirect, such as an editor extension. Takes no body and starts the
-issuer's device grant:
-
-```json
-{
-  "deviceCode": "...",
-  "userCode": "QFP-7N3-VQF",
-  "verificationUri": "https://cilogon.org/device/",
-  "verificationUriComplete": "https://cilogon.org/device/?user_code=QFP-7N3-VQF",
-  "expiresInSeconds": 900,
-  "intervalSeconds": 5
-}
-```
-
-The caller shows `userCode`, opens `verificationUriComplete`, and every `intervalSeconds` posts
-`{ "deviceCode": "..." }` to `exchange`. Until the user approves, that answers `400 authorization_pending`, or
-`429 rate_limited` when the issuer asks to slow down; then it answers the usual credential. A denied or
-expired code is `400 invalid_grant`.
+Starts the issuer's device grant for a client that cannot receive a redirect, and answers
+`{ "deviceCode", "userCode", "verificationUriComplete", "intervalSeconds" }`. The client opens
+`verificationUriComplete` and every `intervalSeconds` posts `{ "deviceCode": "..." }` to `exchange`, which answers
+`400 authorization_pending` until the user approves and then the usual credential.
 
 ## Dev Tunnels link
 
