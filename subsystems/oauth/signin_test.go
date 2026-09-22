@@ -1,5 +1,4 @@
-// Tests the sign-in relay: config discovery, code exchange, refresh, device authorization, and redirect-origin
-// refusal.
+// Tests the sign-in relay: config discovery, code and device exchange, refresh, and redirect-origin refusal.
 package oauth
 
 import (
