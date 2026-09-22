@@ -1,4 +1,4 @@
-// Package main is cs, a single binary that runs on a researcher's own machine and binds to loopback.
+// Package main is cs-plane's single binary, cs, that runs on a researcher's own machine and binds to loopback.
 // run dispatches the CLI; serve validates before listening. newServeComponents composes authentication, SSH,
 // session, and tunnel-link owners over one state directory and closes them on failure or shutdown.
 package main

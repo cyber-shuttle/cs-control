@@ -18,7 +18,7 @@ you in the advisory unless you would rather we did not.
 
 ## Scope
 
-`cs` runs on a researcher's own machine. It validates OIDC ID tokens and resolves them to a principal
+cs-plane runs on a researcher's own machine. It validates OIDC ID tokens and resolves them to a principal
 through Custos, brokers a one-time Dev Tunnels device-code link, persists Dev Tunnel connect tokens and
 Jupyter tokens to disk, writes each caller's own managed SSH configuration under
 `<state>/hosts/<principal>/config`, and executes commands on remote HPC systems. These are the boundaries it

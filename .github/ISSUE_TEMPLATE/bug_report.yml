@@ -1,5 +1,5 @@
 name: Bug report
-description: Something cs does not do, or does wrong
+description: Something cs-plane does not do, or does wrong
 labels: ["bug"]
 body:
   - type: textarea
@@ -50,7 +50,7 @@ body:
   - type: textarea
     id: invocation
     attributes:
-      label: How you started cs
+      label: How you started cs-plane
       description: The `cs serve` command line, with the tenant ID replaced.
       render: shell
   - type: textarea
@@ -66,7 +66,7 @@ body:
     attributes:
       label: Logs
       description: >
-        cs output and any session log tail. Remove OIDC ID tokens, Dev Tunnel connect and host tokens, and
+        cs-plane output and any session log tail. Remove OIDC ID tokens, Dev Tunnel connect and host tokens, and
         Jupyter tokens before pasting.
       render: shell
   - type: markdown

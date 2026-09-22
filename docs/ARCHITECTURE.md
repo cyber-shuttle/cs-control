@@ -1,6 +1,6 @@
 # Architecture
 
-`cs` is a single binary that runs on a researcher's own machine and binds to loopback. It has no CLI
+cs-plane is a single binary, `cs`, that runs on a researcher's own machine and binds to loopback. It has no CLI
 commands for hosts or sessions: `serve` starts the HTTP API and a browser or editor client drives everything
 over it.
 
@@ -35,7 +35,7 @@ subsystems/session    session state, Slurm and tunnel lifecycles, protected capa
                       records, logs, metrics, and routes
 subsystems/telemetry  the read-only run-history route over the session subsystem's records
 
-main.go               composition root, the cs binary
+main.go               composition root, the `cs` binary
 ```
 
 Session, SSH, and tunnel subsystems give internal mechanisms domain meaning. OAuth establishes inbound identity.
@@ -194,7 +194,7 @@ subject and tenant, so an identifier from another system never becomes a path. `
 back. `internal/ssh` reads it only to check an alias exists before running `ssh -F` against it.
 
 This is a boundary, not a filing convention. `ssh` is invoked with `-F` naming that file, so an alias resolves
-through the configuration of the caller who added it and through no other. The account `cs` runs as has no
+through the configuration of the caller who added it and through no other. The account cs-plane runs as has no
 standing in the API: its `~/.ssh/config` is neither read nor written, and its aliases are invisible. Two
 callers may use the same alias name for different hosts. The control master is keyed by the configuration as
 well as the alias, so one caller authenticating a host never hands another an authenticated SSH login, and

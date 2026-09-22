@@ -6,13 +6,13 @@
 
 CyberShuttle is the ARTISAN group's toolset for running interactive work — a Jupyter server today — on the
 compute nodes of an HPC (high-performance computing) cluster, reachable from a browser or editor on your own
-machine. `cs` is the local daemon that does that work: it submits the [Slurm](https://slurm.schedmd.com/)
+machine. cs-plane is the local daemon that does that work: it submits the [Slurm](https://slurm.schedmd.com/)
 job, prepares the login node, and creates a tunnel the compute node hosts outbound, so a session is reachable
 without the cluster opening an inbound port.
 
 A session is the record a client creates and polls; a Slurm job serves it, and one session can outlive
 several. Everything happens as you: your own SSH host configuration, your SSH credentials, your Slurm
-account. `cs` binds to loopback only and never proxies session traffic — once a session is running,
+account. cs-plane binds to loopback only and never proxies session traffic — once a session is running,
 the browser reaches it directly over the tunnel.
 
 ## Status
@@ -25,12 +25,12 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
 - **macOS or Linux**, with an OpenSSH client on `PATH`. CI covers Linux only.
 - **Go 1.26 or newer.** Building from source is the only install path.
 - **A [CILogon](https://www.cilogon.org/) client, or another OIDC issuer configured the same way.** The
-  client must have PKCE and the device flow enabled: `cs` finishes a browser's PKCE flow and an editor's
+  client must have PKCE and the device flow enabled: cs-plane finishes a browser's PKCE flow and an editor's
   device-code flow. `--oidc-issuer` defaults to `https://cilogon.org`; the client ID
   goes on `--oidc-client-id` and the client secret in `CS_OIDC_CLIENT_SECRET`, since only the daemon holds
   it.
-- **A Postgres server** with a schema cs owns. `CS_DATABASE_URL` names it through `search_path`, for
-  example `postgres:///cybershuttle?host=/var/run/postgresql&search_path=cs_plane`; cs creates its tables in that
+- **A Postgres server** with a schema cs-plane owns. `CS_DATABASE_URL` names it through `search_path`, for
+  example `postgres:///cybershuttle?host=/var/run/postgresql&search_path=cs_plane`; cs-plane creates its tables in that
   schema while it is empty, and refuses one it did not create.
 - **A [Custos](https://custos.cyberinfrastructure.org/) instance** the resolved identity is checked against:
   `--custos-url` names it, and the daemon calls `GET {custos-url}/me` with the caller's bearer to resolve the
@@ -43,7 +43,7 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
   `sacct`, `scancel`, `curl`, `tar`, `base64`, `od`, `install`, `printenv`, `sed` and `sort -V`, and whose
   nodes run Linux `x86_64` or `arm64` with `curl`.
 - **[Linkspan](https://github.com/cyber-shuttle/linkspan) 0.19.0 or newer**, the release whose workflow
-  document is `tasks`; `cs` installs the latest release on a host that has none.
+  document is `tasks`; cs-plane installs the latest release on a host that has none.
 - **Outbound internet.** From the login node to `github.com`; from the compute node to `astral.sh`,
   `github.com` and `pypi.org`, which Linkspan installs `uv`, its Python and packages from, and to
   `tunnelsassetsprod.blob.core.windows.net`, which Linkspan fetches Microsoft's `devtunnel` CLI from, and to
@@ -117,11 +117,11 @@ account, it:
 
 Linkspan is the CyberShuttle agent that runs as the batch job's main process: it hosts the tunnel, installs
 `uv`, builds the Python environment under `$HOME/.cybershuttle` and starts Jupyter Server on the compute node.
-Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle`. `cs` keeps a multiplexed OpenSSH connection to the
+Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle`. cs-plane keeps a multiplexed OpenSSH connection to the
 login node open between operations and starts no other long-lived process there; the session itself runs on
 a compute node. The batch script redirects the job's stdout and stderr to
 `$HOME/.cybershuttle/logs/<session id>-<seq>.out` and `.err`; nothing prunes them. The flags and outputs
-`cs` depends on are listed in
+cs-plane depends on are listed in
 [Linkspan's compatibility document](https://github.com/cyber-shuttle/linkspan/blob/main/docs/COMPATIBILITY.md).
 
 ## Local state
@@ -137,7 +137,7 @@ a compute node. The batch script redirects the job's stdout and stderr to
 Scheduler, session, tunnel, SSH host and login key metadata live in the Postgres schema. Each caller's SSH host
 entries are rendered to that caller's `hosts/<principal>/config`
 for `ssh -F`; startup regenerates these files from committed rows and resolves interrupted key writes and deletions.
-The API never reads or writes `~/.ssh/config` for the account `cs` runs as. A schema holding tables without
+The API never reads or writes `~/.ssh/config` for the account cs-plane runs as. A schema holding tables without
 cs-plane's format marker is refused before anything else is touched.
 
 ## Documentation
@@ -149,7 +149,7 @@ cs-plane's format marker is refused before anything else is touched.
 
 - **[cs-jupyter](https://github.com/cyber-shuttle/cs-jupyter)** — the browser client that drives this API: it
   signs in, creates and polls sessions, and connects to a `READY` one.
-- **[linkspan](https://github.com/cyber-shuttle/linkspan)** — the compute-node agent `cs` installs and
+- **[linkspan](https://github.com/cyber-shuttle/linkspan)** — the compute-node agent cs-plane installs and
   submits as the job's main process.
 
 ## Getting help

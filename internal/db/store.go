@@ -1,5 +1,5 @@
 // Package db owns cs-plane's Postgres connection and complete state-operation boundary. The DSN's search_path names
-// the one schema cs owns, so it can share a server and database with other services. A cached handle plus a
+// the one schema cs-plane owns, so it can share a server and database with other services. A cached handle plus a
 // state-directory file lock serialize read-modify-write cycles across processes; callers may nest a transaction
 // inside that cycle when database changes must coordinate with protected files. Feature packages own every table
 // and query. Schema DDL runs only in an empty schema; an existing one is accepted by its format marker or rejected.
@@ -91,7 +91,7 @@ func open(dsn, schema string) (*DB, error) {
 }
 
 // Open returns the shared handle for dsn, creating the schema's tables only when it holds none yet. lockDir holds
-// the file lock that serializes state cycles across cs processes.
+// the file lock that serializes state cycles across cs-plane processes.
 func Open(dsn, lockDir, schema string) (*DB, error) {
 	if dsn == "" || lockDir == "" {
 		return nil, errors.New("database URL and state directory are required")
