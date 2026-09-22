@@ -16,62 +16,54 @@ linters:
 
   exclusions:
     rules:
-      # Fixture data and expected-failure assertions a test builds itself (G101, G124), directory and file
-      # modes a test sets on purpose to exercise rejection or its own throwaway helper scripts (G204, G301,
-      # G302, G306), and paths a test builds itself for its own fixtures (G703, G304).
+      # Fixture data and expected-failure assertions a test builds itself (G101, G117, G124), directory and
+      # file modes a test sets to exercise rejection or its own helper scripts (G204, G301, G302, G306), and
+      # paths a test builds for its own fixtures (G703, G304).
       - path: _test\.go
         linters: [gosec]
-        text: "G101|G124|G204|G301|G302|G304|G306|G703"
+        text: "G101|G117|G124|G204|G301|G302|G304|G306|G703"
+      # A throwaway script a test runs itself, at a mode every caller already chose 0700 for (G306).
+      - path: internal/testutil/testutil\.go
+        linters: [gosec]
+        text: "G306"
       # ST1005 flags the capital letter in a proper noun, not a sentence-case violation: Linkspan and Dev
       # Tunnel are names, not the start of a generic error sentence.
-      - path: internal/control/session_metrics\.go
-        linters: [staticcheck]
-        text: "ST1005"
-      - path: internal/control/tunnel\.go
+      - path: subsystems/session/tunnel\.go
         linters: [staticcheck]
         text: "ST1005"
       - path: internal/devtunnel/devtunnel\.go
         linters: [staticcheck]
         text: "ST1005"
       # Custos is a proper noun, not the start of a generic error sentence.
-      - path: internal/authn/custos\.go
+      - path: internal/identity/custos\.go
         linters: [staticcheck]
         text: "ST1005"
       # These are OAuth endpoint URLs, not literal credentials; the constant name says what it is reached
       # for, not a secret it holds (G101). The struct is JSON-marshaled only to be sealed with secretbox in
       # the same call, never written or logged in the clear (G117).
-      - path: internal/authn/tunnellink\.go
+      - path: subsystems/tunnel/tunnel\.go
         linters: [gosec]
         text: "G101|G117"
       # Chmods and opens a path this process already verified with PrivateDir/EnsurePrivateDir; the directory
       # mode is 0700 by design, tighter than gosec's file-permission floor, and every open is of a path under
       # this user's own state directory (G302, G304).
-      - path: internal/safeio/safeio\.go
+      - path: internal/security/files\.go
         linters: [gosec]
         text: "G302|G304"
-      # Runs the local ssh binary with arguments this package builds from a validated alias and its own
-      # configuration, never from unsanitized external input (G204).
-      - path: internal/sshexec/sshexec\.go
+      # Runs the configured local ssh binary with package-built arguments and validated aliases. Config and
+      # control paths stay beneath the caller's protected state namespace (G204, G304, G702, G703).
+      - path: internal/ssh/exec\.go
         linters: [gosec]
-        text: "G204"
-      - path: internal/gateway/sshauth\.go
-        linters: [gosec]
-        text: "G204|G702"
-      # Reads the caller's own managed SSH configuration file, at a path this process wrote under its own
-      # private state directory, never taken fresh from external input (G304).
-      - path: internal/sshconfig/(manage|sshconfig)\.go
-        linters: [gosec]
-        text: "G304"
+        text: "G204|G304|G702|G703"
       # The refresh must outlive whichever caller's request first started it, since other callers are already
       # waiting on the same cache fill; scoping it to one request's context would cancel it under them (G118).
-      - path: internal/authn/oidc\.go
+      - path: internal/identity/oidc\.go
         linters: [gosec]
         text: "G118"
-      # GuardedClient re-adds the Authorization header only after its caller's allowed predicate has
-      # confirmed the redirect stays on a trusted origin (G119). The request's URL was already validated by
-      # ParseBaseURL against a fixed identity or tunnel service endpoint before reaching here, not taken
-      # fresh from caller input (G704).
-      - path: internal/httpx/httpx\.go
+      # GuardedClient follows only same-origin redirects, so the Authorization header Go preserves across
+      # the hop stays on the origin that issued it (G119). Every request URL was validated by its caller
+      # against a fixed identity or tunnel service endpoint, not taken fresh from user input (G704).
+      - path: internal/security/client\.go
         linters: [gosec]
         text: "G119|G704"
 

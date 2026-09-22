@@ -1,0 +1,26 @@
+version: "2"
+sql:
+  - engine: sqlite
+    schema: subsystems/session/schema.sql
+    queries: subsystems/session/query.sql
+    gen:
+      go:
+        package: session
+        out: subsystems/session
+        rename:
+          session: sessionRow
+          run: runRow
+        output_db_file_name: sql.go
+        output_models_file_name: sql_models.go
+  - engine: sqlite
+    schema: subsystems/ssh/schema.sql
+    queries: subsystems/ssh/query.sql
+    gen:
+      go:
+        package: ssh
+        out: subsystems/ssh
+        rename:
+          ssh_host: hostRow
+          ssh_key: keyRow
+        output_db_file_name: sql.go
+        output_models_file_name: sql_models.go
