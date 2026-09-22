@@ -1,8 +1,30 @@
 # API
 
-`csctl serve` exposes one JSON HTTP API and one WebSocket route on an explicit loopback address, `127.0.0.1:8045`
-by default. Every path below is relative to that address. There is no other interface: the CLI has no commands
-for hosts or sessions.
+`csctl serve` exposes one JSON HTTP API and one WebSocket route on an explicit loopback address,
+`127.0.0.1:8045` by default. Every path below is relative to that address. There is no other interface: the CLI
+has no commands for keys, hosts, or sessions.
+
+| Method | Route |
+| --- | --- |
+| `GET` | `/api/v1/oauth/config` |
+| `POST` | `/api/v1/oauth/exchange`, `/api/v1/oauth/refresh` |
+| `GET`, `POST` | `/api/v1/ssh/hosts`, `/api/v1/ssh/keys` |
+| `PUT`, `DELETE` | `/api/v1/ssh/hosts/{alias}` |
+| `DELETE` | `/api/v1/ssh/keys/{name}` |
+| `POST` | `/api/v1/ssh/hosts/{alias}/test` |
+| `GET` | `/api/v1/ssh/hosts/{alias}/auth` (WebSocket), `/api/v1/ssh/hosts/{alias}/slurm` |
+| `GET`, `DELETE` | `/api/v1/tunnel` |
+| `POST` | `/api/v1/tunnel/authorizations`, `/api/v1/tunnel/authorizations/{handle}/poll` |
+| `GET`, `POST` | `/api/v1/sessions` |
+| `POST` | `/api/v1/sessions/validate` |
+| `GET` | `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/access`, `/api/v1/sessions/{id}/metrics` |
+| `POST` | `/api/v1/sessions/{id}/start`, `/api/v1/sessions/{id}/stop` |
+| `DELETE` | `/api/v1/sessions/{id}` |
+| `GET` | `/api/v1/telemetry` |
+
+Every `OPTIONS` preflight is answered from this table: an unknown path is `404`, a method the path lacks is
+`405` with `Allow`, and a disallowed origin or request header is `403`. A successful `DELETE` is `204` with no
+body. A created host, key or session is `201` with a `Location` header naming it.
 
 ## Authentication
 
@@ -12,9 +34,9 @@ Every request except the sign-in routes carries one credential:
 | --- | --- |
 | `Authorization` | `Bearer <CILogon ID token>` |
 
-The token is validated cryptographically against the configured issuer's discovery document and JWKS, with
-the audience pinned to the configured client id, exactly as Custos validates it. The caller's identity is then
-the Custos user the token resolves to: the daemon calls `GET <custos>/me` with the same bearer and takes the
+The token is validated cryptographically against the configured issuer's discovery document and JWKS. The
+discovered issuer must match exactly, and the audience is pinned to the configured client id. The caller's
+identity is then the Custos user the token resolves to: the daemon calls `GET <custos>/me` with the same bearer and takes the
 returned user id as the principal, under the tenant `custos`. The result is held five minutes per token. A
 token Custos does not recognise is refused with `401 identity_not_linked`; any other failure is `401`.
 
@@ -34,42 +56,38 @@ request to any other route is not treated as a WebSocket.
 
 `serve` requires at least one exact `--allowed-origin`. HTTPS origins and loopback HTTP origins are accepted;
 wildcards are not. A request whose `Origin` is not in the list is refused with `403`. A request with no
-`Origin` at all — a native client — passes the origin check but still needs both credentials.
+`Origin` at all — a native client — passes the origin check but still needs its bearer credential.
 
 When an `Origin` is present the response carries `Access-Control-Allow-Origin`, `Vary: Origin` and
-`Access-Control-Expose-Headers: ETag`. Preflight is answered for `GET`, `POST`, `PUT`, `DELETE` and `OPTIONS`
+`Access-Control-Expose-Headers: ETag, Location`. Preflight is answered for `GET`, `POST`, `PUT`, `DELETE` and `OPTIONS`
 with the request headers `Authorization`, `Content-Type` and `If-None-Match`; a
 preflight asking for anything else is refused with `403`.
 
 ## Errors
 
-Every refusal produced by the API or the device broker is this envelope, with `Cache-Control: no-store`:
+Every refusal, including those of the authentication boundary, is this envelope with `Cache-Control: no-store`:
 
 ```json
 { "error": { "code": "session_not_found", "message": "session not found" } }
 ```
 
-Refusals produced by the authentication boundary itself are plain text with the status and no envelope:
-`401 unauthorized` (missing or invalid credentials), `403 origin is not allowed`, `403 preflight is not
-allowed`. A `401` also carries `WWW-Authenticate: Bearer`. The WebSocket credential path answers the same
-way, writing `http.StatusText` of the status with no envelope: `400 Bad Request` for a malformed or
-incomplete `Sec-WebSocket-Protocol` negotiation, `401 Unauthorized` (with `WWW-Authenticate: Bearer`) for a
-missing or undecodable bearer credential in it.
+Missing or invalid credentials are `401 unauthorized` with `WWW-Authenticate: Bearer`; a malformed or
+incomplete `Sec-WebSocket-Protocol` negotiation is `400 invalid_websocket_auth`.
 
 An error the API did not classify becomes `500 internal_error`.
 
 | Code | Status |
 | --- | --- |
-| `invalid_json`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider` | 400 |
-| `tunnel_authorization_required`, `identity_not_linked` | 401 |
+| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_name`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider` | 400 |
+| `unauthorized`, `identity_not_linked` | 401 |
 | `session_owner_mismatch`, `origin_required`, `origin_not_allowed`, `preflight_not_allowed`, `authorization_denied` | 403 |
-| `not_found`, `session_not_found`, `ssh_host_not_found` | 404 |
+| `not_found`, `session_not_found`, `ssh_host_not_found`, `ssh_key_not_found` | 404 |
 | `method_not_allowed` | 405 |
-| `session_exists`, `session_running`, `session_not_stopped`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_host_not_managed`, `ssh_authentication_required`, `ssh_authentication_in_progress`, `tunnel_link_required` | 409 |
+| `session_exists`, `session_running`, `session_not_stopped`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_key_exists`, `ssh_authentication_required`, `ssh_authentication_in_progress`, `tunnel_link_required` | 409 |
 | `authorization_expired` | 410 |
 | `upgrade_required` | 426 |
 | `rate_limited` | 429 |
-| `internal_error`, `broker_unavailable` | 500 |
+| `internal_error` | 500 |
 | `session_provisioning_failed` | 502 or 504 |
 | `slurm_discovery_failed`, `upstream_unavailable`, `upstream_invalid`, `upstream_failure` | 502 |
 | `service_stopping`, `broker_capacity` | 503 |
@@ -78,7 +96,7 @@ Request bodies are JSON, at most 64 KiB. Unknown fields and trailing data are re
 
 ## SSH hosts
 
-### `GET /api/v1/ssh` → 200
+### `GET /api/v1/ssh/hosts` → 200
 
 The caller's own hosts, and only those. Each principal has a private configuration this API writes; the
 account the daemon runs as has none of its own standing here, and one caller's aliases are invisible to
@@ -104,7 +122,7 @@ another. `managed` marks the entries this API wrote, which are the only ones it 
 (below) the host is assigned; its `identityFile` is then that key's path and `extraDirectives` carries
 `IdentitiesOnly yes`.
 
-### `POST /api/v1/ssh` → 201
+### `POST /api/v1/ssh/hosts` → 201
 
 The body is the `ssh` command the user already knows works; the server parses it, so the client never composes
 configuration text. `name` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`.
@@ -122,7 +140,7 @@ covering how a connection authenticates or keeps itself alive; every other optio
 trailing remote command are refused with `invalid_ssh_command`. The response is the resulting host, and an
 alias that already exists is `ssh_host_exists`.
 
-### `PUT /api/v1/ssh/{alias}` → 200
+### `PUT /api/v1/ssh/hosts/{alias}` → 200
 
 Replaces a managed entry with what the command now says, so a login whose host, port, user or jump
 changed is corrected without losing its alias. The body is the same pasted command `POST` takes, and it
@@ -133,26 +151,22 @@ is parsed by the same rules; the alias comes from the path, so an edit cannot re
 ```
 
 `key` is as on `POST`; an empty or absent `key` unassigns the one the host had. The response is the resulting
-host. An alias outside the managed block is `ssh_host_not_managed`.
+host. An alias that is not configured is `ssh_host_not_found`.
 
-### `DELETE /api/v1/ssh/{alias}` → 200
+### `DELETE /api/v1/ssh/hosts/{alias}` → 204
 
-Removes a managed entry. An alias outside the managed block is `ssh_host_not_managed`.
+Removes an entry. An alias that is not configured is `ssh_host_not_found`.
 
-```json
-{ "name": "delta", "extraDirectives": [], "managed": false }
-```
+### `POST /api/v1/ssh/hosts/{alias}/test` → 200
 
-### `POST /api/v1/ssh/{alias}/test` → 200
-
-Runs one bounded remote command. A host that answers but wants an interactive login is a reportable state, not
-a failed call, so `ok` is `false` with a `200`.
+Runs one bounded remote command. A host that answers but wants an interactive login is a reportable state, not a
+failed call, so `ok` is `false` with a `200`. Failure messages are fixed; SSH output is never returned.
 
 ```json
 { "host": "delta", "ok": true, "message": "Connected." }
 ```
 
-### `GET /api/v1/ssh/{alias}/slurm` → 200
+### `GET /api/v1/ssh/hosts/{alias}/slurm` → 200
 
 Slurm discovery: the accounts the remote user is associated with, the partitions `sinfo` reports, and the
 remote home directory. Abandoning the request cancels the remote process group.
@@ -171,42 +185,39 @@ remote home directory. Abandoning the request cancels the remote process group.
 A partition appears once per node configuration, so the same name can repeat with different capacities; a
 request has to fit at least one of them.
 
-## Login keys
+## SSH keys
 
-A stored key is a private key the caller uploaded, held under their own hosts directory at mode `0600`, that a
-host is assigned by name. Each caller's keys are their own, as their hosts are. A passphrase-protected key is
-accepted; the passphrase is asked for at login like any other prompt.
+A stored key is held under the caller's hosts directory at mode `0600` and assigned to hosts by name. Reads
+return type and fingerprint but never private bytes. Passphrase-protected keys are accepted; the passphrase is
+asked for during SSH authentication.
 
-### `GET /api/v1/keys` → 200
+### `GET /api/v1/ssh/keys` → 200
 
 ```json
 { "keys": [{ "name": "delta-key", "type": "ssh-ed25519", "fingerprint": "SHA256:..." }] }
 ```
 
-### `POST /api/v1/keys` → 201
-
-`name` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$` and does not end in `.pub`; a name already stored is
-replaced. `privateKey` is the file's text. Anything that does not parse as a private key is `invalid_ssh_key`.
+### `POST /api/v1/ssh/keys` → 201
 
 ```json
 { "name": "delta-key", "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\n..." }
 ```
 
-The response is the stored key as `GET` lists it.
+Creates a key and returns its metadata without `privateKey`. An existing name is `409 ssh_key_exists`. The
+private file is staged before its metadata is committed; startup promotes only a stage matching that metadata.
+Names match `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`, do not end in `.pub`, and invalid key bytes are
+`invalid_ssh_key`.
 
-### `DELETE /api/v1/keys/{name}` → 200
+### `DELETE /api/v1/ssh/keys/{name}` → 204
 
-Removes the key, and unassigns it from every managed host that carried it. A name that is not stored is
-`ssh_key_not_found`.
+Removes the key and unassigns it from every host that referenced it. The
+file deletion, metadata deletion, host-reference changes, and rendered config replacement are one compensated
+flow. A name that is not stored is `ssh_key_not_found`.
 
-```json
-{ "name": "delta-key" }
-```
+### `GET /api/v1/ssh/hosts/{alias}/auth` (WebSocket)
 
-### `GET /api/v1/ssh/{alias}/auth` (WebSocket)
-
-Interactive SSH authentication. It establishes the multiplexed control master every later operation reuses. A
-request without an `Upgrade` header is refused with `426 upgrade_required`.
+Interactive SSH authentication establishes the multiplexed control master every later operation reuses. A request
+without an `Upgrade` header is refused with `426 upgrade_required`.
 
 Server to client: binary frames are raw PTY output — untyped bytes, including password and second-factor
 prompts. Text frames are JSON:
@@ -274,9 +285,10 @@ SSH call is an error. `stdout` and `stderr` are omitted when empty.
 
 ### `POST /api/v1/sessions` → 201
 
-Same request body as validate. Creates the tunnel and credential, persists the record, prepares the login node,
-and submits. A repeated request with the same `idempotencyKey` and the same fields returns the existing
-session; the same key with different fields is `idempotency_conflict`.
+Same request body as validate. Creates the tunnel and its capability, persists the record, prepares the login node,
+and submits. A new session is `201` with `Location: /api/v1/sessions/{id}`. A repeated request with the same
+`idempotencyKey` and the same fields returns the existing session as `200`; the same key with different fields
+is `idempotency_conflict`.
 
 The response is one session record, which is also the item shape everywhere else:
 
@@ -309,8 +321,9 @@ returned.
 
 ### `GET /api/v1/sessions` → 200 or 304
 
-The one read a client polls. It answers from persisted state and starts a reconciliation for the next poll to
-collect, so it never waits on SSH. Sessions and log tails are both filtered to the caller.
+The one read a client polls. It answers from persisted state, which a background reconciler keeps current, so it
+never waits on SSH. Sessions and log tails are both filtered to the caller. `If-None-Match` accepts `*`, a list,
+and weak validators; a match is `304` with no body.
 
 ```json
 {
@@ -346,13 +359,14 @@ that is not terminal is `session_running`.
 
 ### `POST /api/v1/sessions/{id}/stop` → 200
 
-Marks the session `STOPPING`, releases the session's tunnel and credential, and asks the scheduler to cancel
+Marks the session `STOPPING`, releases the session's tunnel and capability, and asks the scheduler to cancel
 the job. The response is the session record.
 
-### `DELETE /api/v1/sessions/{id}` → 200
+### `DELETE /api/v1/sessions/{id}` → 204
 
-Stops the session first, then removes the record and its stored credential. A session the scheduler has not
-released yet is `session_not_stopped`; delete it again once it is.
+Removes a terminal session's record and its stored capability. A session that is not terminal is
+`409 session_not_stopped`: stop it, then delete it once the scheduler has released the job. Runs the session
+accumulated stay in telemetry.
 
 ### `GET /api/v1/sessions/{id}/access` → 200
 
@@ -369,7 +383,7 @@ tunnel expiration, not the value recorded at creation.
 }
 ```
 
-A session that is not `READY`, has no stored credential, or whose tunnel cannot be reached or has expired is
+A session that is not `READY`, has no stored capability, or whose tunnel cannot be reached or has expired is
 `session_access_unavailable` with the reason in the message.
 
 ### `GET /api/v1/sessions/{id}/metrics` → 200
@@ -398,7 +412,9 @@ rather than zero, which for a cumulative counter is a different claim. `at` is w
 here, so consecutive samples differentiate `cpuUsageUsec` into a rate. A session that is not running answers
 with an empty window rather than an error.
 
-### `GET /api/v1/sessions/history` → 200
+## Telemetry
+
+### `GET /api/v1/telemetry` → 200
 
 What this caller's finished sessions did, newest first and bounded. A run is named by the seq that
 ran it, so relaunching a session leaves the previous run behind rather than overwriting it, and deleting the
@@ -494,7 +510,7 @@ Sessions run over the caller's own Dev Tunnels account, which is a Microsoft or 
 and kept by the daemon under the caller's principal, sealed with a key the daemon holds. Nothing here returns
 the linked token. These routes sit behind the authentication boundary.
 
-### `GET /api/v1/tunnel/link` → 200
+### `GET /api/v1/tunnel` → 200
 
 ```json
 { "linked": true, "provider": "github", "account": "octocat", "linkedAt": "2026-09-17T10:00:00Z" }
@@ -503,7 +519,7 @@ the linked token. These routes sit behind the authentication boundary.
 `{ "linked": false }` when nothing is linked. `provider` is `microsoft` or `github`; `account` is the
 Microsoft username or the GitHub login when known.
 
-### `POST /api/v1/tunnel/link/start` → 200
+### `POST /api/v1/tunnel/authorizations` → 200
 
 ```json
 { "provider": "github" }
@@ -526,7 +542,7 @@ authorization the browser shows:
 `handle` is this daemon's own reference to the authorization; the device code itself never reaches the client.
 More than one start per second per caller is `429 rate_limited`.
 
-### `POST /api/v1/tunnel/link/poll/{handle}` → 200
+### `POST /api/v1/tunnel/authorizations/{handle}/poll` → 200
 
 Still waiting:
 
@@ -534,7 +550,7 @@ Still waiting:
 { "status": "pending", "intervalSeconds": 5 }
 ```
 
-Complete: the daemon has stored the credential and answers what `GET /api/v1/tunnel/link` would.
+Complete: the daemon has stored the credential and answers what `GET /api/v1/tunnel` would.
 
 ```json
 { "linked": true, "provider": "microsoft", "account": "someone@outlook.com", "linkedAt": "..." }
@@ -546,9 +562,9 @@ Polling faster than `intervalSeconds` is `429 rate_limited`. A denied authorizat
 `403 authorization_denied`; an expired one is `410 authorization_expired`. The handle is bound to the caller
 that started it and is discarded on any terminal outcome.
 
-### `DELETE /api/v1/tunnel/link` → 200
+### `DELETE /api/v1/tunnel` → 204
 
-Forgets the linked credential. Answers `{ "linked": false }`; deleting when nothing is linked is the same.
+Forgets the linked credential; deleting when nothing is linked is the same.
 
 ### Sessions without a link
 

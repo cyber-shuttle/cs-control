@@ -20,7 +20,7 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. csctl serve --oauth-authority ... --allowed-origin ...
+        1. csctl serve --oidc-client-id ... --custos-url ... --allowed-origin ...
         2. POST /api/v1/sessions with ...
         3. ...
     validations:
@@ -66,8 +66,8 @@ body:
     attributes:
       label: Logs
       description: >
-        csctl output and any session log tail. Remove OAuth access and ID tokens, Dev Tunnel connect and host
-        tokens, and Jupyter tokens before pasting.
+        csctl output and any session log tail. Remove OIDC ID tokens, Dev Tunnel connect and host tokens, and
+        Jupyter tokens before pasting.
       render: shell
   - type: markdown
     attributes:

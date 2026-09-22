@@ -23,7 +23,7 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
 ## Requirements
 
 - **macOS or Linux**, with an OpenSSH client on `PATH`. CI covers Linux only.
-- **Go 1.24 or newer.** Building from source is the only install path.
+- **Go 1.26 or newer.** Building from source is the only install path.
 - **A [CILogon](https://www.cilogon.org/) client, or another OIDC issuer configured the same way.** The
   client must have the device flow disabled and PKCE enabled, since the browser runs an authorization-code
   flow with PKCE and `csctl` finishes it. `--oidc-issuer` defaults to `https://cilogon.org`; the client ID
@@ -34,8 +34,8 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
   principal.
 - **A Microsoft or GitHub account entitled to
   [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview),** linked once through
-  `POST /api/v1/tunnel/link/start` and kept sealed under the caller's principal. Sessions run over that
-  account; a caller with no link is refused at session creation.
+  `POST /api/v1/tunnel/authorizations` and kept sealed under the caller's principal. Sessions run over that account;
+  a caller with no link is refused at session creation.
 - **An SSH-reachable Linux Slurm cluster** whose login node provides `sacctmgr`, `sinfo`, `sbatch`, `squeue`,
   `sacct`, `scancel`, `curl`, `tar`, `base64`, `od`, `install`, `printenv`, `sed` and `sort -V`, and whose
   nodes run Linux `x86_64` or `arm64` with `curl`.
@@ -52,7 +52,7 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
 ## Install
 
 ```bash
-go install github.com/cyber-shuttle/cs-control/cmd/csctl@latest
+go install github.com/cyber-shuttle/cs-control@latest
 ```
 
 `@latest` resolves to the newest tagged release. From a clone:
@@ -60,7 +60,7 @@ go install github.com/cyber-shuttle/cs-control/cmd/csctl@latest
 ```bash
 git clone https://github.com/cyber-shuttle/cs-control.git
 cd cs-control
-go build ./cmd/csctl
+go build .
 ```
 
 ## Quick start
@@ -75,12 +75,13 @@ csctl serve \
 ```
 
 `--oidc-client-id`, `--custos-url` and `CSCTL_OIDC_CLIENT_SECRET` are required; `--oidc-issuer` defaults to
-`https://cilogon.org`. `--allowed-origin` is repeatable and at least one is required; HTTPS origins and
-loopback HTTP origins are accepted, wildcards are not. `--listen` defaults to `127.0.0.1:8045` and must be an
-explicit loopback address.
+`https://cilogon.org`. Both service URLs must use HTTPS, and the discovered issuer must match exactly.
+`--allowed-origin` is repeatable and at least one is required; HTTPS origins and loopback HTTP origins are
+accepted, wildcards are not. `--listen` defaults to `127.0.0.1:8045` and must be an explicit loopback address.
 
-There are no CLI commands for hosts or sessions — a client drives the daemon over the API. Confirm it is
-listening and that the authentication boundary is in front of it:
+There are no CLI commands for keys, hosts, or sessions — a client drives the daemon over the API. Its routes are
+under `/api/v1/oauth`, `/api/v1/ssh`, `/api/v1/tunnel`, `/api/v1/sessions`, and `/api/v1/telemetry`; see the
+[API reference](docs/API.md). Confirm it is listening and that authentication is in front:
 
 ```console
 $ curl -si http://127.0.0.1:8045/api/v1/sessions | head -1
@@ -104,7 +105,8 @@ HTTP/1.1 401 Unauthorized
 
 Global flags precede the command. `--linkspan` is a remote path, absolute or anchored at `$HOME/`, resolved per
 host. Set `--devtunnel-management-url` to a regional `*.rel.tunnels.api.visualstudio.com` endpoint when the
-global cluster's tunnel quota is exhausted; it changes tunnel management only.
+global cluster's tunnel quota is exhausted; it changes tunnel management only. Management redirects retain
+authorization only between recognized HTTPS management hosts.
 
 ## What it runs on the cluster
 
@@ -129,15 +131,17 @@ a compute node. The batch script redirects the job's stdout and stderr to
 
 `~/.cybershuttle/control`, created and verified at mode `0700`:
 
-- `state.json` — non-secret scheduler, session and tunnel metadata
-- `credentials/` — the per-seq Dev Tunnel connect token and Jupyter token, mode `0600`
-- `hosts/<principal>/config` — each caller's own managed SSH host entries, mode `0600`
+- `state.db` — non-secret scheduler, session, tunnel, SSH host and login key metadata, in SQLite
+- `credentials/` — per-seq Dev Tunnel and Jupyter capabilities, mode `0600`
+- `hosts/<principal>/config` — each caller's own SSH host entries, rendered from `state.db`, mode `0600`
 - `hosts/<principal>/keys/<name>` — login keys the caller uploaded, mode `0600`
 - `hosts/<principal>/tunnel-link` — the caller's linked Dev Tunnels credential, sealed, mode `0600`
 - `tunnel-link.key` — the 32-byte key sealing every `tunnel-link` file, created at mode `0600` on first boot
 
-Each caller's SSH host entries live in their own `hosts/<principal>/config` inside a managed block; the API
-never reads or writes `~/.ssh/config` for the account `csctl` runs as.
+Each caller's SSH host entries live in `state.db`. They are rendered to that caller's `hosts/<principal>/config`
+for `ssh -F`; startup regenerates these files from committed rows and resolves interrupted key writes and deletions.
+The API never reads or writes `~/.ssh/config` for the account `csctl` runs as. A `state.db` without the
+current format marker is refused before anything else is touched.
 
 ## Documentation
 

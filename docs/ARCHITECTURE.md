@@ -4,31 +4,42 @@
 commands for hosts or sessions: `serve` starts the HTTP API and a browser or editor client drives everything
 over it.
 
-The handler stack is `authn.NewSignInRoutes(authn.NewOAuthBoundary(control.NewHTTPHandler(...)))`. The three
-sign-in routes are answered by the relay in front of the OAuth boundary; every other request, including the
-Dev Tunnels link routes, passes through it.
+Each subsystem exports its route table. `internal/router` unions them into one registry, rejects duplicate
+method-and-path pairs, and preserves the API's JSON 404 and 405 responses. `oauth.Service` contributes the three
+public sign-in routes and wraps the registry once; every other request passes through its identity boundary.
 
 ## Packages
 
-Each subsystem is a package. New code goes in the lowest layer that can hold it.
+`internal/` holds atomic packages with no HTTP surface of their own; `subsystems/` holds domains that own their
+wire shapes and logic. A subsystem imports `internal/*` only and never another subsystem: a cross-subsystem need
+is an interface the consumer declares (`session.RunnerProvider`, `session.TunnelCredentials`, `session.TunnelManager`)
+that `main.go` satisfies with `ssh.Configurations`, `tunnel.Service` and the Dev Tunnels client. New code goes
+in the lowest layer that can hold it.
 
 ```
-apierr               error shape, JSON response writers and strict decoding
-safeio               private files
-httpx                bounded client/body, redirect policy, outbound JSON GET
-sshconfig            reads the per-principal hosts config, writes only its own managed block, never runs ssh
-sshexec              argument vectors, control socket, bounded output
-devtunnel            Dev Tunnels management client and its URI/host policy
-credentialstore      one seq's connect and Jupyter tokens, held as one private file per seq
-authn                OAuth boundary, OIDC validation, Custos identity resolution, the sign-in relay, and the
-                     Dev Tunnels link broker with its sealed per-principal store
-control              session domain, store, reconcile, discovery, HTTP, marker-delimited remote output
-gateway              SSH authentication WebSocket route and its frames
-cmd/csctl            composition root
+internal/testutil    shared test helpers
+internal/router      route-table union, duplicate detection, method dispatch, and JSON route failures
+internal/security    security policy for opaque API errors, strict JSON, authenticated Principal context,
+                     protected files, bounded HTTP clients, and shared name predicates
+internal/db          the SQLite connection: pristine schema creation, format check, locking, and transactions
+internal/identity     OIDC discovery, validation and grants, plus bounded Custos identity lookup
+internal/ssh          bounded SSH execution, principal-scoped runners, PTY/WebSocket translation, and control masters
+internal/slurm        Slurm command construction, framed output parsing, validation, and scheduler value types
+internal/devtunnel    Dev Tunnels authorization and management protocols, validated wire types, and URI policy
+
+subsystems/oauth      inbound identity policy, sign-in routes, origins, CORS, bearer extraction, and principals
+subsystems/ssh        principal SSH hosts and keys, config rendering, Slurm discovery, live probes, authentication,
+                      and routes
+subsystems/tunnel     Dev Tunnels account linking, sealed principal-bound authorization state, refresh, and routes
+subsystems/session    session state, Slurm and tunnel lifecycles, protected capabilities, reconciliation, run
+                      records, logs, metrics, and routes
+subsystems/telemetry  the read-only run-history route over the session subsystem's records
+
+main.go               composition root, the csctl binary
 ```
 
-`control` names the SSH route interface it serves rather than importing `gateway`; `cmd/csctl` supplies the
-concrete gateway. Duplication belongs in a shared lower package rather than copied between two subsystems.
+Session, SSH, and tunnel subsystems give internal mechanisms domain meaning. OAuth establishes inbound identity.
+Duplication belongs in a shared `internal/` package rather than between subsystems.
 
 ## Session lifecycle
 
@@ -40,7 +51,7 @@ Create proceeds in this order:
 
 1. SSH discovery (`id`, `sacctmgr`, `sinfo`, `printenv HOME`) and `sbatch --test-only` against the candidate
    script.
-2. One creator-owned Dev Tunnel for the session seq, the seq credential written to disk, then
+2. One creator-owned Dev Tunnel for the session seq, the seq capability written to disk, then
    the session record persisted — durable before anything slow begins.
 3. Login-node preparation: Linkspan and the workflow document.
 4. `sbatch`, with the job name and the session identity on the command line.
@@ -48,10 +59,10 @@ Create proceeds in this order:
 Because the record is durable before preparation starts, preparation progress streams into the log tail the
 client is already polling rather than into a request that says nothing until it ends.
 
-Conclusive submission failure compensates tunnel and credential state. Ambiguous submission — anything other
+Conclusive submission failure compensates tunnel and capability state. Ambiguous submission — anything other
 than a refusal `sbatch` itself reported — stays durable for reconciliation, because the job may already be
-queued. Stop releases the session's tunnel and credential and asks the scheduler to cancel the job; the
-seq it ends is never reused.
+queued. Stop releases the session's tunnel and capability and asks the scheduler to cancel the job; the seq it
+ends is never reused.
 
 ### Seq and job names
 
@@ -115,14 +126,12 @@ state of its own. `STARTING` becomes `READY` once the job is running and its Lin
 log, the one sign the server is up. Scheduler state remains SSH/Slurm authoritative; Dev Tunnels management
 discovery supplies session endpoint metadata and is not a second readiness owner.
 
-Reconciliation is driven by reads, capped at one per second, and never runs more than once at a time. A slow
-background tick every 30 seconds runs the same reconciliation when nobody is reading, so a session whose owner
-closed the tab still reaches its terminal state.
+Reconciliation runs on a background tick every 30 seconds, never more than once at a time, so a session whose
+owner closed the tab still reaches its terminal state and no read ever waits on SSH.
 
 There is no push channel. `GET /api/v1/sessions` is the one read a client polls: it answers from persisted
-state, starts a reconciliation for the next poll to collect, and carries the caller's sessions and their
-startup log tails — filtered to the same owned set, because a tail is as private as the session that produced
-it. The strong `ETag` is taken over that filtered body, so it cannot match across principals, and a poll whose
+state and carries the caller's sessions and their startup log tails — filtered to the same owned set, because
+a tail is as private as the session that produced it. The strong `ETag` is taken over that filtered body, so it cannot match across principals, and a poll whose
 `If-None-Match` still matches is answered `304 Not Modified` with no body.
 
 ### Samples and run records
@@ -131,7 +140,7 @@ Two things about a running session are not scheduler state and are not reconcile
 
 Resource samples are read from the Linkspan the session is running, over the control port already declared
 on its own tunnel, once every five seconds. They are process-local and bounded to the last twenty, held beside
-the log tail rather than in `state.json`: a window on a running session is not a fact about it, and
+the log tail rather than in `state.db`: a window on a running session is not a fact about it, and
 rewriting persisted state every five seconds to hold one would be the wrong store. They are served on their
 own route for the same reason the poll is cheap — samples change on every tick, so folding them into
 `GET /api/v1/sessions` would defeat its `ETag` for exactly the sessions that have any. A missed sample is a
@@ -170,20 +179,19 @@ Sessions never run over the request's own bearer: that bearer identifies the cal
 A session instead runs over a Microsoft or GitHub Dev Tunnels account the caller links once through a device-
 code authorization the broker runs on their behalf, bound to their principal from the moment it starts. The
 credential the authorization produces is sealed with `nacl/secretbox` under a key generated once at
-`<state>/tunnel-link.key` and held at `<state>/hosts/<principal>/tunnel-link`, beside that principal's SSH
-host configuration and under the same per-principal hash. `Service.tunnelCredential` loads it, refreshing a
-Microsoft link within two minutes of expiry and rotating the stored refresh token; a GitHub token does not
-expire. `POST /api/v1/sessions` and `.../start` fail with 409 `tunnel_link_required` before anything is
-provisioned when the caller has linked nothing; `stop` and `delete` release best-effort, skipping the Dev
-Tunnels call rather than failing when no usable credential is available, and leave tunnel expiry as the
-backstop.
+`<state>/tunnel-link.key` and held at `<state>/hosts/<principal>/tunnel-link`, under the same per-principal hash
+as SSH state. The credentials broker loads and refreshes it on use. `POST /api/v1/sessions` and `.../start` fail
+with 409 `tunnel_link_required` before anything is provisioned when the caller has linked nothing; `stop` and
+`delete` release best-effort, skipping the Dev Tunnels call rather than failing when no usable credential is
+available, and leave tunnel expiry as the backstop.
 
 ## SSH configuration
 
 Every caller has their own host configuration, and nothing else. A principal's entries live in
-`<state>/hosts/<principal>/config`, named by a hash of the subject and tenant so an identifier from another
-system never becomes a path, and written atomically at mode `0600` between
-`# >>> cybershuttle managed >>>` and `# <<< cybershuttle managed <<<`.
+`state.db`'s `ssh_hosts` table. After every mutation, under the same lock, they are rendered whole to
+`<state>/hosts/<principal>/config`, written atomically at mode `0600`. The directory is named by a hash of the
+subject and tenant, so an identifier from another system never becomes a path. `session` never reads the file
+back. `internal/ssh` reads it only to check an alias exists before running `ssh -F` against it.
 
 This is a boundary, not a filing convention. `ssh` is invoked with `-F` naming that file, so an alias resolves
 through the configuration of the caller who added it and through no other. The account `csctl` runs as has no
@@ -192,16 +200,19 @@ callers may use the same alias name for different hosts. The control master is k
 well as the alias, so one caller authenticating a host never hands another an authenticated SSH login, and
 scheduler reconciliation, log tailing and accounting each run as the session's own owner.
 
-What this does not do: an `IdentityFile` may still name any path the daemon account can read, and there is no
-way to upload a key. Isolation is of configuration and of connections, not of the filesystem underneath them.
+A host may use an uploaded credential by name or an explicit `IdentityFile` path the daemon account can read.
+Credential files are principal-scoped and protected; explicit paths remain the caller's responsibility. Creation writes
+a staged key, commits its metadata, then promotes the key. Deletion first renames the key to a
+tombstone, then commits its metadata and host-reference changes. Startup resolves either interruption from the
+committed metadata.
 
 A pasted `ssh` command is parsed server-side into host, user, port, identity file and an allowlisted set of
 `-o` options — only how a connection authenticates or keeps itself alive. Anything that can run a local program
 or include more configuration is refused, and the browser never composes configuration text.
 
-`sshexec` builds fixed argument vectors rather than shell strings and multiplexes over an OpenSSH
-`ControlMaster` socket, with bounded output and timeouts. The interactive SSH authentication WebSocket is
-what establishes that master.
+`internal/ssh` builds fixed argument vectors rather than shell strings and owns bounded PTY/WebSocket and
+control-master mechanics. `subsystems/ssh` applies caller-scoped runners and public live-probe and interactive-
+authentication behavior.
 
 ## Local state
 
@@ -209,13 +220,22 @@ what establishes that master.
 
 | Path | Contents |
 | --- | --- |
-| `state.json` | non-secret scheduler, session and tunnel metadata, and the bounded record of what finished sessions did |
-| `hosts/` | one SSH host configuration per principal, the login keys they uploaded under `keys/`, and each principal's sealed `tunnel-link`, mode `0600` under a `0700` directory |
-| `credentials/` | per-seq Dev Tunnel connect token and Jupyter token, mode `0600` under a `0700` directory |
+| `state.db` | non-secret scheduler, session, tunnel, SSH host and login key metadata, and the bounded record of what finished sessions did |
+| `hosts/` | one SSH host configuration per principal, rendered from `state.db`, the login keys they uploaded under `keys/`, and each principal's sealed `tunnel-link`, mode `0600` under a `0700` directory |
+| `credentials/` | per-seq session capabilities: Dev Tunnel connect and Jupyter tokens, mode `0600` under `0700` |
 | `tunnel-link.key` | the 32-byte key every `tunnel-link` file is sealed with, mode `0600`, generated once at boot |
 
 The request's own bearer, and tunnel host and manage-ports credentials, are never persisted; the linked Dev
 Tunnels credential is the one third-party credential this daemon keeps, and only sealed.
+
+`state.db` holds a `schema_meta` format marker plus the tables each subsystem declares in its `schema.sql`:
+`sessions` and `runs` (JSON payload keyed by session ID or `(session_id, seq)`) and `ssh_hosts` and `ssh_keys`
+(keyed by `(principal, host)`, case-insensitive, or `(principal, name)`). A host payload is the same JSON the
+API returns for it. Queries live in each subsystem's `query.sql` and are compiled by sqlc; `internal/db` only opens
+the one WAL connection per state directory, runs every read-modify-write cycle behind one process and directory
+lock, and wraps writes in one transaction. Schema DDL runs only when no database exists; an existing database
+with any other format marker is refused before any credential file is created. Startup then recovers interrupted
+key writes and deletions and regenerates every rendered config from committed host rows. Nothing is migrated.
 
 ## Trust boundaries
 
@@ -225,10 +245,11 @@ Tunnels credential is the one third-party credential this daemon keeps, and only
   request carrying any other `Origin` is refused. Native clients may omit `Origin` on the authenticated API,
   but the pre-authentication sign-in routes require an exact allowed browser origin.
 - **One bearer, one identity authority.** Every request carries a signed OIDC ID token, cryptographically
-  validated against the configured issuer's discovery document and JWKS with the audience pinned to the
-  configured client ID. That is not itself the principal: the daemon calls `GET {custos-url}/me` with the
-  same bearer, and Custos is the sole authority over who that token belongs to. A token Custos does not
-  recognise is refused `401 identity_not_linked`.
+  validated against the configured issuer's discovery document and JWKS with exact issuer equality and the
+  audience pinned to the configured client ID. That is not itself the principal: the daemon calls
+  `GET {custos-url}/me` over HTTPS with the same bearer, allows only same-origin redirects, and treats Custos
+  as the sole authority over who that token belongs to. A token Custos does not recognise is refused
+  `401 identity_not_linked`.
 - **Ownership** is the Custos user id the token resolves to, under the fixed tenant `custos`. Session lists
   and their log tails are filtered to the owner; item and access reads reject a different principal.
 - **No ambient authentication.** There are no cookies, browser sign-in state, token URLs or static file serving, and
