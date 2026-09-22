@@ -1,6 +1,6 @@
 version: "2"
 sql:
-  - engine: sqlite
+  - engine: postgresql
     schema: subsystems/session/schema.sql
     queries: subsystems/session/query.sql
     gen:
@@ -12,7 +12,7 @@ sql:
           run: runRow
         output_db_file_name: sql.go
         output_models_file_name: sql_models.go
-  - engine: sqlite
+  - engine: postgresql
     schema: subsystems/ssh/schema.sql
     queries: subsystems/ssh/query.sql
     gen:

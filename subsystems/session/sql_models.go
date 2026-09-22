@@ -4,7 +4,12 @@
 
 package session
 
+import (
+	"database/sql"
+)
+
 type runRow struct {
+	Position  sql.NullInt64
 	SessionID string
 	Seq       int64
 	Owner     string

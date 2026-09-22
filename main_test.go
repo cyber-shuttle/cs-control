@@ -62,8 +62,10 @@ func TestServeValidatesOriginsBeforeListening(t *testing.T) {
 
 func TestServeRefusesIncompatibleStateBeforeCreatingCredentials(t *testing.T) {
 	t.Setenv("CSCTL_OIDC_CLIENT_SECRET", "the-client-secret")
+	dsn := testutil.Database(t)
+	t.Setenv("CSCTL_DATABASE_URL", dsn)
 	stateDir := t.TempDir()
-	database, err := db.Open(stateDir, "")
+	database, err := db.Open(dsn, stateDir, "")
 	testutil.Check(t, err)
 	testutil.Check(t, database.Tx(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`UPDATE schema_meta SET value = 'other' WHERE key = 'format'`)
@@ -88,6 +90,7 @@ func TestServeRefusesIncompatibleStateBeforeCreatingCredentials(t *testing.T) {
 func TestServeComponentsAlwaysApplyOAuthBoundary(t *testing.T) {
 	const allowedOrigin = "https://workspace.example.edu"
 	svcs := testServices(t, t.TempDir())
+	svcs.DatabaseURL = testutil.Database(t)
 	authentication, err := oauth.NewService("https://custos.example.edu", defaultOIDCIssuer, "the-client-id", "the-client-secret", []string{allowedOrigin}, nil)
 	testutil.Check(t, err)
 	components, err := newServeComponents(svcs, authentication)

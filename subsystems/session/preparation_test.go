@@ -1,7 +1,7 @@
 // Session preparation tests defend request, path, resource, script, and side-effect boundaries.
 // Remote identity and workspace expressions cannot escape their validated forms.
 // The generated batch script carries identity but never embeds credentials.
-// Failed validation leaves SQLite, tunnels, capabilities, and Slurm submission untouched.
+// Failed validation leaves the database, tunnels, capabilities, and Slurm submission untouched.
 package session
 
 import (

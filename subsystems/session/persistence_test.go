@@ -17,7 +17,7 @@ func sessionIDFor(n int) string { return fmt.Sprintf("s-%012x", n) }
 func testSessionStore(t *testing.T) Store {
 	t.Helper()
 	dir := t.TempDir()
-	database, err := db.Open(dir, Schema)
+	database, err := db.Open(testutil.Database(t), dir, Schema)
 	testutil.Check(t, err)
 	t.Cleanup(func() { testutil.Check(t, database.Close()) })
 	return Store{Dir: dir, Database: database}

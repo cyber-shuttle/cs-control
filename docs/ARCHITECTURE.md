@@ -21,7 +21,7 @@ internal/testutil    shared test helpers
 internal/router      route-table union, duplicate detection, method dispatch, and JSON route failures
 internal/security    security policy for opaque API errors, strict JSON, authenticated Principal context,
                      protected files, bounded HTTP clients, and shared name predicates
-internal/db          the SQLite connection: pristine schema creation, format check, locking, and transactions
+internal/db          the Postgres connection: pristine schema creation, format check, locking, and transactions
 internal/identity     OIDC discovery, validation and grants, plus bounded Custos identity lookup
 internal/ssh          bounded SSH execution, principal-scoped runners, PTY/WebSocket translation, and control masters
 internal/slurm        Slurm command construction, framed output parsing, validation, and scheduler value types
@@ -140,7 +140,7 @@ Two things about a running session are not scheduler state and are not reconcile
 
 Resource samples are read from the Linkspan the session is running, over the control port already declared
 on its own tunnel, once every five seconds. They are process-local and bounded to the last twenty, held beside
-the log tail rather than in `state.db`: a window on a running session is not a fact about it, and
+the log tail rather than in the database: a window on a running session is not a fact about it, and
 rewriting persisted state every five seconds to hold one would be the wrong store. They are served on their
 own route for the same reason the poll is cheap — samples change on every tick, so folding them into
 `GET /api/v1/sessions` would defeat its `ETag` for exactly the sessions that have any. A missed sample is a
@@ -188,7 +188,7 @@ available, and leave tunnel expiry as the backstop.
 ## SSH configuration
 
 Every caller has their own host configuration, and nothing else. A principal's entries live in
-`state.db`'s `ssh_hosts` table. After every mutation, under the same lock, they are rendered whole to
+the `ssh_hosts` table. After every mutation, under the same lock, they are rendered whole to
 `<state>/hosts/<principal>/config`, written atomically at mode `0600`. The directory is named by a hash of the
 subject and tenant, so an identifier from another system never becomes a path. `session` never reads the file
 back. `internal/ssh` reads it only to check an alias exists before running `ssh -F` against it.
@@ -220,21 +220,22 @@ authentication behavior.
 
 | Path | Contents |
 | --- | --- |
-| `state.db` | non-secret scheduler, session, tunnel, SSH host and login key metadata, and the bounded record of what finished sessions did |
-| `hosts/` | one SSH host configuration per principal, rendered from `state.db`, the login keys they uploaded under `keys/`, and each principal's sealed `tunnel-link`, mode `0600` under a `0700` directory |
+| `hosts/` | one SSH host configuration per principal, rendered from the database, the login keys they uploaded under `keys/`, and each principal's sealed `tunnel-link`, mode `0600` under a `0700` directory |
 | `credentials/` | per-seq session capabilities: Dev Tunnel connect and Jupyter tokens, mode `0600` under `0700` |
 | `tunnel-link.key` | the 32-byte key every `tunnel-link` file is sealed with, mode `0600`, generated once at boot |
 
 The request's own bearer, and tunnel host and manage-ports credentials, are never persisted; the linked Dev
 Tunnels credential is the one third-party credential this daemon keeps, and only sealed.
 
-`state.db` holds a `schema_meta` format marker plus the tables each subsystem declares in its `schema.sql`:
+The Postgres schema named by `CSCTL_DATABASE_URL` holds non-secret scheduler, session, tunnel, SSH host and
+login key metadata and the bounded record of what finished sessions did: a `schema_meta` format marker plus the
+tables each subsystem declares in its `schema.sql`:
 `sessions` and `runs` (JSON payload keyed by session ID or `(session_id, seq)`) and `ssh_hosts` and `ssh_keys`
 (keyed by `(principal, host)`, case-insensitive, or `(principal, name)`). A host payload is the same JSON the
 API returns for it. Queries live in each subsystem's `query.sql` and are compiled by sqlc; `internal/db` only opens
-the one WAL connection per state directory, runs every read-modify-write cycle behind one process and directory
-lock, and wraps writes in one transaction. Schema DDL runs only when no database exists; an existing database
-with any other format marker is refused before any credential file is created. Startup then recovers interrupted
+one connection, runs every read-modify-write cycle behind one process lock and the state directory's file lock,
+and wraps writes in one transaction. Schema DDL runs, in one transaction, only in an empty schema; a schema with
+any other format marker is refused unchanged before any credential file is created. Startup then recovers interrupted
 key writes and deletions and regenerates every rendered config from committed host rows. Nothing is migrated.
 
 ## Trust boundaries
