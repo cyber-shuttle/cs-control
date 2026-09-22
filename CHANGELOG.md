@@ -11,6 +11,10 @@ Notable changes to CyberShuttle Control. The format follows
   `--oidc-client-id`, `--custos-url`, `CSCTL_OIDC_CLIENT_SECRET` and at least one exact `--allowed-origin`.
   Every route lives under `/api/v1`, one subsystem per prefix: `oauth`, `ssh`, `tunnel`, `sessions` and
   `telemetry`.
+- Device sign-in for clients with no redirect URI: `POST /oauth/authorizations` starts the issuer's device
+  grant and `POST /oauth/authorizations/{handle}/poll` answers a pending authorization or the same credential
+  the browser flow returns. The device code stays on the daemon; an editor extension shows a user code instead
+  of hosting a callback.
 - Sign-in relay: `GET /oauth/config`, `POST /oauth/exchange` and `POST /oauth/refresh` finish the browser's
   CILogon (or another configured OIDC issuer) authorization-code-with-PKCE flow. Every other request carries
   one `Authorization: Bearer <ID token>`, validated against the issuer and resolved to a principal through

@@ -25,10 +25,11 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
 - **macOS or Linux**, with an OpenSSH client on `PATH`. CI covers Linux only.
 - **Go 1.26 or newer.** Building from source is the only install path.
 - **A [CILogon](https://www.cilogon.org/) client, or another OIDC issuer configured the same way.** The
-  client must have the device flow disabled and PKCE enabled, since the browser runs an authorization-code
-  flow with PKCE and `csctl` finishes it. `--oidc-issuer` defaults to `https://cilogon.org`; the client ID
-  goes on `--oidc-client-id` and the client secret in `CSCTL_OIDC_CLIENT_SECRET`, since only the daemon holds
-  it.
+  client must have PKCE and the device flow enabled: a browser runs an authorization-code flow with PKCE that
+  `csctl` finishes, and a client that cannot receive a redirect, such as an editor extension, signs in from a
+  user code instead. A browser redirect URI must sit on an allowed origin; device sign-in registers none.
+  `--oidc-issuer` defaults to `https://cilogon.org`; the client ID goes on `--oidc-client-id` and the client
+  secret in `CSCTL_OIDC_CLIENT_SECRET`, since only the daemon holds it.
 - **A [Custos](https://custos.cyberinfrastructure.org/) instance** the resolved identity is checked against:
   `--custos-url` names it, and the daemon calls `GET {custos-url}/me` with the caller's bearer to resolve the
   principal.
