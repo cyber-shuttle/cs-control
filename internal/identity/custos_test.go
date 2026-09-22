@@ -47,7 +47,10 @@ func TestCustosResolverCachesALinkedUser(t *testing.T) {
 }
 
 func TestCustosRequiresAnHTTPSBaseURL(t *testing.T) {
-	for _, raw := range []string{"", "http://custos.example", "https://user@custos.example", "https://custos.example?query=1", "https://custos.example#fragment"} {
+	if _, err := NewCustos("http://127.0.0.1:8100", nil); err != nil {
+		t.Fatalf("rejected loopback HTTP Custos URL: %v", err)
+	}
+	for _, raw := range []string{"", "http://custos.example", "http://localhost:8100", "https://user@custos.example", "https://custos.example?query=1", "https://custos.example#fragment"} {
 		if _, err := NewCustos(raw, nil); err == nil {
 			t.Fatalf("accepted Custos URL %q", raw)
 		}

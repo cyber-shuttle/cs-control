@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -45,8 +46,13 @@ type Custos struct {
 
 func NewCustos(baseURL string, client *http.Client) (*Custos, error) {
 	parsed, err := url.Parse(baseURL)
-	if err != nil || baseURL != strings.TrimSpace(baseURL) || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
-		return nil, errors.New("Custos URL must be an HTTPS URL")
+	if err != nil {
+		return nil, errors.New("Custos URL must be an HTTPS URL, or HTTP on a loopback address")
+	}
+	ip := net.ParseIP(parsed.Hostname())
+	secure := parsed.Scheme == "https" || (parsed.Scheme == "http" && ip != nil && ip.IsLoopback())
+	if baseURL != strings.TrimSpace(baseURL) || !secure || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
+		return nil, errors.New("Custos URL must be an HTTPS URL, or HTTP on a loopback address")
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/me"
 	return &Custos{
