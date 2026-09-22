@@ -1,4 +1,4 @@
-// Package main is csctl, a single binary that runs on a researcher's own machine and binds to loopback.
+// Package main is cs, a single binary that runs on a researcher's own machine and binds to loopback.
 // run dispatches the CLI; serve validates before listening. newServeComponents composes authentication, SSH,
 // session, and tunnel-link owners over one state directory and closes them on failure or shutdown.
 package main
@@ -19,16 +19,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/db"
-	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
-	"github.com/cyber-shuttle/cs-control/internal/router"
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
-	"github.com/cyber-shuttle/cs-control/subsystems/oauth"
-	"github.com/cyber-shuttle/cs-control/subsystems/session"
-	sshapi "github.com/cyber-shuttle/cs-control/subsystems/ssh"
-	"github.com/cyber-shuttle/cs-control/subsystems/telemetry"
-	"github.com/cyber-shuttle/cs-control/subsystems/tunnel"
+	"github.com/cyber-shuttle/cs-plane/internal/db"
+	"github.com/cyber-shuttle/cs-plane/internal/devtunnel"
+	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/subsystems/oauth"
+	"github.com/cyber-shuttle/cs-plane/subsystems/session"
+	sshapi "github.com/cyber-shuttle/cs-plane/subsystems/ssh"
+	"github.com/cyber-shuttle/cs-plane/subsystems/telemetry"
+	"github.com/cyber-shuttle/cs-plane/subsystems/tunnel"
 )
 
 const (
@@ -40,27 +40,27 @@ const (
 	serveShutdownTimeout          = 25 * time.Second
 )
 
-func init() { security.UserAgent = "cs-control/" + Version }
+func init() { security.UserAgent = "cs-plane/" + Version }
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  csctl [global options] serve --oidc-client-id CLIENT_ID --custos-url URL \
+  cs [global options] serve --oidc-client-id CLIENT_ID --custos-url URL \
       --allowed-origin ORIGIN [--allowed-origin ORIGIN ...]
-  csctl help
-  csctl version
+  cs help
+  cs version
 
 Identity (Custos login):
   --oidc-issuer ISSUER (default https://cilogon.org)
   --oidc-client-id CLIENT_ID (required)
   --custos-url URL (required), e.g. https://custos.cybershuttle.org
-  CSCTL_OIDC_CLIENT_SECRET=SECRET (required, for the sign-in relay's token exchange)
+  CS_OIDC_CLIENT_SECRET=SECRET (required, for the sign-in relay's token exchange)
 
 State:
-  CSCTL_DATABASE_URL=URL (required), a Postgres URL whose search_path names the schema csctl owns
+  CS_DATABASE_URL=URL (required), a Postgres URL whose search_path names the schema cs owns
 
 Trusted session configuration:
-  --linkspan PATH or CSCTL_LINKSPAN=PATH
-  --devtunnel-management-url URL or CSCTL_DEVTUNNEL_MANAGEMENT_URL=URL
+  --linkspan PATH or CS_LINKSPAN=PATH
+  --devtunnel-management-url URL or CS_DEVTUNNEL_MANAGEMENT_URL=URL
   Linkspan defaults to `+session.DefaultLinkspanPath+`, which each host resolves
   against its own home and which creating a session installs when missing.`)
 }
@@ -73,7 +73,7 @@ func usageError() error {
 func defaultStateDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".cs-control"
+		return ".cs-plane"
 	}
 	return filepath.Join(home, ".cybershuttle", "control")
 }
@@ -145,7 +145,7 @@ func validateLoopbackListen(address string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return errors.New("csctl serve only listens on an explicit loopback address")
+		return errors.New("cs serve only listens on an explicit loopback address")
 	}
 	return nil
 }
@@ -179,13 +179,13 @@ func runServe(ctx context.Context, svcs services, args []string, listen func(str
 	if strings.TrimSpace(*custosURL) == "" {
 		return errors.New("--custos-url is required")
 	}
-	oidcClientSecret := os.Getenv("CSCTL_OIDC_CLIENT_SECRET")
+	oidcClientSecret := os.Getenv("CS_OIDC_CLIENT_SECRET")
 	if strings.TrimSpace(oidcClientSecret) == "" {
-		return errors.New("CSCTL_OIDC_CLIENT_SECRET is required")
+		return errors.New("CS_OIDC_CLIENT_SECRET is required")
 	}
-	svcs.DatabaseURL = os.Getenv("CSCTL_DATABASE_URL")
+	svcs.DatabaseURL = os.Getenv("CS_DATABASE_URL")
 	if strings.TrimSpace(svcs.DatabaseURL) == "" {
-		return errors.New("CSCTL_DATABASE_URL is required")
+		return errors.New("CS_DATABASE_URL is required")
 	}
 	authentication, err := oauth.NewService(*custosURL, *oidcIssuer, *oidcClientID, oidcClientSecret, allowedOrigins, nil)
 	if err != nil {
@@ -230,11 +230,11 @@ func runServe(ctx context.Context, svcs services, args []string, listen func(str
 }
 
 func run(ctx context.Context, args []string) error {
-	global := flag.NewFlagSet("csctl", flag.ContinueOnError)
+	global := flag.NewFlagSet("cs", flag.ContinueOnError)
 	global.SetOutput(os.Stderr)
 	global.Usage = printUsage
-	linkspan := global.String("linkspan", cmp.Or(os.Getenv("CSCTL_LINKSPAN"), session.DefaultLinkspanPath), "remote Linkspan path, absolute or anchored at $HOME/; a missing one is installed there")
-	devTunnelManagementURL := global.String("devtunnel-management-url", cmp.Or(os.Getenv("CSCTL_DEVTUNNEL_MANAGEMENT_URL"), defaultDevTunnelManagementURL), "recognized HTTPS Dev Tunnels management endpoint")
+	linkspan := global.String("linkspan", cmp.Or(os.Getenv("CS_LINKSPAN"), session.DefaultLinkspanPath), "remote Linkspan path, absolute or anchored at $HOME/; a missing one is installed there")
+	devTunnelManagementURL := global.String("devtunnel-management-url", cmp.Or(os.Getenv("CS_DEVTUNNEL_MANAGEMENT_URL"), defaultDevTunnelManagementURL), "recognized HTTPS Dev Tunnels management endpoint")
 	if err := global.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -284,7 +284,7 @@ func main() {
 	err := run(ctx, os.Args[1:])
 	cancel()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "csctl:", err)
+		fmt.Fprintln(os.Stderr, "cs:", err)
 		os.Exit(1)
 	}
 }

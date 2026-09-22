@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func TestDiscoverRejectsUnsafeRemoteUsernameBeforeSacctmgr(t *testing.T) {
@@ -136,14 +136,14 @@ func TestProvisionScriptGuardsItsArgumentVector(t *testing.T) {
 	workflow := filepath.Join(home, ".cybershuttle", "sessions", "s-012345abcdef", "workflow.yaml")
 	document := base64.StdEncoding.EncodeToString([]byte("workflow: yes\n"))
 
-	output, err := runProvisionScript(t, "csctl-provision", home, linkspan, workflow, document)
+	output, err := runProvisionScript(t, "cs-provision", home, linkspan, workflow, document)
 	if err != nil || !strings.Contains(output, "provision=complete") {
 		t.Fatalf("the vector provisionSession sends was refused: %v\n%s", err, output)
 	}
 
 	for _, wrong := range [][]string{
-		{"csctl-provision", home, linkspan, workflow},
-		{"not-csctl-provision", home, linkspan, workflow, document},
+		{"cs-provision", home, linkspan, workflow},
+		{"not-cs-provision", home, linkspan, workflow, document},
 	} {
 		output, err := runProvisionScript(t, wrong...)
 		if err == nil || provisionOutcome(output)["error"] != "arguments" {

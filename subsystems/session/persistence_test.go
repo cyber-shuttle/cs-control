@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/db"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/db"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func sessionIDFor(n int) string { return fmt.Sprintf("s-%012x", n) }

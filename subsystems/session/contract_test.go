@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
-	"github.com/cyber-shuttle/cs-control/internal/router"
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/devtunnel"
+	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func serviceHandler(t *testing.T, service *Service) http.Handler {
@@ -113,7 +113,7 @@ func TestHTTPSessionListReturnsCachedStateWhileRefreshBlocks(t *testing.T) {
 			t.Fatal(response.Code)
 		}
 	}
-	if data, _ := os.ReadFile(logPath); strings.Count(string(data), "csctl-session-status") != 1 {
+	if data, _ := os.ReadFile(logPath); strings.Count(string(data), "cs-session-status") != 1 {
 		t.Fatalf("polling launched SSH refreshes: %s", data)
 	}
 	testutil.Check(t, os.WriteFile(release, []byte("ok"), 0o600))

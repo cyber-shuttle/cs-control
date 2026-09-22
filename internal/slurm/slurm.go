@@ -16,12 +16,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
 )
 
 const (
-	discoveryMarkerPrefix = "__CSCTL_DSC_6f1c9a7e4b2d8053_"
+	discoveryMarkerPrefix = "__CS_DSC_6f1c9a7e4b2d8053_"
 	markerUser            = discoveryMarkerPrefix + "USER__"
 	markerAccounts        = discoveryMarkerPrefix + "ACCOUNTS__"
 	markerPartitions      = discoveryMarkerPrefix + "PARTITIONS__"
@@ -32,7 +32,7 @@ const (
 	markerErrorPartitions = discoveryMarkerPrefix + "ERROR_PARTITIONS__"
 	markerErrorHome       = discoveryMarkerPrefix + "ERROR_HOME__"
 
-	statusMarkerPrefix     = "__CSCTL_S"
+	statusMarkerPrefix     = "__CS_S"
 	statusMarkerCancel     = statusMarkerPrefix + "CANCEL__"
 	statusMarkerQueue      = statusMarkerPrefix + "QUEUE__"
 	statusMarkerAccounting = statusMarkerPrefix + "ACCT__"
@@ -45,17 +45,17 @@ LC_ALL=C
 LANG=C
 export LC_ALL LANG
 printf '%s\n' '` + markerUser + `'
-if csctl_user=$(id -un); then :; else
+if cs_user=$(id -un); then :; else
   printf '%s\n' '` + markerErrorUser + `'
   exit 71
 fi
-case "$csctl_user" in
+case "$cs_user" in
   ''|*[!A-Za-z0-9_.-]*) printf '%s\n' '` + markerErrorUser + `'; exit 72 ;;
 esac
-[ "${#csctl_user}" -le 64 ] || { printf '%s\n' '` + markerErrorUser + `'; exit 72; }
-printf '%s\n' "$csctl_user"
+[ "${#cs_user}" -le 64 ] || { printf '%s\n' '` + markerErrorUser + `'; exit 72; }
+printf '%s\n' "$cs_user"
 printf '%s\n' '` + markerAccounts + `'
-sacctmgr show associations where "user=$csctl_user" format=Account -p || {
+sacctmgr show associations where "user=$cs_user" format=Account -p || {
   printf '%s\n' '` + markerErrorAccounts + `'
   exit 73
 }
@@ -360,7 +360,7 @@ func statusScript(jobs []Job, now time.Time) string {
 		if job.ID == "" {
 			key, flag, value = "name:"+job.Name, "--name=", job.Name
 		}
-		fmt.Fprintf(&script, "csctl_cancel=$(scancel %s%s 2>&1) || printf '%%s|%%s\\n' %s \"$(printf '%%s' \"$csctl_cancel\" | tr '\\n|' '  ')\"\n",
+		fmt.Fprintf(&script, "cs_cancel=$(scancel %s%s 2>&1) || printf '%%s|%%s\\n' %s \"$(printf '%%s' \"$cs_cancel\" | tr '\\n|' '  ')\"\n",
 			flag, ssh.ShellQuote(value), ssh.ShellQuote(key))
 	}
 	marker(statusMarkerQueue)
@@ -381,7 +381,7 @@ func statusScript(jobs []Job, now time.Time) string {
 }
 
 func Observe(ctx context.Context, runner ssh.Runner, host string, jobs []Job, now time.Time) ([]JobStatus, error) {
-	output, err := runner.Run(ctx, host, strings.NewReader(statusScript(jobs, now)), "sh", "-s", "--", "csctl-session-status")
+	output, err := runner.Run(ctx, host, strings.NewReader(statusScript(jobs, now)), "sh", "-s", "--", "cs-session-status")
 	if err != nil {
 		return nil, err
 	}

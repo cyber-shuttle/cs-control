@@ -23,7 +23,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
 	cryptossh "golang.org/x/crypto/ssh"
 )
 
@@ -259,7 +259,7 @@ func (r Runner) identity(ctx context.Context, alias string) (string, error) {
 }
 
 func (r Runner) privateControlPath(baseName string) (string, error) {
-	name := fmt.Sprintf("csctl-%d", os.Getuid())
+	name := fmt.Sprintf("cs-%d", os.Getuid())
 	roots := []string{os.TempDir()}
 	if filepath.Clean(roots[0]) != "/tmp" {
 		roots = append(roots, "/tmp")

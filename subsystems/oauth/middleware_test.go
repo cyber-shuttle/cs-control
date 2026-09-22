@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cyber-shuttle/cs-control/internal/router"
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 var testPrincipal = security.Principal{Subject: "test-owner", Tenant: "test-tenant"}

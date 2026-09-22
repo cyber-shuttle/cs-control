@@ -16,15 +16,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cyber-shuttle/cs-control/internal/db"
-	"github.com/cyber-shuttle/cs-control/internal/router"
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
-	"github.com/cyber-shuttle/cs-control/subsystems/oauth"
-	"github.com/cyber-shuttle/cs-control/subsystems/session"
-	sshapi "github.com/cyber-shuttle/cs-control/subsystems/ssh"
-	"github.com/cyber-shuttle/cs-control/subsystems/telemetry"
-	"github.com/cyber-shuttle/cs-control/subsystems/tunnel"
+	"github.com/cyber-shuttle/cs-plane/internal/db"
+	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/subsystems/oauth"
+	"github.com/cyber-shuttle/cs-plane/subsystems/session"
+	sshapi "github.com/cyber-shuttle/cs-plane/subsystems/ssh"
+	"github.com/cyber-shuttle/cs-plane/subsystems/telemetry"
+	"github.com/cyber-shuttle/cs-plane/subsystems/tunnel"
 )
 
 func testServices(t *testing.T, stateDir string) services {
@@ -37,7 +37,7 @@ func testServices(t *testing.T, stateDir string) services {
 }
 
 func TestServeValidatesOriginsBeforeListening(t *testing.T) {
-	t.Setenv("CSCTL_OIDC_CLIENT_SECRET", "the-client-secret")
+	t.Setenv("CS_OIDC_CLIENT_SECRET", "the-client-secret")
 	oidcArgs := []string{"--oidc-client-id", "the-client-id", "--custos-url", "https://custos.example.edu"}
 	for _, args := range [][]string{
 		oidcArgs,
@@ -61,9 +61,9 @@ func TestServeValidatesOriginsBeforeListening(t *testing.T) {
 }
 
 func TestServeRefusesIncompatibleStateBeforeCreatingCredentials(t *testing.T) {
-	t.Setenv("CSCTL_OIDC_CLIENT_SECRET", "the-client-secret")
+	t.Setenv("CS_OIDC_CLIENT_SECRET", "the-client-secret")
 	dsn := testutil.Database(t)
-	t.Setenv("CSCTL_DATABASE_URL", dsn)
+	t.Setenv("CS_DATABASE_URL", dsn)
 	stateDir := t.TempDir()
 	database, err := db.Open(dsn, stateDir, "")
 	testutil.Check(t, err)

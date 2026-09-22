@@ -19,9 +19,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/slurm"
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/slurm"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
 )
 
 const (
@@ -63,39 +63,39 @@ type sessionLogs struct {
 
 const (
 	maxSessionLogCollections = 4
-	sessionLogMarkerPrefix   = "__CSCTL_SESSION_LOG__"
+	sessionLogMarkerPrefix   = "__CS_SESSION_LOG__"
 )
 
 const sessionLogTailScript = `set -eu
 [ "$#" -ge 3 ]
-[ "$1" = csctl-session-log-tail ]
+[ "$1" = cs-session-log-tail ]
 shift
 [ "$#" -le 8 ]
 [ $(( $# % 2 )) -eq 0 ]
 while [ "$#" -gt 0 ]; do
-  csctl_session_id=$1
-  csctl_seq=$2
+  cs_session_id=$1
+  cs_seq=$2
   shift 2
-  case "$csctl_session_id" in
+  case "$cs_session_id" in
     s-????????????) ;;
     *) exit 64 ;;
   esac
-  case "${csctl_session_id#s-}" in
+  case "${cs_session_id#s-}" in
     *[!a-f0-9]*) exit 64 ;;
   esac
-  case "$csctl_seq" in
+  case "$cs_seq" in
     ''|*[!0-9]*) exit 64 ;;
   esac
-  [ "$csctl_seq" -ge 1 ] || exit 64
-  for csctl_stream in stdout stderr; do
-    case "$csctl_stream" in
-      stdout) csctl_suffix=out ;;
-      stderr) csctl_suffix=err ;;
+  [ "$cs_seq" -ge 1 ] || exit 64
+  for cs_stream in stdout stderr; do
+    case "$cs_stream" in
+      stdout) cs_suffix=out ;;
+      stderr) cs_suffix=err ;;
     esac
-    csctl_log_path=$HOME/.cybershuttle/logs/$csctl_session_id-$csctl_seq.$csctl_suffix
-    printf '` + sessionLogMarkerPrefix + `|%s|%s\n' "$csctl_session_id" "$csctl_stream"
-    if [ -f "$csctl_log_path" ] && [ ! -L "$csctl_log_path" ]; then
-      tail -n 100 -- "$csctl_log_path" | tail -c 16384 | od -An -v -tx1 | tr -d ' \n'
+    cs_log_path=$HOME/.cybershuttle/logs/$cs_session_id-$cs_seq.$cs_suffix
+    printf '` + sessionLogMarkerPrefix + `|%s|%s\n' "$cs_session_id" "$cs_stream"
+    if [ -f "$cs_log_path" ] && [ ! -L "$cs_log_path" ]; then
+      tail -n 100 -- "$cs_log_path" | tail -c 16384 | od -An -v -tx1 | tr -d ' \n'
     fi
     printf '\n'
   done
@@ -276,7 +276,7 @@ func (s Service) readRemoteSessionTails(ctx context.Context, host string, target
 	if len(targets) == 0 || len(targets) > maxSessionLogCollections {
 		return nil, errors.New("session log tail request must contain one to four IDs")
 	}
-	args := []string{"sh", "-s", "--", "csctl-session-log-tail"}
+	args := []string{"sh", "-s", "--", "cs-session-log-tail"}
 	requested := make(map[string]bool, len(targets))
 	for _, target := range targets {
 		if !idPattern.MatchString(target.id) || target.seq < 1 || requested[target.id] {

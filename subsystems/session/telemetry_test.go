@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 const (
@@ -47,7 +47,7 @@ func sameLogLine(line sessionLogLine, stream, text string) bool {
 
 func remoteSessionLogTail(t *testing.T, home, id string, seq int) string {
 	t.Helper()
-	cmd := exec.Command("sh", "-s", "--", "csctl-session-log-tail", id, strconv.Itoa(seq))
+	cmd := exec.Command("sh", "-s", "--", "cs-session-log-tail", id, strconv.Itoa(seq))
 	cmd.Stdin = strings.NewReader(sessionLogTailScript)
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	output, err := cmd.Output()
@@ -186,7 +186,7 @@ func TestSessionLogTailScriptWorstCaseStaysUnderTheRemoteOutputCap(t *testing.T)
 	logDir := filepath.Join(home, ".cybershuttle", "logs")
 	testutil.Check(t, os.MkdirAll(logDir, 0o700))
 	huge := bytes.Repeat([]byte("x"), sshMaxOutput)
-	args := []string{"csctl-session-log-tail"}
+	args := []string{"cs-session-log-tail"}
 	for i := 0; i < maxSessionLogCollections; i++ {
 		id := fmt.Sprintf("s-%012x", i)
 		seq := i + 1

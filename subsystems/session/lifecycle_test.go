@@ -20,10 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/devtunnel"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func fakeSSH(t *testing.T) (string, string, string) {
@@ -53,24 +53,24 @@ alias=$1; shift
 [ "$#" -eq 1 ] || { echo "expected one OpenSSH remote command argument" >&2; exit 2; }
 wire_command=$1
 printf '%s|%s\n' "$alias" "$wire_command" >> "$FAKE_COMMAND_LOG"
-if printf '%s' "$wire_command" | grep -q 'csctl-session-log-tail'; then
+if printf '%s' "$wire_command" | grep -q 'cs-session-log-tail'; then
   cat > "${FAKE_SESSION_LOG_SCRIPT:-/dev/null}"
   eval "set -- $wire_command"
   shift 4
   [ -z "${FAKE_SESSION_LOG_BANNER:-}" ] || printf '%b\n' "$FAKE_SESSION_LOG_BANNER"
   while [ "$#" -gt 0 ]; do
     session_id=$1; shift 2
-    printf '__CSCTL_SESSION_LOG__|%s|stdout\n' "$session_id"
+    printf '__CS_SESSION_LOG__|%s|stdout\n' "$session_id"
     printf '%s' "${FAKE_SESSION_STDOUT:-}" | od -An -v -tx1 | tr -d ' \n'
-    printf '\n__CSCTL_SESSION_LOG__|%s|stderr\n' "$session_id"
+    printf '\n__CS_SESSION_LOG__|%s|stderr\n' "$session_id"
     printf '%s' "${FAKE_SESSION_STDERR:-}" | od -An -v -tx1 | tr -d ' \n'
     printf '\n'
   done
   exit 0
 fi
-if [ "$wire_command" = "'sh' '-s' '--' 'csctl-session-status'" ]; then
+if [ "$wire_command" = "'sh' '-s' '--' 'cs-session-status'" ]; then
   payload=$(cat)
-  printf '%s\n__CSCTL_SCRIPT_END__\n' "$payload" >> "$FAKE_STATUS_SCRIPT_LOG"
+  printf '%s\n__CS_SCRIPT_END__\n' "$payload" >> "$FAKE_STATUS_SCRIPT_LOG"
   query_count=0; [ ! -f "$FAKE_SCHEDULER_QUERY_COUNT" ] || query_count=$(cat "$FAKE_SCHEDULER_QUERY_COUNT")
   query_count=$((query_count + 1)); printf '%s\n' "$query_count" > "$FAKE_SCHEDULER_QUERY_COUNT"
   job_id=12345; [ ! -f "$FAKE_ACCEPTED_JOB_ID" ] || job_id=$(cat "$FAKE_ACCEPTED_JOB_ID")
@@ -82,19 +82,19 @@ if [ "$wire_command" = "'sh' '-s' '--' 'csctl-session-status'" ]; then
   while [ -n "${FAKE_STATUS_RELEASE:-}" ] && [ ! -e "$FAKE_STATUS_RELEASE" ]; do sleep .02; done
   [ "${FAKE_STATUS_FAIL:-0}" = 0 ] || { printf 'scheduler unavailable\n' >&2; exit 1; }
   [ -z "${FAKE_STATUS_BANNER:-}" ] || printf '%b\n' "$FAKE_STATUS_BANNER"
-  printf '__CSCTL_SCANCEL__\n'
+  printf '__CS_SCANCEL__\n'
   [ -z "${FAKE_CANCEL_ERRORS:-}" ] || printf '%b\n' "$FAKE_CANCEL_ERRORS"
   if [ -n "${FAKE_STATUS_LINES+x}" ]; then
-    printf '__CSCTL_SQUEUE__\n%b\n__CSCTL_SACCT__\n%b\n' "${FAKE_QUEUE_LINES-$FAKE_STATUS_LINES}" "$FAKE_STATUS_LINES"
+    printf '__CS_SQUEUE__\n%b\n__CS_SACCT__\n%b\n' "${FAKE_QUEUE_LINES-$FAKE_STATUS_LINES}" "$FAKE_STATUS_LINES"
     exit 0
   fi
   state=$(cat "$FAKE_STATUS")
   accepted_name=; [ ! -f "$FAKE_ACCEPTED_JOB_NAME" ] || accepted_name=$(cat "$FAKE_ACCEPTED_JOB_NAME")
-  printf '__CSCTL_SQUEUE__\n'
+  printf '__CS_SQUEUE__\n'
   if [ -n "$accepted_name" ] && { [ -z "${FAKE_SUBMIT_RELEASE:-}" ] || [ -e "$FAKE_SUBMIT_RELEASE" ]; }; then
     case "$state" in RUNNING|PENDING|CONFIGURING) printf '%s|%s|cn001|%s\n' "$job_id" "$state" "$accepted_name";; esac
   fi
-  printf '__CSCTL_SACCT__\n'
+  printf '__CS_SACCT__\n'
   if [ -n "$accepted_name" ] && { [ -z "${FAKE_SUBMIT_RELEASE:-}" ] || [ -e "$FAKE_SUBMIT_RELEASE" ]; }; then
     printf '%s|%s|cn001|%s|\n' "$job_id" "$state" "$accepted_name"
   fi
@@ -143,7 +143,7 @@ case "$command" in
     [ "${FAKE_SCANCEL_FAIL:-0}" = 0 ] || { echo 'scheduler temporarily unavailable' >&2; exit 1; }
     printf 'CANCELLED\n' > "$FAKE_STATUS"
     ;;
-  "sh -s -- csctl-provision "*)
+  "sh -s -- cs-provision "*)
     cat > "${FAKE_PROVISION_LOG:-/dev/null}"
     [ -z "${FAKE_PROVISION_STARTED:-}" ] || : > "$FAKE_PROVISION_STARTED"
     while [ -n "${FAKE_PROVISION_RELEASE:-}" ] && [ ! -e "$FAKE_PROVISION_RELEASE" ]; do sleep .01; done
@@ -178,7 +178,7 @@ esac
 	t.Setenv("FAKE_ACCEPTED_JOB_NAME", acceptedJobName)
 	t.Setenv("FAKE_ACCEPTED_JOB_ID", acceptedJobID)
 	t.Setenv("FAKE_SCHEDULER_QUERY_COUNT", schedulerQueryCount)
-	const discoveryMarker = "__CSCTL_DSC_6f1c9a7e4b2d8053_"
+	const discoveryMarker = "__CS_DSC_6f1c9a7e4b2d8053_"
 	t.Setenv("DISC_USER", discoveryMarker+"USER__")
 	t.Setenv("DISC_ACCOUNTS", discoveryMarker+"ACCOUNTS__")
 	t.Setenv("DISC_PARTITIONS", discoveryMarker+"PARTITIONS__")

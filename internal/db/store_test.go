@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 const fixtureSchema = `CREATE TABLE fixtures (id INTEGER PRIMARY KEY, value TEXT NOT NULL)`

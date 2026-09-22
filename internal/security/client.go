@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-var UserAgent = "cs-control"
+var UserAgent = "cs-plane"
 
 func BoundedClient(client *http.Client, fallback time.Duration) *http.Client {
 	if client == nil {

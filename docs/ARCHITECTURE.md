@@ -1,6 +1,6 @@
 # Architecture
 
-`csctl` is a single binary that runs on a researcher's own machine and binds to loopback. It has no CLI
+`cs` is a single binary that runs on a researcher's own machine and binds to loopback. It has no CLI
 commands for hosts or sessions: `serve` starts the HTTP API and a browser or editor client drives everything
 over it.
 
@@ -35,7 +35,7 @@ subsystems/session    session state, Slurm and tunnel lifecycles, protected capa
                       records, logs, metrics, and routes
 subsystems/telemetry  the read-only run-history route over the session subsystem's records
 
-main.go               composition root, the csctl binary
+main.go               composition root, the cs binary
 ```
 
 Session, SSH, and tunnel subsystems give internal mechanisms domain meaning. OAuth establishes inbound identity.
@@ -194,7 +194,7 @@ subject and tenant, so an identifier from another system never becomes a path. `
 back. `internal/ssh` reads it only to check an alias exists before running `ssh -F` against it.
 
 This is a boundary, not a filing convention. `ssh` is invoked with `-F` naming that file, so an alias resolves
-through the configuration of the caller who added it and through no other. The account `csctl` runs as has no
+through the configuration of the caller who added it and through no other. The account `cs` runs as has no
 standing in the API: its `~/.ssh/config` is neither read nor written, and its aliases are invisible. Two
 callers may use the same alias name for different hosts. The control master is keyed by the configuration as
 well as the alias, so one caller authenticating a host never hands another an authenticated SSH login, and
@@ -227,7 +227,7 @@ authentication behavior.
 The request's own bearer, and tunnel host and manage-ports credentials, are never persisted; the linked Dev
 Tunnels credential is the one third-party credential this daemon keeps, and only sealed.
 
-The Postgres schema named by `CSCTL_DATABASE_URL` holds non-secret scheduler, session, tunnel, SSH host and
+The Postgres schema named by `CS_DATABASE_URL` holds non-secret scheduler, session, tunnel, SSH host and
 login key metadata and the bounded record of what finished sessions did: a `schema_meta` format marker plus the
 tables each subsystem declares in its `schema.sql`:
 `sessions` and `runs` (JSON payload keyed by session ID or `(session_id, seq)`) and `ssh_hosts` and `ssh_keys`
@@ -272,5 +272,5 @@ key writes and deletions and regenerates every rendered config from committed ho
   session responses. The Jupyter token appears only in the job environment and in the session-access
   response.
 - **No proxying.** The owner-authenticated `/access` response returns the session's direct Jupyter URI and
-  its token; cs-control proxies no session data and creates no login-host port forward. The one WebSocket
+  its token; cs-plane proxies no session data and creates no login-host port forward. The one WebSocket
   carries interactive SSH authentication prompts as untyped bytes and never forwards session data.

@@ -1,6 +1,6 @@
 # API
 
-`csctl serve` exposes one JSON HTTP API and one WebSocket route on an explicit loopback address,
+`cs serve` exposes one JSON HTTP API and one WebSocket route on an explicit loopback address,
 `127.0.0.1:8045` by default. Every path below is relative to that address. There is no other interface: the CLI
 has no commands for keys, hosts, or sessions.
 

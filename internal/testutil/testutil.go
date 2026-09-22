@@ -81,13 +81,13 @@ func WaitForFile(t testing.TB, path string) {
 	})
 }
 
-// Database gives t an empty schema of its own in the Postgres server CSCTL_TEST_DATABASE_URL names, and returns a
+// Database gives t an empty schema of its own in the Postgres server CS_TEST_DATABASE_URL names, and returns a
 // URL whose search_path selects it. The schema is dropped when t ends. Without the variable, t is skipped.
 func Database(t testing.TB) string {
 	t.Helper()
-	base := os.Getenv("CSCTL_TEST_DATABASE_URL")
+	base := os.Getenv("CS_TEST_DATABASE_URL")
 	if base == "" {
-		t.Skip("CSCTL_TEST_DATABASE_URL is not set")
+		t.Skip("CS_TEST_DATABASE_URL is not set")
 	}
 	name := make([]byte, 8)
 	_, _ = rand.Read(name)
