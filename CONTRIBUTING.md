@@ -9,7 +9,15 @@ and say in the description what you ran.
 - [Git](https://git-scm.com/).
 - An OpenSSH client, for the tests that drive `ssh` directly.
 
-There is no C dependency and no service to run locally. SQL queries in each subsystem's `query.sql` are compiled
+The database tests need a Postgres server. Point `CSCTL_TEST_DATABASE_URL` at one and every test works in a
+schema of its own that is dropped afterwards; without it those tests are skipped, and CI always provides one:
+
+```bash
+docker run -d -p 127.0.0.1:5432:5432 -e POSTGRES_PASSWORD=postgres postgres:17
+export CSCTL_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable'
+```
+
+There is no C dependency. SQL queries in each subsystem's `query.sql` are compiled
 to Go by [sqlc](https://sqlc.dev) (`go generate ./internal/db`); the generated `query.sql.go`, `sql.go` and
 `sql_models.go` are committed, so regenerate only when a `schema.sql` or `query.sql` changes.
 
@@ -34,7 +42,8 @@ minute, most of it in `subsystems/session`; that is real work, not a hang.
 
 `go build .` produces the `csctl` binary. See the [README](README.md) for running it.
 
-Tests sit beside what they test as `*_test.go` and need no cluster, no network and no scheduler.
+Tests sit beside what they test as `*_test.go` and need no cluster and no scheduler; only the database tests
+need the Postgres server above.
 
 ## Source layout
 

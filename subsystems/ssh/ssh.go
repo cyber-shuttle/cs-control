@@ -1,7 +1,7 @@
-// Package ssh owns principal-scoped SSH hosts, keys, rendered configuration, live probes, and authentication. SQLite
-// stores host and key metadata while private keys and generated configs remain protected files. Host/key mutations
-// coordinate database, config, and file effects as compensated flows; OpenSSH execution and control-master mechanics
-// remain in internal/ssh.
+// Package ssh owns principal-scoped SSH hosts, keys, rendered configuration, live probes, and authentication. The
+// database stores host and key metadata while private keys and generated configs remain protected files. Host/key
+// mutations coordinate database, config, and file effects as compensated flows; OpenSSH execution and
+// control-master mechanics remain in internal/ssh.
 package ssh
 
 import (

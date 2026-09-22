@@ -55,6 +55,9 @@ Identity (Custos login):
   --custos-url URL (required), e.g. https://custos.cybershuttle.org
   CSCTL_OIDC_CLIENT_SECRET=SECRET (required, for the sign-in relay's token exchange)
 
+State:
+  CSCTL_DATABASE_URL=URL (required), a Postgres URL whose search_path names the schema csctl owns
+
 Trusted session configuration:
   --linkspan PATH or CSCTL_LINKSPAN=PATH
   --devtunnel-management-url URL or CSCTL_DEVTUNNEL_MANAGEMENT_URL=URL
@@ -76,6 +79,7 @@ func defaultStateDir() string {
 }
 
 type services struct {
+	DatabaseURL   string
 	Configs       ssh.Configurations
 	SessionStore  session.Store
 	LinkspanPath  string
@@ -97,7 +101,7 @@ func (components *serveComponents) close() {
 }
 
 func newServeComponents(svcs services, authentication *oauth.Service) (*serveComponents, error) {
-	database, err := db.Open(svcs.SessionStore.Dir, session.Schema+sshapi.Schema)
+	database, err := db.Open(svcs.DatabaseURL, svcs.SessionStore.Dir, session.Schema+sshapi.Schema)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +182,10 @@ func runServe(ctx context.Context, svcs services, args []string, listen func(str
 	oidcClientSecret := os.Getenv("CSCTL_OIDC_CLIENT_SECRET")
 	if strings.TrimSpace(oidcClientSecret) == "" {
 		return errors.New("CSCTL_OIDC_CLIENT_SECRET is required")
+	}
+	svcs.DatabaseURL = os.Getenv("CSCTL_DATABASE_URL")
+	if strings.TrimSpace(svcs.DatabaseURL) == "" {
+		return errors.New("CSCTL_DATABASE_URL is required")
 	}
 	authentication, err := oauth.NewService(*custosURL, *oidcIssuer, *oidcClientID, oidcClientSecret, allowedOrigins, nil)
 	if err != nil {

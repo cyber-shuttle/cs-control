@@ -51,9 +51,10 @@ Notable changes to CyberShuttle Control. The format follows
   `403`); every refusal, including a missing credential (`401 unauthorized` with `WWW-Authenticate: Bearer`),
   is the JSON error envelope, and an unclassified failure is `500 internal_error` with its detail logged, not
   returned.
-- Local state under `~/.cybershuttle/control` at mode `0700`: one SQLite database whose schema each subsystem
-  declares in its own `schema.sql` and reads through sqlc-generated queries. A database without the current
-  format marker is refused before any credential file is created; nothing is migrated.
+- State in a Postgres schema named by `CSCTL_DATABASE_URL`, whose tables each subsystem declares in its own
+  `schema.sql` and reads through sqlc-generated queries, and protected files under `~/.cybershuttle/control` at
+  mode `0700`. A schema without the current format marker is refused before any credential file is created;
+  nothing is migrated.
 - An Apache-2.0 `LICENSE`, contribution and security policies, and reference documentation for the routes
   (`docs/API.md`) and for the package layout, session lifecycle and trust boundaries (`docs/ARCHITECTURE.md`).
 

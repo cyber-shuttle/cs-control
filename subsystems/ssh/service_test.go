@@ -50,7 +50,7 @@ func isolatedService(t *testing.T) *Service {
 	t.Helper()
 	dir := t.TempDir()
 	principalDir := filepath.Join(dir, "hosts")
-	database, err := db.Open(dir, Schema)
+	database, err := db.Open(testutil.Database(t), dir, Schema)
 	testutil.Check(t, err)
 	service, err := NewService(database, internalssh.Configurations{Dir: principalDir}, internalssh.NewControlManager())
 	testutil.Check(t, err)

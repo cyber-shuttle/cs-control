@@ -10,7 +10,7 @@ import (
 )
 
 const deleteHost = `-- name: DeleteHost :execrows
-DELETE FROM ssh_hosts WHERE principal = ? AND host = ? COLLATE BINARY
+DELETE FROM ssh_hosts WHERE principal = $1 AND host = $2
 `
 
 type DeleteHostParams struct {
@@ -27,7 +27,7 @@ func (q *Queries) DeleteHost(ctx context.Context, arg DeleteHostParams) (int64, 
 }
 
 const deleteKey = `-- name: DeleteKey :execrows
-DELETE FROM ssh_keys WHERE principal = ? AND name = ?
+DELETE FROM ssh_keys WHERE principal = $1 AND name = $2
 `
 
 type DeleteKeyParams struct {
@@ -44,7 +44,7 @@ func (q *Queries) DeleteKey(ctx context.Context, arg DeleteKeyParams) (int64, er
 }
 
 const getKey = `-- name: GetKey :one
-SELECT name, type, fingerprint FROM ssh_keys WHERE principal = ? AND name = ?
+SELECT name, type, fingerprint FROM ssh_keys WHERE principal = $1 AND name = $2
 `
 
 type GetKeyParams struct {
@@ -66,7 +66,7 @@ func (q *Queries) GetKey(ctx context.Context, arg GetKeyParams) (GetKeyRow, erro
 }
 
 const insertHost = `-- name: InsertHost :exec
-INSERT INTO ssh_hosts (principal, host, payload) VALUES (?, ?, ?)
+INSERT INTO ssh_hosts (principal, host, payload) VALUES ($1, $2, $3)
 `
 
 type InsertHostParams struct {
@@ -81,7 +81,7 @@ func (q *Queries) InsertHost(ctx context.Context, arg InsertHostParams) error {
 }
 
 const insertKey = `-- name: InsertKey :exec
-INSERT INTO ssh_keys (principal, name, type, fingerprint) VALUES (?, ?, ?, ?)
+INSERT INTO ssh_keys (principal, name, type, fingerprint) VALUES ($1, $2, $3, $4)
 `
 
 type InsertKeyParams struct {
@@ -129,7 +129,7 @@ func (q *Queries) ListHostPrincipals(ctx context.Context) ([]string, error) {
 }
 
 const listHosts = `-- name: ListHosts :many
-SELECT host, payload FROM ssh_hosts WHERE principal = ? ORDER BY host
+SELECT host, payload FROM ssh_hosts WHERE principal = $1 ORDER BY lower(host)
 `
 
 type ListHostsRow struct {
@@ -161,7 +161,7 @@ func (q *Queries) ListHosts(ctx context.Context, principal string) ([]ListHostsR
 }
 
 const listKeys = `-- name: ListKeys :many
-SELECT name, type, fingerprint FROM ssh_keys WHERE principal = ? ORDER BY name
+SELECT name, type, fingerprint FROM ssh_keys WHERE principal = $1 ORDER BY name
 `
 
 type ListKeysRow struct {
@@ -194,7 +194,7 @@ func (q *Queries) ListKeys(ctx context.Context, principal string) ([]ListKeysRow
 }
 
 const updateHost = `-- name: UpdateHost :execrows
-UPDATE ssh_hosts SET payload = ? WHERE principal = ? AND host = ? COLLATE BINARY
+UPDATE ssh_hosts SET payload = $1 WHERE principal = $2 AND host = $3
 `
 
 type UpdateHostParams struct {

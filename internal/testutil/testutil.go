@@ -3,11 +3,18 @@
 package testutil
 
 import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func Check(t testing.TB, err error) {
@@ -72,4 +79,31 @@ func WaitForFile(t testing.TB, path string) {
 		info, err := os.Stat(path)
 		return err == nil && info.Size() > 0
 	})
+}
+
+// Database gives t an empty schema of its own in the Postgres server CSCTL_TEST_DATABASE_URL names, and returns a
+// URL whose search_path selects it. The schema is dropped when t ends. Without the variable, t is skipped.
+func Database(t testing.TB) string {
+	t.Helper()
+	base := os.Getenv("CSCTL_TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("CSCTL_TEST_DATABASE_URL is not set")
+	}
+	name := make([]byte, 8)
+	_, _ = rand.Read(name)
+	schema := "t" + hex.EncodeToString(name)
+	admin, err := sql.Open("pgx", base)
+	Check(t, err)
+	_, err = admin.Exec("CREATE SCHEMA " + schema)
+	Check(t, err)
+	t.Cleanup(func() {
+		_, err := admin.Exec("DROP SCHEMA " + schema + " CASCADE")
+		Check(t, errors.Join(err, admin.Close()))
+	})
+	dsn, err := url.Parse(base)
+	Check(t, err)
+	query := dsn.Query()
+	query.Set("search_path", schema)
+	dsn.RawQuery = query.Encode()
+	return dsn.String()
 }

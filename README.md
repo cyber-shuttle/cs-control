@@ -29,6 +29,9 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
   device-code flow. `--oidc-issuer` defaults to `https://cilogon.org`; the client ID
   goes on `--oidc-client-id` and the client secret in `CSCTL_OIDC_CLIENT_SECRET`, since only the daemon holds
   it.
+- **A Postgres server** with a schema csctl owns. `CSCTL_DATABASE_URL` names it through `search_path`, for
+  example `postgres:///cybershuttle?host=/var/run/postgresql&search_path=csctl`; csctl creates its tables in that
+  schema while it is empty, and refuses one it did not create.
 - **A [Custos](https://custos.cyberinfrastructure.org/) instance** the resolved identity is checked against:
   `--custos-url` names it, and the daemon calls `GET {custos-url}/me` with the caller's bearer to resolve the
   principal.
@@ -131,17 +134,17 @@ a compute node. The batch script redirects the job's stdout and stderr to
 
 `~/.cybershuttle/control`, created and verified at mode `0700`:
 
-- `state.db` — non-secret scheduler, session, tunnel, SSH host and login key metadata, in SQLite
 - `credentials/` — per-seq Dev Tunnel and Jupyter capabilities, mode `0600`
-- `hosts/<principal>/config` — each caller's own SSH host entries, rendered from `state.db`, mode `0600`
+- `hosts/<principal>/config` — each caller's own SSH host entries, rendered from the database, mode `0600`
 - `hosts/<principal>/keys/<name>` — login keys the caller uploaded, mode `0600`
 - `hosts/<principal>/tunnel-link` — the caller's linked Dev Tunnels credential, sealed, mode `0600`
 - `tunnel-link.key` — the 32-byte key sealing every `tunnel-link` file, created at mode `0600` on first boot
 
-Each caller's SSH host entries live in `state.db`. They are rendered to that caller's `hosts/<principal>/config`
+Scheduler, session, tunnel, SSH host and login key metadata live in the Postgres schema. Each caller's SSH host
+entries are rendered to that caller's `hosts/<principal>/config`
 for `ssh -F`; startup regenerates these files from committed rows and resolves interrupted key writes and deletions.
-The API never reads or writes `~/.ssh/config` for the account `csctl` runs as. A `state.db` without the
-current format marker is refused before anything else is touched.
+The API never reads or writes `~/.ssh/config` for the account `csctl` runs as. A schema holding tables without
+csctl's format marker is refused before anything else is touched.
 
 ## Documentation
 

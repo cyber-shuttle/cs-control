@@ -1,7 +1,8 @@
-// Package db owns the process-wide SQLite connection and complete state-operation boundary. A cached handle and
-// filesystem lock serialize read-modify-write cycles across processes; callers may nest a transaction inside that
-// cycle when database changes must coordinate with protected files. Feature packages own every table and query.
-// Schema DDL runs only for a pristine database; existing formats are either accepted exactly or rejected.
+// Package db owns csctl's Postgres connection and complete state-operation boundary. The DSN's search_path names
+// the one schema csctl owns, so it can share a server and database with other services. A cached handle plus a
+// state-directory file lock serialize read-modify-write cycles across processes; callers may nest a transaction
+// inside that cycle when database changes must coordinate with protected files. Feature packages own every table
+// and query. Schema DDL runs only in an empty schema; an existing one is accepted by its format marker or rejected.
 package db
 
 //go:generate sqlc generate -f ../../sqlc.yaml
@@ -11,12 +12,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/cyber-shuttle/cs-control/internal/security"
-	"modernc.org/sqlite"
+	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
@@ -36,8 +37,6 @@ var (
 	handles   = map[string]*DB{}
 )
 
-func Path(dir string) string { return filepath.Join(dir, "state.db") }
-
 // DecodePayload reads a JSON payload column and refuses one whose identity does not match its row.
 func DecodePayload[T any](payload string, identity func(T) bool, what string) (T, error) {
 	var value T
@@ -50,39 +49,39 @@ func DecodePayload[T any](payload string, identity func(T) bool, what string) (T
 	return value, nil
 }
 
-// IsConstraint reports whether err is a SQLite constraint violation such as a duplicate key.
+// IsConstraint reports whether err is an integrity-constraint violation such as a duplicate key.
 func IsConstraint(err error) bool {
-	sqliteErr, ok := errors.AsType[*sqlite.Error](err)
-	return ok && sqliteErr.Code()&0xff == 19
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && len(pgErr.Code) == 5 && pgErr.Code[:2] == "23"
 }
 
-func open(path string, pristine bool, schema string) (*DB, error) {
-	database, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+func open(dsn, schema string) (*DB, error) {
+	database, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, err
 	}
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 	handle := &DB{sql: database}
-	if pristine {
+	var owned sql.NullString
+	var tables int
+	err = database.QueryRow(`SELECT current_schema(), (SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema())`).Scan(&owned, &tables)
+	switch {
+	case err != nil:
+	case !owned.Valid:
+		err = errors.New("the database URL's search_path names no existing schema")
+	case tables == 0:
 		err = handle.Tx(func(tx *sql.Tx) error {
 			if _, err := tx.Exec(metaSchema + ";" + schema); err != nil {
 				return err
 			}
-			_, err := tx.Exec(`INSERT INTO schema_meta (key, value) VALUES ('format', ?)`, schemaFormat)
+			_, err := tx.Exec(`INSERT INTO schema_meta (key, value) VALUES ('format', $1)`, schemaFormat)
 			return err
 		})
-	} else {
+	default:
 		var format string
 		if queryErr := database.QueryRow(`SELECT value FROM schema_meta WHERE key = 'format'`).Scan(&format); queryErr != nil || format != schemaFormat {
 			err = errors.New("unsupported state database format")
-		}
-	}
-	if err == nil {
-		var mode string
-		err = database.QueryRow(`PRAGMA journal_mode = WAL`).Scan(&mode)
-		if err == nil && mode != "wal" {
-			err = fmt.Errorf("enable SQLite WAL mode: got %q", mode)
 		}
 	}
 	if err != nil {
@@ -91,46 +90,28 @@ func open(path string, pristine bool, schema string) (*DB, error) {
 	return handle, nil
 }
 
-// Open returns the shared handle for dir, creating state.db with schema only when no database exists yet.
-func Open(dir string, schema string) (*DB, error) {
-	if dir == "" {
-		return nil, errors.New("state directory is required")
-	}
-	dir, err := filepath.Abs(filepath.Clean(dir))
-	if err != nil {
-		return nil, err
-	}
-	dir, err = filepath.EvalSymlinks(dir)
-	if err != nil {
-		return nil, err
+// Open returns the shared handle for dsn, creating the schema's tables only when it holds none yet. lockDir holds
+// the file lock that serializes state cycles across csctl processes.
+func Open(dsn, lockDir, schema string) (*DB, error) {
+	if dsn == "" || lockDir == "" {
+		return nil, errors.New("database URL and state directory are required")
 	}
 	handlesMu.Lock()
 	defer handlesMu.Unlock()
-	if handle := handles[dir]; handle != nil {
+	if handle := handles[dsn]; handle != nil {
 		return handle, nil
 	}
-
-	path := Path(dir)
-	lockPath := filepath.Join(dir, ".lock")
+	lockPath := filepath.Join(lockDir, ".lock")
 	var handle *DB
-	var pristine bool
-	err = security.WithFileLock(lockPath, func() error {
-		_, statErr := os.Lstat(path)
-		pristine = errors.Is(statErr, os.ErrNotExist)
-		if statErr != nil && !pristine {
-			return statErr
-		}
-		handle, err = open(path, pristine, schema)
+	err := security.WithFileLock(lockPath, func() (err error) {
+		handle, err = open(dsn, schema)
 		return err
 	})
 	if err != nil {
-		if pristine {
-			err = errors.Join(err, security.RemoveFile(path), security.RemoveFile(path+"-shm"), security.RemoveFile(path+"-wal"))
-		}
 		return nil, err
 	}
-	handle.cacheKey, handle.lockPath = dir, lockPath
-	handles[dir] = handle
+	handle.cacheKey, handle.lockPath = dsn, lockPath
+	handles[dsn] = handle
 	return handle, nil
 }
 
