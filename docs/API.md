@@ -7,7 +7,7 @@ has no commands for keys, hosts, or sessions.
 | Method | Route |
 | --- | --- |
 | `GET` | `/api/v1/oauth/config` |
-| `POST` | `/api/v1/oauth/exchange`, `/api/v1/oauth/refresh` |
+| `POST` | `/api/v1/oauth/exchange`, `/api/v1/oauth/refresh`, `/api/v1/oauth/device` |
 | `GET`, `POST` | `/api/v1/ssh/hosts`, `/api/v1/ssh/keys` |
 | `PUT`, `DELETE` | `/api/v1/ssh/hosts/{alias}` |
 | `DELETE` | `/api/v1/ssh/keys/{name}` |
@@ -78,7 +78,7 @@ An error the API did not classify becomes `500 internal_error`.
 
 | Code | Status |
 | --- | --- |
-| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_name`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider` | 400 |
+| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_name`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `authorization_pending`, `unknown_provider` | 400 |
 | `unauthorized`, `identity_not_linked` | 401 |
 | `session_owner_mismatch`, `origin_required`, `origin_not_allowed`, `preflight_not_allowed`, `authorization_denied` | 403 |
 | `not_found`, `session_not_found`, `ssh_host_not_found`, `ssh_key_not_found` | 404 |
@@ -503,6 +503,13 @@ an unreachable issuer is `502 upstream_unavailable`.
 
 Answers the same shape as `exchange`, with a rotated `refreshToken` when the issuer rotates it. A refused
 refresh is `400 invalid_grant`.
+
+### `POST /api/v1/oauth/device` → 200
+
+Starts the issuer's device grant for a client that cannot receive a redirect, and answers
+`{ "deviceCode", "userCode", "verificationUriComplete", "intervalSeconds" }`. The client opens
+`verificationUriComplete` and every `intervalSeconds` posts `{ "deviceCode": "..." }` to `exchange`, which answers
+`400 authorization_pending` until the user approves and then the usual credential.
 
 ## Dev Tunnels link
 

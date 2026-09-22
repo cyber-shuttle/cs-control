@@ -24,14 +24,14 @@ func newTestSignInRelay(t *testing.T, tokenRoute http.HandlerFunc) (http.Handler
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
-			_, _ = w.Write([]byte(`{"issuer":"` + server.URL + `","jwks_uri":"` + server.URL + `/keys","authorization_endpoint":"` + server.URL + `/authorize","token_endpoint":"` + server.URL + `/token"}`))
+			_, _ = w.Write([]byte(`{"issuer":"` + server.URL + `","jwks_uri":"` + server.URL + `/keys","authorization_endpoint":"` + server.URL + `/authorize","token_endpoint":"` + server.URL + `/token","device_authorization_endpoint":"` + server.URL + `/device"}`))
 		case "/keys":
 			exponent := big.NewInt(int64(key.E)).Bytes()
 			_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
 				"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "relay-key",
 				"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(exponent),
 			}}})
-		case "/token":
+		case "/token", "/device":
 			tokenRoute(w, r)
 		default:
 			t.Errorf("unexpected relay request %s", r.URL)
@@ -117,4 +117,32 @@ func TestSignInRefreshRotatesTokens(t *testing.T) {
 	var tokens tokenResponse
 	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &tokens))
 	testutil.Equal(t, tokens.RefreshToken, "new-refresh-token", "rotated refresh token")
+}
+
+func TestDeviceSignInExchangesTheApprovedCodeWithoutABearer(t *testing.T) {
+	approved := false
+	handler, _ := newTestSignInRelay(t, func(w http.ResponseWriter, r *http.Request) {
+		testutil.Check(t, r.ParseForm())
+		switch {
+		case r.URL.Path == "/device":
+			_, _ = w.Write([]byte(`{"device_code":"the-device-code","user_code":"QFP-7N3-VQF","verification_uri_complete":"https://issuer.example.edu/device"}`))
+		case !approved:
+			// CILogon answers a pending authorization with HTTP 400, which must not read as an upstream failure.
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"authorization_pending"}`))
+		default:
+			testutil.Equal(t, r.PostForm.Get("device_code"), "the-device-code", "device code")
+			_, _ = w.Write([]byte(`{"id_token":"header.payload.signature","expires_in":3600}`))
+		}
+	})
+	post := func(path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Origin", "https://workspace.example.edu")
+		return testutil.Serve(handler, request)
+	}
+	testutil.Equal(t, post("/api/v1/oauth/device", "").Body.String(),
+		`{"deviceCode":"the-device-code","userCode":"QFP-7N3-VQF","verificationUriComplete":"https://issuer.example.edu/device","intervalSeconds":5}`, "device")
+	testutil.Equal(t, post("/api/v1/oauth/exchange", `{"deviceCode":"the-device-code"}`).Code, http.StatusBadRequest, "pending")
+	approved = true
+	testutil.Equal(t, post("/api/v1/oauth/exchange", `{"deviceCode":"the-device-code"}`).Code, http.StatusOK, "approved")
 }

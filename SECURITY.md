@@ -26,7 +26,7 @@ is designed around; a report is most useful when it shows one of them failing. H
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 - The API binds an explicit loopback address only, and a browser caller must present an exact allowed `Origin`.
-- Every route but the three sign-in routes needs a signed OIDC ID token, validated against the configured
+- Every route but the four sign-in routes needs a signed OIDC ID token, validated against the configured
   issuer and resolved to a principal through Custos; the ID token is the sole identity bearer.
 - Session records, their log tails and the access response are filtered or refused by the owning principal.
 - The sign-in relay and the Dev Tunnels link broker are the only unauthenticated surfaces.

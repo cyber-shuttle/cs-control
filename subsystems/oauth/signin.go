@@ -1,5 +1,5 @@
 // The sign-in relay finishes the browser's CILogon authorization-code flow with PKCE while keeping the client
-// secret server-side. Its three canonical OAuth routes enforce the same exact-origin policy as authenticated API
+// secret server-side. Its four canonical OAuth routes enforce the same exact-origin policy as authenticated API
 // requests and share OIDC discovery with bearer validation. Upstream failures are classified without returning
 // provider details or tokens.
 package oauth
@@ -26,9 +26,17 @@ type oauthConfigResponse struct {
 }
 
 type exchangeRequest struct {
+	DeviceCode   string `json:"deviceCode"`
 	Code         string `json:"code"`
 	CodeVerifier string `json:"codeVerifier"`
 	RedirectURI  string `json:"redirectUri"`
+}
+
+type deviceResponse struct {
+	DeviceCode      string `json:"deviceCode"`
+	UserCode        string `json:"userCode"`
+	CompleteURI     string `json:"verificationUriComplete"`
+	IntervalSeconds int64  `json:"intervalSeconds"`
 }
 
 type refreshRequest struct {
@@ -75,6 +83,11 @@ func (s *Service) handleExchange(writer http.ResponseWriter, request *http.Reque
 		security.WriteError(writer, err)
 		return
 	}
+	if body.DeviceCode != "" {
+		tokens, err := s.oidc.RedeemDevice(request.Context(), s.clientSecret, body.DeviceCode)
+		s.writeTokens(writer, tokens, err)
+		return
+	}
 	if body.Code == "" || body.CodeVerifier == "" || !redirectOriginAllowed(body.RedirectURI, s.origins) {
 		security.WriteError(writer, security.New("invalid_grant", "the request is invalid", http.StatusBadRequest))
 		return
@@ -99,6 +112,8 @@ func (s *Service) handleRefresh(writer http.ResponseWriter, request *http.Reques
 
 func (s *Service) writeTokens(writer http.ResponseWriter, tokens identity.Tokens, err error) {
 	switch {
+	case errors.Is(err, identity.ErrAuthorizationPending):
+		security.WriteError(writer, security.New("authorization_pending", "the sign-in has not been approved yet", http.StatusBadRequest))
 	case errors.Is(err, identity.ErrGrantRejected):
 		security.WriteError(writer, security.New("invalid_grant", "the authorization code or refresh token was rejected", http.StatusBadRequest))
 	case errors.Is(err, identity.ErrTokenInvalid):
@@ -108,6 +123,17 @@ func (s *Service) writeTokens(writer http.ResponseWriter, tokens identity.Tokens
 	default:
 		security.WriteJSON(writer, http.StatusOK, tokenResponse{IDToken: tokens.IDToken, RefreshToken: tokens.RefreshToken, ExpiresInSeconds: tokens.ExpiresIn})
 	}
+}
+
+// handleDevice starts the device grant for a client that cannot receive a redirect, such as an editor extension; it
+// then posts the device code to exchange until the user approves it.
+func (s *Service) handleDevice(writer http.ResponseWriter, request *http.Request) {
+	device, err := s.oidc.DeviceAuthorize(request.Context(), s.clientSecret, signInScope)
+	if err != nil {
+		s.writeTokens(writer, identity.Tokens{}, err)
+		return
+	}
+	security.WriteJSON(writer, http.StatusOK, deviceResponse{DeviceCode: device.DeviceCode, UserCode: device.UserCode, CompleteURI: device.CompleteURI, IntervalSeconds: device.Interval})
 }
 
 func NewService(custosURL, issuer, clientID, clientSecret string, allowedOrigins []string, client *http.Client) (*Service, error) {
@@ -136,6 +162,7 @@ func (s *Service) Routes() router.Routes {
 		"/api/v1/oauth/config":   {http.MethodGet: s.handleConfig},
 		"/api/v1/oauth/exchange": {http.MethodPost: s.handleExchange},
 		"/api/v1/oauth/refresh":  {http.MethodPost: s.handleRefresh},
+		"/api/v1/oauth/device":   {http.MethodPost: s.handleDevice},
 	}
 }
 
