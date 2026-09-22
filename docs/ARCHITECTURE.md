@@ -1,8 +1,8 @@
 # Architecture
 
-cs-plane is a single binary, `cs`, that runs on a researcher's own machine and binds to loopback. It has no CLI
-commands for hosts or sessions: `serve` starts the HTTP API and a browser or editor client drives everything
-over it.
+cs-plane is a single binary, `cs`, that serves every user from one server and binds to loopback behind a TLS
+reverse proxy. It has no CLI commands for hosts or sessions: `serve` starts the HTTP API and a browser or editor
+client drives everything over it.
 
 Each subsystem exports its route table. `internal/router` unions them into one registry, rejects duplicate
 method-and-path pairs, and preserves the API's JSON 404 and 405 responses. `oauth.Service` contributes the four
@@ -200,7 +200,7 @@ callers may use the same alias name for different hosts. The control master is k
 well as the alias, so one caller authenticating a host never hands another an authenticated SSH login, and
 scheduler reconciliation, log tailing and accounting each run as the session's own owner.
 
-A host may use an uploaded credential by name or an explicit `IdentityFile` path the daemon account can read.
+A host may use an uploaded credential by name or an explicit `IdentityFile` path the account cs-plane runs as can read.
 Credential files are principal-scoped and protected; explicit paths remain the caller's responsibility. Creation writes
 a staged key, commits its metadata, then promotes the key. Deletion first renames the key to a
 tombstone, then commits its metadata and host-reference changes. Startup resolves either interruption from the
@@ -225,7 +225,7 @@ authentication behavior.
 | `tunnel-link.key` | the 32-byte key every `tunnel-link` file is sealed with, mode `0600`, generated once at boot |
 
 The request's own bearer, and tunnel host and manage-ports credentials, are never persisted; the linked Dev
-Tunnels credential is the one third-party credential this daemon keeps, and only sealed.
+Tunnels credential is the one third-party credential cs-plane keeps, and only sealed.
 
 The Postgres schema named by `CS_DATABASE_URL` holds non-secret scheduler, session, tunnel, SSH host and
 login key metadata and the bounded record of what finished sessions did: a `schema_meta` format marker plus the
@@ -247,7 +247,7 @@ key writes and deletions and regenerates every rendered config from committed ho
   but the pre-authentication sign-in routes require an exact allowed browser origin.
 - **One bearer, one identity authority.** Every request carries a signed OIDC ID token, cryptographically
   validated against the configured issuer's discovery document and JWKS with exact issuer equality and the
-  audience pinned to the configured client ID. That is not itself the principal: the daemon calls
+  audience pinned to the configured client ID. That is not itself the principal: cs-plane calls
   `GET {custos-url}/me` over HTTPS with the same bearer, allows only same-origin redirects, and treats Custos
   as the sole authority over who that token belongs to. A token Custos does not recognise is refused
   `401 identity_not_linked`.
@@ -259,7 +259,7 @@ key writes and deletions and regenerates every rendered config from committed ho
   it validates `redirectUri` against the same allowed-origin set as everything else and maps a rejected code
   or refresh token to `400 invalid_grant` without repeating the issuer's own error text.
 - **The Dev Tunnels link broker** retains the device code in bounded process memory only, enforces polling
-  intervals, and never answers a poll with the linked token — only the daemon's own sealed store ever holds
+  intervals, and never answers a poll with the linked token — only cs-plane's own sealed store ever holds
   it, and only Microsoft's rotated refresh token replaces what came before.
 - **OIDC key refresh** is coalesced, runs outside the cache lock, and is limited to cooldown-bounded unknown
   `kid` values; a signature failure against a known key never triggers a fetch.
