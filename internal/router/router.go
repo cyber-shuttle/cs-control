@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/cyber-shuttle/cs-control/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
 )
 
 type Routes map[string]map[string]http.HandlerFunc

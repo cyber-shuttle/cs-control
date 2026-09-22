@@ -1,5 +1,5 @@
 name: Bug report
-description: Something csctl does not do, or does wrong
+description: Something cs-plane does not do, or does wrong
 labels: ["bug"]
 body:
   - type: textarea
@@ -20,7 +20,7 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. csctl serve --oidc-client-id ... --custos-url ... --allowed-origin ...
+        1. cs serve --oidc-client-id ... --custos-url ... --allowed-origin ...
         2. POST /api/v1/sessions with ...
         3. ...
     validations:
@@ -50,8 +50,8 @@ body:
   - type: textarea
     id: invocation
     attributes:
-      label: How you started csctl
-      description: The `csctl serve` command line, with the tenant ID replaced.
+      label: How you started cs-plane
+      description: The `cs serve` command line, with the tenant ID replaced.
       render: shell
   - type: textarea
     id: cluster
@@ -66,11 +66,11 @@ body:
     attributes:
       label: Logs
       description: >
-        csctl output and any session log tail. Remove OIDC ID tokens, Dev Tunnel connect and host tokens, and
+        cs-plane output and any session log tail. Remove OIDC ID tokens, Dev Tunnel connect and host tokens, and
         Jupyter tokens before pasting.
       render: shell
   - type: markdown
     attributes:
       value: >
         If this is a security vulnerability, close this form and report it privately instead — see
-        [SECURITY.md](https://github.com/cyber-shuttle/cs-control/blob/main/SECURITY.md).
+        [SECURITY.md](https://github.com/cyber-shuttle/cs-plane/blob/main/SECURITY.md).

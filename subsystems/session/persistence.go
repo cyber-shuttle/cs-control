@@ -14,8 +14,8 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/cyber-shuttle/cs-control/internal/db"
-	"github.com/cyber-shuttle/cs-control/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/db"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
 )
 
 //go:embed schema.sql

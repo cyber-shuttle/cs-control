@@ -1,6 +1,6 @@
 # API
 
-`csctl serve` exposes one JSON HTTP API and one WebSocket route on an explicit loopback address,
+`cs serve` exposes one JSON HTTP API and one WebSocket route on an explicit loopback address,
 `127.0.0.1:8045` by default. Every path below is relative to that address. There is no other interface: the CLI
 has no commands for keys, hosts, or sessions.
 
@@ -36,7 +36,7 @@ Every request except the sign-in routes carries one credential:
 
 The token is validated cryptographically against the configured issuer's discovery document and JWKS. The
 discovered issuer must match exactly, and the audience is pinned to the configured client id. The caller's
-identity is then the Custos user the token resolves to: the daemon calls `GET <custos>/me` with the same bearer and takes the
+identity is then the Custos user the token resolves to: cs-plane calls `GET <custos>/me` with the same bearer and takes the
 returned user id as the principal, under the tenant `custos`. The result is held five minutes per token. A
 token Custos does not recognise is refused with `401 identity_not_linked`; any other failure is `401`.
 
@@ -99,7 +99,7 @@ Request bodies are JSON, at most 64 KiB. Unknown fields and trailing data are re
 ### `GET /api/v1/ssh/hosts` → 200
 
 The caller's own hosts, and only those. Each principal has a private configuration this API writes; the
-account the daemon runs as has none of its own standing here, and one caller's aliases are invisible to
+account cs-plane runs as has none of its own standing here, and one caller's aliases are invisible to
 another. `managed` marks the entries this API wrote, which are the only ones it may change.
 
 ```json
@@ -341,7 +341,7 @@ and weak validators; a match is `304` with no body.
 ```
 
 `sessions` holds session records in the shape above.
-`stream` is `status` (this daemon's own narration), `stdout` or `stderr` (the session's startup output,
+`stream` is `status` (cs-plane's own narration), `stdout` or `stderr` (the session's startup output,
 replaced by whatever the last read returned). Lines are bounded and redacted. `at` is when the line was first
 observed here; an unchanged remote line keeps the time it was first seen.
 
@@ -462,7 +462,7 @@ end cleanly; both are absent rather than empty when there is nothing to report.
 
 The only routes in front of the authentication boundary. The browser runs CILogon's authorization-code flow
 with PKCE itself; these routes finish it, because CILogon's token endpoint requires the client secret, which
-only the daemon holds. All three require an allowed `Origin` header and accept no query string. `GET` answers
+only cs-plane holds. All three require an allowed `Origin` header and accept no query string. `GET` answers
 the client's configuration; the two `POST` routes take JSON and answer with `Cache-Control: no-store`.
 
 ### `GET /api/v1/oauth/config` → 200
@@ -485,7 +485,7 @@ its own `redirect_uri` on an allowed origin, a `state`, and an S256 `code_challe
 { "code": "...", "codeVerifier": "...", "redirectUri": "https://jupyter.cybershuttle.org/lab/index.html" }
 ```
 
-`redirectUri` must sit on an allowed origin; the daemon adds the client secret and redeems the code at the
+`redirectUri` must sit on an allowed origin; cs-plane adds the client secret and redeems the code at the
 issuer. The answer is the credential every other route needs:
 
 ```json
@@ -514,7 +514,7 @@ Starts the issuer's device grant for a client that cannot receive a redirect, an
 ## Dev Tunnels link
 
 Sessions run over the caller's own Dev Tunnels account, which is a Microsoft or GitHub identity linked once
-and kept by the daemon under the caller's principal, sealed with a key the daemon holds. Nothing here returns
+and kept by cs-plane under the caller's principal, sealed with a key cs-plane holds. Nothing here returns
 the linked token. These routes sit behind the authentication boundary.
 
 ### `GET /api/v1/tunnel` → 200
@@ -546,7 +546,7 @@ authorization the browser shows:
 }
 ```
 
-`handle` is this daemon's own reference to the authorization; the device code itself never reaches the client.
+`handle` is cs-plane's own reference to the authorization; the device code itself never reaches the client.
 More than one start per second per caller is `429 rate_limited`.
 
 ### `POST /api/v1/tunnel/authorizations/{handle}/poll` → 200
@@ -557,7 +557,7 @@ Still waiting:
 { "status": "pending", "intervalSeconds": 5 }
 ```
 
-Complete: the daemon has stored the credential and answers what `GET /api/v1/tunnel` would.
+Complete: cs-plane has stored the credential and answers what `GET /api/v1/tunnel` would.
 
 ```json
 { "linked": true, "provider": "microsoft", "account": "someone@outlook.com", "linkedAt": "..." }

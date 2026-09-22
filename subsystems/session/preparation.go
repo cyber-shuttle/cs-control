@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/slurm"
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/slurm"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
 )
 
 type preparedSession struct {
@@ -237,7 +237,7 @@ const provisionScript = `set -u
 LC_ALL=C
 LANG=C
 export LC_ALL LANG
-[ "$#" -eq 5 ] && [ "$1" = csctl-provision ] || { printf '%s\n' 'error=arguments'; exit 70; }
+[ "$#" -eq 5 ] && [ "$1" = cs-provision ] || { printf '%s\n' 'error=arguments'; exit 70; }
 shift
 home=$1
 linkspan=$2
@@ -444,7 +444,7 @@ func (s Service) provisionSession(alias string, session Session, home, linkspan 
 	s.sessionStatus(session.ID, "Preparing the session environment")
 	document := base64.StdEncoding.EncodeToString([]byte(sessionWorkflow(session)))
 	outText, errText, runErr := s.runner.RunOutput(ctx, alias, provisionTimeout, strings.NewReader(provisionScript),
-		"sh", "-s", "--", "csctl-provision", home, linkspan, sessionWorkflowPath(session), document)
+		"sh", "-s", "--", "cs-provision", home, linkspan, sessionWorkflowPath(session), document)
 	report := provisionOutcome(outText)
 	if runErr != nil {
 		if ctx.Err() != nil {

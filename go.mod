@@ -1,4 +1,4 @@
-module github.com/cyber-shuttle/cs-control
+module github.com/cyber-shuttle/cs-plane
 
 go 1.26.0
 

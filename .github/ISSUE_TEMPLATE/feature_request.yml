@@ -1,12 +1,12 @@
 name: Feature request
-description: Propose a change to what csctl does
+description: Propose a change to what cs-plane does
 labels: ["enhancement"]
 body:
   - type: textarea
     id: problem
     attributes:
       label: The problem
-      description: What you are trying to do, and where csctl stops you.
+      description: What you are trying to do, and where cs-plane stops you.
     validations:
       required: true
   - type: textarea

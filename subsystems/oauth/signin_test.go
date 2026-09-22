@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cyber-shuttle/cs-control/internal/router"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func newTestSignInRelay(t *testing.T, tokenRoute http.HandlerFunc) (http.Handler, *httptest.Server) {

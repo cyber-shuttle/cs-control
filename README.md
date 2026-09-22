@@ -1,23 +1,26 @@
-# CyberShuttle Control
+# CyberShuttle Plane
 
-[![CI](https://github.com/cyber-shuttle/cs-control/actions/workflows/ci.yml/badge.svg)](https://github.com/cyber-shuttle/cs-control/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/github/go-mod/go-version/cyber-shuttle/cs-control)](go.mod)
-[![License](https://img.shields.io/github/license/cyber-shuttle/cs-control?color=blue)](LICENSE)
+[![CI](https://github.com/cyber-shuttle/cs-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/cyber-shuttle/cs-plane/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/github/go-mod/go-version/cyber-shuttle/cs-plane)](go.mod)
+[![License](https://img.shields.io/github/license/cyber-shuttle/cs-plane?color=blue)](LICENSE)
 
 CyberShuttle is the ARTISAN group's toolset for running interactive work — a Jupyter server today — on the
-compute nodes of an HPC (high-performance computing) cluster, reachable from a browser or editor on your own
-machine. `csctl` is the local daemon that does that work: it submits the [Slurm](https://slurm.schedmd.com/)
-job, prepares the login node, and creates a tunnel the compute node hosts outbound, so a session is reachable
-without the cluster opening an inbound port.
+compute nodes of an HPC (high-performance computing) cluster, reachable from a browser or editor. cs-plane is
+its control plane. It signs users in through CILogon and resolves each to a user in
+[Custos](https://custos.cyberinfrastructure.org/); it holds each user's credentials, SSH hosts and session
+records; and it submits the [Linkspan](https://github.com/cyber-shuttle/linkspan) job that runs a session
+through [Slurm](https://slurm.schedmd.com/), preparing the login node and creating a tunnel the compute node
+hosts outbound, so a session is reachable without the cluster opening an inbound port.
 
 A session is the record a client creates and polls; a Slurm job serves it, and one session can outlive
-several. Everything happens as you: your own SSH host configuration, your SSH credentials, your Slurm
-account. `csctl` binds to loopback only and never proxies session traffic — once a session is running,
-the browser reaches it directly over the tunnel.
+several. Each user's work runs as that user: their own SSH host configuration, their SSH credentials, their
+Slurm account. One cs-plane serves many users from a server, listening on loopback behind a TLS reverse
+proxy, and it never proxies session traffic: once a session is running, the browser reaches it directly over
+the tunnel. [cs-infra](https://github.com/cyber-shuttle/cs-infra) deploys it.
 
 ## Status
 
-Pre-release. There are no published binaries; `csctl version` prints the build's hardcoded version constant.
+Pre-release. There are no published binaries; `cs version` prints the build's hardcoded version constant.
 The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records what has changed on `main`.
 
 ## Requirements
@@ -25,15 +28,15 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
 - **macOS or Linux**, with an OpenSSH client on `PATH`. CI covers Linux only.
 - **Go 1.26 or newer.** Building from source is the only install path.
 - **A [CILogon](https://www.cilogon.org/) client, or another OIDC issuer configured the same way.** The
-  client must have PKCE and the device flow enabled: `csctl` finishes a browser's PKCE flow and an editor's
+  client must have PKCE and the device flow enabled: cs-plane finishes a browser's PKCE flow and an editor's
   device-code flow. `--oidc-issuer` defaults to `https://cilogon.org`; the client ID
-  goes on `--oidc-client-id` and the client secret in `CSCTL_OIDC_CLIENT_SECRET`, since only the daemon holds
+  goes on `--oidc-client-id` and the client secret in `CS_OIDC_CLIENT_SECRET`, since only cs-plane holds
   it.
-- **A Postgres server** with a schema csctl owns. `CSCTL_DATABASE_URL` names it through `search_path`, for
-  example `postgres:///cybershuttle?host=/var/run/postgresql&search_path=csctl`; csctl creates its tables in that
+- **A Postgres server** with a schema cs-plane owns. `CS_DATABASE_URL` names it through `search_path`, for
+  example `postgres:///cybershuttle?host=/var/run/postgresql&search_path=cs_plane`; cs-plane creates its tables in that
   schema while it is empty, and refuses one it did not create.
 - **A [Custos](https://custos.cyberinfrastructure.org/) instance** the resolved identity is checked against:
-  `--custos-url` names it, and the daemon calls `GET {custos-url}/me` with the caller's bearer to resolve the
+  `--custos-url` names it, and cs-plane calls `GET {custos-url}/me` with the caller's bearer to resolve the
   principal.
 - **A Microsoft or GitHub account entitled to
   [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview),** linked once through
@@ -43,46 +46,42 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
   `sacct`, `scancel`, `curl`, `tar`, `base64`, `od`, `install`, `printenv`, `sed` and `sort -V`, and whose
   nodes run Linux `x86_64` or `arm64` with `curl`.
 - **[Linkspan](https://github.com/cyber-shuttle/linkspan) 0.19.0 or newer**, the release whose workflow
-  document is `tasks`; `csctl` installs the latest release on a host that has none.
+  document is `tasks`; cs-plane installs the latest release on a host that has none.
 - **Outbound internet.** From the login node to `github.com`; from the compute node to `astral.sh`,
   `github.com` and `pypi.org`, which Linkspan installs `uv`, its Python and packages from, and to
   `tunnelsassetsprod.blob.core.windows.net`, which Linkspan fetches Microsoft's `devtunnel` CLI from, and to
   `*.rel.tunnels.api.visualstudio.com` and `*.devtunnels.ms`, which it hosts the tunnel through; and from
-  your own machine to the configured OIDC issuer, the configured Custos URL, `*.rel.tunnels.api.visualstudio.com`
+  the server running cs-plane to the configured OIDC issuer, the configured Custos URL, `*.rel.tunnels.api.visualstudio.com`
   and `*.devtunnels.ms`, plus `login.microsoftonline.com` or `github.com` while linking Dev Tunnels. See
   [what it runs on the cluster](#what-it-runs-on-the-cluster).
 
 ## Install
 
 ```bash
-go install github.com/cyber-shuttle/cs-control@latest
-```
-
-`@latest` resolves to the newest tagged release. From a clone:
-
-```bash
-git clone https://github.com/cyber-shuttle/cs-control.git
-cd cs-control
-go build .
+git clone https://github.com/cyber-shuttle/cs-plane.git
+cd cs-plane
+go build -o cs .
 ```
 
 ## Quick start
 
 ```bash
-export CSCTL_OIDC_CLIENT_SECRET=...
-csctl serve \
+export CS_OIDC_CLIENT_SECRET=...
+export CS_DATABASE_URL='postgres:///cybershuttle?host=/var/run/postgresql&search_path=cs_plane'
+cs serve \
   --listen 127.0.0.1:8045 \
   --oidc-client-id cilogon:/client_id/<id> \
   --custos-url https://custos.cybershuttle.org \
   --allowed-origin https://workspace.example.edu
 ```
 
-`--oidc-client-id`, `--custos-url` and `CSCTL_OIDC_CLIENT_SECRET` are required; `--oidc-issuer` defaults to
-`https://cilogon.org`. Both service URLs must use HTTPS, and the discovered issuer must match exactly.
+`--oidc-client-id`, `--custos-url`, `CS_OIDC_CLIENT_SECRET` and `CS_DATABASE_URL` are required;
+`--oidc-issuer` defaults to `https://cilogon.org`. The issuer must use HTTPS and match its discovery document
+exactly; the Custos URL must use HTTPS or loopback HTTP.
 `--allowed-origin` is repeatable and at least one is required; HTTPS origins and loopback HTTP origins are
 accepted, wildcards are not. `--listen` defaults to `127.0.0.1:8045` and must be an explicit loopback address.
 
-There are no CLI commands for keys, hosts, or sessions — a client drives the daemon over the API. Its routes are
+There are no CLI commands for keys, hosts, or sessions — a client drives cs-plane over the API. Its routes are
 under `/api/v1/oauth`, `/api/v1/ssh`, `/api/v1/tunnel`, `/api/v1/sessions`, and `/api/v1/telemetry`; see the
 [API reference](docs/API.md). Confirm it is listening and that authentication is in front:
 
@@ -91,7 +90,7 @@ $ curl -si http://127.0.0.1:8045/api/v1/sessions | head -1
 HTTP/1.1 401 Unauthorized
 ```
 
-`csctl help` prints the commands and the global flags; `csctl serve -h` prints the serve flags.
+`cs help` prints the commands and the global flags; `cs serve -h` prints the serve flags.
 
 ## Configuration
 
@@ -101,10 +100,10 @@ HTTP/1.1 401 Unauthorized
 | `serve --oidc-issuer` | — | `https://cilogon.org` |
 | `serve --oidc-client-id` | — | required |
 | `serve --custos-url` | — | required |
-| — | `CSCTL_OIDC_CLIENT_SECRET` | required |
+| — | `CS_OIDC_CLIENT_SECRET` | required |
 | `serve --allowed-origin` (repeatable) | — | required |
-| `--linkspan` | `CSCTL_LINKSPAN` | `$HOME/.cybershuttle/bin/linkspan` |
-| `--devtunnel-management-url` | `CSCTL_DEVTUNNEL_MANAGEMENT_URL` | `https://global.rel.tunnels.api.visualstudio.com` |
+| `--linkspan` | `CS_LINKSPAN` | `$HOME/.cybershuttle/bin/linkspan` |
+| `--devtunnel-management-url` | `CS_DEVTUNNEL_MANAGEMENT_URL` | `https://global.rel.tunnels.api.visualstudio.com` |
 
 Global flags precede the command. `--linkspan` is a remote path, absolute or anchored at `$HOME/`, resolved per
 host. Set `--devtunnel-management-url` to a regional `*.rel.tunnels.api.visualstudio.com` endpoint when the
@@ -123,11 +122,11 @@ account, it:
 
 Linkspan is the CyberShuttle agent that runs as the batch job's main process: it hosts the tunnel, installs
 `uv`, builds the Python environment under `$HOME/.cybershuttle` and starts Jupyter Server on the compute node.
-Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle`. `csctl` keeps a multiplexed OpenSSH connection to the
+Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle`. cs-plane keeps a multiplexed OpenSSH connection to the
 login node open between operations and starts no other long-lived process there; the session itself runs on
 a compute node. The batch script redirects the job's stdout and stderr to
 `$HOME/.cybershuttle/logs/<session id>-<seq>.out` and `.err`; nothing prunes them. The flags and outputs
-`csctl` depends on are listed in
+cs-plane depends on are listed in
 [Linkspan's compatibility document](https://github.com/cyber-shuttle/linkspan/blob/main/docs/COMPATIBILITY.md).
 
 ## Local state
@@ -143,8 +142,8 @@ a compute node. The batch script redirects the job's stdout and stderr to
 Scheduler, session, tunnel, SSH host and login key metadata live in the Postgres schema. Each caller's SSH host
 entries are rendered to that caller's `hosts/<principal>/config`
 for `ssh -F`; startup regenerates these files from committed rows and resolves interrupted key writes and deletions.
-The API never reads or writes `~/.ssh/config` for the account `csctl` runs as. A schema holding tables without
-csctl's format marker is refused before anything else is touched.
+The API never reads or writes `~/.ssh/config` for the account cs-plane runs as. A schema holding tables without
+cs-plane's format marker is refused before anything else is touched.
 
 ## Documentation
 
@@ -155,12 +154,12 @@ csctl's format marker is refused before anything else is touched.
 
 - **[cs-jupyter](https://github.com/cyber-shuttle/cs-jupyter)** — the browser client that drives this API: it
   signs in, creates and polls sessions, and connects to a `READY` one.
-- **[linkspan](https://github.com/cyber-shuttle/linkspan)** — the compute-node agent `csctl` installs and
+- **[linkspan](https://github.com/cyber-shuttle/linkspan)** — the compute-node agent cs-plane installs and
   submits as the job's main process.
 
 ## Getting help
 
-Bug reports and feature requests go to [GitHub Issues](https://github.com/cyber-shuttle/cs-control/issues).
+Bug reports and feature requests go to [GitHub Issues](https://github.com/cyber-shuttle/cs-plane/issues).
 Report a vulnerability privately instead — see [SECURITY.md](SECURITY.md).
 
 ## Contributing

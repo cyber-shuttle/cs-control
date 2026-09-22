@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cyber-shuttle/cs-control/internal/ssh"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func TestParseCommandCarriesTheConnectionAndRefusesTheRest(t *testing.T) {

@@ -15,10 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cyber-shuttle/cs-control/internal/db"
-	"github.com/cyber-shuttle/cs-control/internal/router"
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	internalssh "github.com/cyber-shuttle/cs-control/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/db"
+	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	internalssh "github.com/cyber-shuttle/cs-plane/internal/ssh"
 )
 
 const (

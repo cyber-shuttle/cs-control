@@ -11,9 +11,9 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/cyber-shuttle/cs-control/internal/identity"
-	"github.com/cyber-shuttle/cs-control/internal/router"
-	"github.com/cyber-shuttle/cs-control/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/identity"
+	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
 )
 
 const signInScope = "openid email profile offline_access"

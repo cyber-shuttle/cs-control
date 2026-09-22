@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/db"
-	"github.com/cyber-shuttle/cs-control/internal/router"
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	internalssh "github.com/cyber-shuttle/cs-control/internal/ssh"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/db"
+	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	internalssh "github.com/cyber-shuttle/cs-plane/internal/ssh"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 	cryptossh "golang.org/x/crypto/ssh"
 )
 

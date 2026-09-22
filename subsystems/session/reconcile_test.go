@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func reconciliationService(t *testing.T) (Service, string, string) {
@@ -38,7 +38,7 @@ func mustRead(t *testing.T, path string) []byte {
 func assertOneSchedulerRound(t *testing.T, log, host string) {
 	t.Helper()
 	data := string(mustRead(t, log))
-	if strings.Count(data, host+"|'sh' '-s' '--' 'csctl-session-status'") != 1 {
+	if strings.Count(data, host+"|'sh' '-s' '--' 'cs-session-status'") != 1 {
 		t.Fatalf("scheduler calls were not one round for %s: %s", host, data)
 	}
 }
@@ -62,7 +62,7 @@ func TestReconcileUsesOneRoundPerMixedHostAndNoneForTerminal(t *testing.T) {
 	_, err := reconciledList(context.Background(), service)
 	testutil.Check(t, err)
 	data, _ := os.ReadFile(log)
-	if got := strings.Count(string(data), "csctl-session-status"); got != 2 || strings.Contains(string(data), "gamma|") {
+	if got := strings.Count(string(data), "cs-session-status"); got != 2 || strings.Contains(string(data), "gamma|") {
 		t.Fatalf("unexpected scheduler rounds: %s", data)
 	}
 }

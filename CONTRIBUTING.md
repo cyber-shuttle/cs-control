@@ -1,4 +1,4 @@
-# Contributing to cs-control
+# Contributing to cs-plane
 
 Issues and pull requests go through GitHub. Branch off `main`, keep CI green, cover new behaviour with a test,
 and say in the description what you ran.
@@ -9,12 +9,12 @@ and say in the description what you ran.
 - [Git](https://git-scm.com/).
 - An OpenSSH client, for the tests that drive `ssh` directly.
 
-The database tests need a Postgres server. Point `CSCTL_TEST_DATABASE_URL` at one and every test works in a
+The database tests need a Postgres server. Point `CS_TEST_DATABASE_URL` at one and every test works in a
 schema of its own that is dropped afterwards; without it those tests are skipped, and CI always provides one:
 
 ```bash
 docker run -d -p 127.0.0.1:5432:5432 -e POSTGRES_PASSWORD=postgres postgres:17
-export CSCTL_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable'
+export CS_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable'
 ```
 
 There is no C dependency. SQL queries in each subsystem's `query.sql` are compiled
@@ -24,8 +24,8 @@ to Go by [sqlc](https://sqlc.dev) (`go generate ./internal/db`); the generated `
 ## Build and test
 
 ```bash
-git clone https://github.com/cyber-shuttle/cs-control.git
-cd cs-control
+git clone https://github.com/cyber-shuttle/cs-plane.git
+cd cs-plane
 
 go build ./...
 go vet ./...
@@ -40,14 +40,14 @@ clone. Suppressions for a finding that cannot be fixed at the root live only in 
 the code and why, never as `//nolint` comments. There is no coverage gate. The race suite takes roughly a
 minute, most of it in `subsystems/session`; that is real work, not a hang.
 
-`go build .` produces the `csctl` binary. See the [README](README.md) for running it.
+`go build -o cs .` produces the `cs` binary. See the [README](README.md) for running it.
 
 Tests sit beside what they test as `*_test.go` and need no cluster and no scheduler; only the database tests
 need the Postgres server above.
 
 ## Source layout
 
-The root package is the composition root: `main.go` builds `csctl`. Atomic packages with no HTTP surface of their own live under
+The root package is the composition root: `main.go` builds `cs`. Atomic packages with no HTTP surface of their own live under
 `internal/`; `oauth`, `ssh`, `tunnel`, `session` and `telemetry`, each owning its wire shapes, logic and route
 table, live under `subsystems/`. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) lists those packages in the order they depend in,
 says what each holds and gives the rule that none imports upward and no subsystem imports another, and covers

@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/devtunnel"
-	"github.com/cyber-shuttle/cs-control/internal/router"
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/devtunnel"
+	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 type fakeAuthorizer struct {

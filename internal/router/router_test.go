@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func TestRegistryUnionsRoutesAndRefusesAmbiguity(t *testing.T) {

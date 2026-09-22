@@ -26,8 +26,8 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func waitProcessGone(t *testing.T, pid int) {
@@ -407,7 +407,7 @@ func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 			name: "symlink directory",
 			setup: func(t *testing.T, root string, _ Runner) {
 				target := t.TempDir()
-				testutil.Check(t, os.Symlink(target, filepath.Join(root, fmt.Sprintf("csctl-%d", os.Getuid()))))
+				testutil.Check(t, os.Symlink(target, filepath.Join(root, fmt.Sprintf("cs-%d", os.Getuid()))))
 			},
 			run: func(service Runner) error {
 				_, err := service.resolvedControlPath(context.Background(), "delta")
@@ -417,7 +417,7 @@ func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 		{
 			name: "insecure directory",
 			setup: func(t *testing.T, root string, _ Runner) {
-				testutil.Check(t, os.Mkdir(filepath.Join(root, fmt.Sprintf("csctl-%d", os.Getuid())), 0o755))
+				testutil.Check(t, os.Mkdir(filepath.Join(root, fmt.Sprintf("cs-%d", os.Getuid())), 0o755))
 			},
 			run: func(service Runner) error {
 				_, err := service.resolvedControlPath(context.Background(), "delta")
@@ -442,7 +442,7 @@ func TestControlPathRejectsSymlinkAndInsecureTempArtifacts(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, err := os.MkdirTemp("/tmp", "csctl-control-attack-")
+			root, err := os.MkdirTemp("/tmp", "cs-attack-")
 			testutil.Check(t, err)
 			defer func() { _ = os.RemoveAll(root) }()
 			t.Setenv("TMPDIR", root)

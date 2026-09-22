@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/testutil"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
 func localAuthorizer(server *httptest.Server, provider authorizationProvider) *Authorizer {

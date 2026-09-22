@@ -1,14 +1,14 @@
 # Changelog
 
-Notable changes to CyberShuttle Control. The format follows
+Notable changes to CyberShuttle Plane. The format follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
 ### Added
 
-- `csctl serve`: a loopback-only JSON HTTP and WebSocket API, `127.0.0.1:8045` by default, requiring
-  `--oidc-client-id`, `--custos-url`, `CSCTL_OIDC_CLIENT_SECRET` and at least one exact `--allowed-origin`.
+- `cs serve`: a loopback-only JSON HTTP and WebSocket API, `127.0.0.1:8045` by default, requiring
+  `--oidc-client-id`, `--custos-url`, `CS_OIDC_CLIENT_SECRET` and at least one exact `--allowed-origin`.
   Every route lives under `/api/v1`, one subsystem per prefix: `oauth`, `ssh`, `tunnel`, `sessions` and
   `telemetry`.
 - Device sign-in for editors: `POST /oauth/device` starts it and `POST /oauth/exchange` redeems the approved code.
@@ -51,11 +51,11 @@ Notable changes to CyberShuttle Control. The format follows
   `403`); every refusal, including a missing credential (`401 unauthorized` with `WWW-Authenticate: Bearer`),
   is the JSON error envelope, and an unclassified failure is `500 internal_error` with its detail logged, not
   returned.
-- State in a Postgres schema named by `CSCTL_DATABASE_URL`, whose tables each subsystem declares in its own
+- State in a Postgres schema named by `CS_DATABASE_URL`, whose tables each subsystem declares in its own
   `schema.sql` and reads through sqlc-generated queries, and protected files under `~/.cybershuttle/control` at
   mode `0700`. A schema without the current format marker is refused before any credential file is created;
   nothing is migrated.
 - An Apache-2.0 `LICENSE`, contribution and security policies, and reference documentation for the routes
   (`docs/API.md`) and for the package layout, session lifecycle and trust boundaries (`docs/ARCHITECTURE.md`).
 
-[Unreleased]: https://github.com/cyber-shuttle/cs-control/commits/main
+[Unreleased]: https://github.com/cyber-shuttle/cs-plane/commits/main

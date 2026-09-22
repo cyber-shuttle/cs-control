@@ -1,8 +1,8 @@
 # Architecture
 
-`csctl` is a single binary that runs on a researcher's own machine and binds to loopback. It has no CLI
-commands for hosts or sessions: `serve` starts the HTTP API and a browser or editor client drives everything
-over it.
+cs-plane is a single binary, `cs`, that serves every user from one server and binds to loopback behind a TLS
+reverse proxy. It has no CLI commands for hosts or sessions: `serve` starts the HTTP API and a browser or editor
+client drives everything over it.
 
 Each subsystem exports its route table. `internal/router` unions them into one registry, rejects duplicate
 method-and-path pairs, and preserves the API's JSON 404 and 405 responses. `oauth.Service` contributes the four
@@ -35,7 +35,7 @@ subsystems/session    session state, Slurm and tunnel lifecycles, protected capa
                       records, logs, metrics, and routes
 subsystems/telemetry  the read-only run-history route over the session subsystem's records
 
-main.go               composition root, the csctl binary
+main.go               composition root, the `cs` binary
 ```
 
 Session, SSH, and tunnel subsystems give internal mechanisms domain meaning. OAuth establishes inbound identity.
@@ -194,13 +194,13 @@ subject and tenant, so an identifier from another system never becomes a path. `
 back. `internal/ssh` reads it only to check an alias exists before running `ssh -F` against it.
 
 This is a boundary, not a filing convention. `ssh` is invoked with `-F` naming that file, so an alias resolves
-through the configuration of the caller who added it and through no other. The account `csctl` runs as has no
+through the configuration of the caller who added it and through no other. The account cs-plane runs as has no
 standing in the API: its `~/.ssh/config` is neither read nor written, and its aliases are invisible. Two
 callers may use the same alias name for different hosts. The control master is keyed by the configuration as
 well as the alias, so one caller authenticating a host never hands another an authenticated SSH login, and
 scheduler reconciliation, log tailing and accounting each run as the session's own owner.
 
-A host may use an uploaded credential by name or an explicit `IdentityFile` path the daemon account can read.
+A host may use an uploaded credential by name or an explicit `IdentityFile` path the account cs-plane runs as can read.
 Credential files are principal-scoped and protected; explicit paths remain the caller's responsibility. Creation writes
 a staged key, commits its metadata, then promotes the key. Deletion first renames the key to a
 tombstone, then commits its metadata and host-reference changes. Startup resolves either interruption from the
@@ -225,9 +225,9 @@ authentication behavior.
 | `tunnel-link.key` | the 32-byte key every `tunnel-link` file is sealed with, mode `0600`, generated once at boot |
 
 The request's own bearer, and tunnel host and manage-ports credentials, are never persisted; the linked Dev
-Tunnels credential is the one third-party credential this daemon keeps, and only sealed.
+Tunnels credential is the one third-party credential cs-plane keeps, and only sealed.
 
-The Postgres schema named by `CSCTL_DATABASE_URL` holds non-secret scheduler, session, tunnel, SSH host and
+The Postgres schema named by `CS_DATABASE_URL` holds non-secret scheduler, session, tunnel, SSH host and
 login key metadata and the bounded record of what finished sessions did: a `schema_meta` format marker plus the
 tables each subsystem declares in its `schema.sql`:
 `sessions` and `runs` (JSON payload keyed by session ID or `(session_id, seq)`) and `ssh_hosts` and `ssh_keys`
@@ -247,7 +247,7 @@ key writes and deletions and regenerates every rendered config from committed ho
   but the pre-authentication sign-in routes require an exact allowed browser origin.
 - **One bearer, one identity authority.** Every request carries a signed OIDC ID token, cryptographically
   validated against the configured issuer's discovery document and JWKS with exact issuer equality and the
-  audience pinned to the configured client ID. That is not itself the principal: the daemon calls
+  audience pinned to the configured client ID. That is not itself the principal: cs-plane calls
   `GET {custos-url}/me` over HTTPS with the same bearer, allows only same-origin redirects, and treats Custos
   as the sole authority over who that token belongs to. A token Custos does not recognise is refused
   `401 identity_not_linked`.
@@ -259,7 +259,7 @@ key writes and deletions and regenerates every rendered config from committed ho
   it validates `redirectUri` against the same allowed-origin set as everything else and maps a rejected code
   or refresh token to `400 invalid_grant` without repeating the issuer's own error text.
 - **The Dev Tunnels link broker** retains the device code in bounded process memory only, enforces polling
-  intervals, and never answers a poll with the linked token — only the daemon's own sealed store ever holds
+  intervals, and never answers a poll with the linked token — only cs-plane's own sealed store ever holds
   it, and only Microsoft's rotated refresh token replaces what came before.
 - **OIDC key refresh** is coalesced, runs outside the cache lock, and is limited to cooldown-bounded unknown
   `kid` values; a signature failure against a known key never triggers a fetch.
@@ -272,5 +272,5 @@ key writes and deletions and regenerates every rendered config from committed ho
   session responses. The Jupyter token appears only in the job environment and in the session-access
   response.
 - **No proxying.** The owner-authenticated `/access` response returns the session's direct Jupyter URI and
-  its token; cs-control proxies no session data and creates no login-host port forward. The one WebSocket
+  its token; cs-plane proxies no session data and creates no login-host port forward. The one WebSocket
   carries interactive SSH authentication prompts as untyped bytes and never forwards session data.

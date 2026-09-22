@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cyber-shuttle/cs-control/internal/security"
-	"github.com/cyber-shuttle/cs-control/internal/slurm"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
+	"github.com/cyber-shuttle/cs-plane/internal/slurm"
 )
 
 const (
