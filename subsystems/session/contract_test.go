@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cyber-shuttle/cs-plane/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-plane/internal/router"
 	"github.com/cyber-shuttle/cs-plane/internal/security"
 	"github.com/cyber-shuttle/cs-plane/internal/testutil"
@@ -28,18 +27,15 @@ func serviceHandler(t *testing.T, service *Service) http.Handler {
 	return handler
 }
 
-func readyAccessScenario(t *testing.T, jupyterURI string) (Session, *testTunnelManager, Service) {
+func readyAccessScenario(t *testing.T) (Session, Service) {
 	t.Helper()
-	now := time.Now().UTC().Truncate(time.Second)
-	session := readyAccessSession(now)
-	manager := &testTunnelManager{getResponse: &devtunnel.Record{
-		ID: session.Tunnel.ID, ClusterID: session.Tunnel.ClusterID, ExpiresAt: session.Tunnel.ExpiresAt,
-		Ports: []devtunnel.PortRecord{{PortNumber: ports(session.ID, session.Seq).Jupyter, Protocol: "http", PortForwardingURIs: []string{jupyterURI}}},
-	}}
-	service := accessTestService(t, manager, now)
+	session := pendingSession("s-012345abcdef", "delta", "123")
+	setTestSessionMetadata(&session)
+	session.State = "READY"
+	service := accessTestService(t, &testTunnelManager{})
 	testutil.Check(t, putCapability(service.CapabilityDir, session.ID, session.Seq, defaultSessionCapability()))
 	putSessions(t, service, session)
-	return session, manager, service
+	return session, service
 }
 
 func mixedOwnerSession(id string, owner security.Principal) Session {
@@ -114,8 +110,8 @@ func TestHTTPSessionListReturnsCachedStateWhileRefreshBlocks(t *testing.T) {
 	})
 }
 
-func TestSessionAccessDiscoversOwnerJupyterWithoutCallingTheSession(t *testing.T) {
-	session, manager, service := readyAccessScenario(t, "https://31001.use.devtunnels.ms/")
+func TestSessionAccessNamesTheJupyterProxyWithoutCallingTheSession(t *testing.T) {
+	session, service := readyAccessScenario(t)
 	handler := serviceHandler(t, &service)
 	response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/sessions/"+session.ID+"/access", nil))
 	if response.Code != http.StatusOK {
@@ -131,28 +127,17 @@ func TestSessionAccessDiscoversOwnerJupyterWithoutCallingTheSession(t *testing.T
 	}
 	var access sessionAccessResponse
 	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &access))
-	if access.SessionID != session.ID || access.Seq != session.Seq || access.ExpiresAt != session.Tunnel.ExpiresAt || access.Jupyter.URI != "https://31001.use.devtunnels.ms" || access.Jupyter.Token != testJupyterToken {
+	if access.SessionID != session.ID || access.Seq != session.Seq || !access.ExpiresAt.After(time.Now()) || access.Jupyter.URI != "https://plane.example.edu/api/v1/sessions/"+session.ID+"/jupyter/" || access.Jupyter.Token != testJupyterToken {
 		t.Fatalf("access = %#v", access)
-	}
-	manager.mu.Lock()
-	gets := append([]devtunnel.GetRequest(nil), manager.gets...)
-	manager.mu.Unlock()
-	if len(gets) != 1 || gets[0].AccessToken != testConnectToken || gets[0].TunnelID != session.Tunnel.ID || gets[0].ClusterID != session.Tunnel.ClusterID {
-		t.Fatalf("management discovery = %#v", gets)
 	}
 }
 
 func TestSessionAccessIsOwnerOnly(t *testing.T) {
-	session, manager, service := readyAccessScenario(t, "https://31001.use.devtunnels.ms")
+	session, service := readyAccessScenario(t)
 	handler := serviceHandler(t, &service)
 	response := testutil.Serve(handler, requestAs(security.Principal{Subject: "other", Tenant: testPrincipal.Tenant}, http.MethodGet, "/api/v1/sessions/"+session.ID+"/access", nil))
 	if response.Code != http.StatusForbidden || strings.Contains(response.Body.String(), testJupyterToken) {
 		t.Fatalf("owner mismatch = %d %s", response.Code, response.Body.String())
-	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	if len(manager.gets) != 0 {
-		t.Fatalf("owner mismatch reached discovery: %#v", manager.gets)
 	}
 }
 
@@ -207,7 +192,7 @@ func TestSessionListDropsAnotherOwnersSessionsAndLogs(t *testing.T) {
 func TestSessionPublicJSONContractIsNarrow(t *testing.T) {
 	value := sessionResponse{
 		ID: "s-012345abcdef", Seq: 1,
-		State: "READY", SSHHost: "delta", Account: "project-a", Partition: "cpu",
+		State: "READY", Launcher: launcherPlane, SSHHost: "delta", Account: "project-a", Partition: "cpu",
 		RootFolder: "$HOME/project", Resources: resources{Cores: 2, MemoryMB: 4096, WallMinutes: 60},
 		CreatedAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), StartedAt: time.Date(2030, 1, 1, 0, 0, 30, 0, time.UTC), UpdatedAt: time.Date(2030, 1, 1, 0, 1, 0, 0, time.UTC),
 	}

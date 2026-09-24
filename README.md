@@ -9,14 +9,14 @@ compute nodes of an HPC (high-performance computing) cluster, reachable from a b
 its control plane. It signs users in through CILogon and resolves each to a user in
 [Custos](https://custos.cyberinfrastructure.org/); it holds each user's credentials, SSH hosts and session
 records; and it submits the [Linkspan](https://github.com/cyber-shuttle/linkspan) job that runs a session
-through [Slurm](https://slurm.schedmd.com/), preparing the login node and creating a tunnel the compute node
-hosts outbound, so a session is reachable without the cluster opening an inbound port.
+through [Slurm](https://slurm.schedmd.com/), preparing the login node. The job's Linkspan dials out to cs-plane and
+holds a link, so a session is reachable without the cluster opening an inbound port.
 
 A session is the record a client defines, starts and polls; a Slurm job serves each start, and one session can
 outlive several. Each user's work runs as that user: their own SSH host configuration, their SSH credentials, their
 Slurm account. One cs-plane serves many users from a server, listening on loopback behind a TLS reverse
-proxy, and it never proxies session traffic: once a session is running, the browser reaches it directly over
-the tunnel. [cs-infra](https://github.com/cyber-shuttle/cs-infra) deploys it.
+proxy at `--public-url`; clients reach a running session's Jupyter Server and ports through cs-plane over the link,
+or over a Dev Tunnel the user delegates. [cs-infra](https://github.com/cyber-shuttle/cs-infra) deploys it.
 
 ## Status
 
@@ -38,18 +38,18 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
 - **A [Custos](https://custos.cyberinfrastructure.org/) instance** the resolved identity is checked against:
   `--custos-url` names it, and cs-plane calls `GET {custos-url}/me` with the caller's bearer to resolve the
   principal.
-- **A Microsoft or GitHub account entitled to
+- **Optionally, a Microsoft or GitHub account entitled to
   [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview),** linked once through
-  `POST /api/v1/tunnel/authorizations` and kept sealed under the caller's principal. Sessions run over that account;
-  a caller with no link is refused at session start.
+  `POST /api/v1/tunnel/authorizations` and kept sealed under the caller's principal, for a delegated tunnel per run.
 - **An SSH-reachable Linux Slurm cluster** whose login node provides `sacctmgr`, `sinfo`, `sbatch`, `squeue`,
   `sacct`, `scancel`, `curl`, `tar`, `base64`, `od`, `install`, `printenv`, `sed` and `sort -V`, and whose
   nodes run Linux `x86_64` or `arm64` with `curl`.
-- **[Linkspan](https://github.com/cyber-shuttle/linkspan) 0.19.0 or newer**, the release whose workflow
-  document is `tasks`; cs-plane installs the latest release on a host that has none.
-- **Outbound internet.** From the login node to `github.com`; from the compute node to `astral.sh`,
-  `github.com` and `pypi.org`, which Linkspan installs `uv`, its Python and packages from, and to
-  `tunnelsassetsprod.blob.core.windows.net`, which Linkspan fetches Microsoft's `devtunnel` CLI from, and to
+- **[Linkspan](https://github.com/cyber-shuttle/linkspan) 0.20.0 or newer**, the release that reads the `tasks`
+  workflow document and dials `--link-url`; cs-plane installs the latest release on a host that has none.
+- **Outbound internet.** From the login node to `github.com`; from the compute node to `--public-url`, which
+  Linkspan links to, and to `astral.sh`, `github.com` and `pypi.org`, which Linkspan installs `uv`, its Python and
+  packages from, and, with a delegated tunnel, to `tunnelsassetsprod.blob.core.windows.net`, which Linkspan fetches
+  Microsoft's `devtunnel` CLI from, and to
   `*.rel.tunnels.api.visualstudio.com` and `*.devtunnels.ms`, which it hosts the tunnel through; and from
   the server running cs-plane to the configured OIDC issuer, the configured Custos URL, `*.rel.tunnels.api.visualstudio.com`
   and `*.devtunnels.ms`, plus `login.microsoftonline.com` or `github.com` while linking Dev Tunnels. See
@@ -72,12 +72,14 @@ cs serve \
   --listen 127.0.0.1:8045 \
   --oidc-client-id cilogon:/client_id/<id> \
   --custos-url https://custos.cybershuttle.org \
+  --public-url https://api.example.edu \
   --allowed-origin https://workspace.example.edu
 ```
 
-`--oidc-client-id`, `--custos-url`, `CS_OIDC_CLIENT_SECRET` and `CS_DATABASE_URL` are required;
+`--oidc-client-id`, `--custos-url`, `--public-url`, `CS_OIDC_CLIENT_SECRET` and `CS_DATABASE_URL` are required;
 `--oidc-issuer` defaults to `https://cilogon.org`. The issuer must use HTTPS and match its discovery document
-exactly; the Custos URL must use HTTPS or loopback HTTP.
+exactly; the Custos URL must use HTTPS or loopback HTTP; the public URL, where browsers and jobs reach cs-plane,
+must use HTTPS.
 `--allowed-origin` is repeatable and at least one is required; HTTPS origins and loopback HTTP origins are
 accepted, wildcards are not. `--listen` defaults to `127.0.0.1:8045` and must be an explicit loopback address.
 
@@ -100,6 +102,7 @@ HTTP/1.1 401 Unauthorized
 | `serve --oidc-issuer` | — | `https://cilogon.org` |
 | `serve --oidc-client-id` | — | required |
 | `serve --custos-url` | — | required |
+| `serve --public-url` | — | required |
 | — | `CS_OIDC_CLIENT_SECRET` | required |
 | `serve --allowed-origin` (repeatable) | — | required |
 | `--linkspan` | `CS_LINKSPAN` | `$HOME/.cybershuttle/bin/linkspan` |
@@ -117,10 +120,10 @@ account, it:
 
 - downloads a [Linkspan](https://github.com/cyber-shuttle/linkspan) release tarball from GitHub into
   `$HOME/.cybershuttle/bin`, unless the installed one is current, and refuses the host if that Linkspan is
-  older than 0.19.0;
+  older than 0.20.0;
 - writes the workflow document the job will run, under `$HOME/.cybershuttle/sessions/<session id>`.
 
-Linkspan is the CyberShuttle agent that runs as the batch job's main process: it hosts the tunnel, installs
+Linkspan is the CyberShuttle agent that runs as the batch job's main process: it links to cs-plane, hosts any delegated tunnel, installs
 `uv`, builds the Python environment under `$HOME/.cybershuttle` and starts Jupyter Server on the compute node.
 Nothing runs as root and nothing is installed outside `$HOME/.cybershuttle`. cs-plane keeps a multiplexed OpenSSH connection to the
 login node open between operations and starts no other long-lived process there; the session itself runs on
@@ -128,12 +131,14 @@ a compute node. The batch script redirects the job's stdout and stderr to
 `$HOME/.cybershuttle/logs/<session id>-<seq>.out` and `.err`; nothing prunes them. The flags and outputs
 cs-plane depends on are listed in
 [Linkspan's compatibility document](https://github.com/cyber-shuttle/linkspan/blob/main/docs/COMPATIBILITY.md).
+A client may instead submit the job itself and admit it through `POST /api/v1/sessions/{id}/attach`; cs-plane then
+runs nothing on the cluster for that run.
 
 ## Local state
 
 `~/.cybershuttle/control`, created and verified at mode `0700`:
 
-- `credentials/` — per-seq Dev Tunnel and Jupyter capabilities, mode `0600`
+- `credentials/` — per-seq Jupyter, link and delegated Dev Tunnel capabilities, mode `0600`
 - `hosts/<principal>/config` — each caller's own SSH host entries, rendered from the database, mode `0600`
 - `hosts/<principal>/keys/<id>` — login keys the caller uploaded, mode `0600`
 - `hosts/<principal>/tunnel-link` — the caller's linked Dev Tunnels credential, sealed, mode `0600`

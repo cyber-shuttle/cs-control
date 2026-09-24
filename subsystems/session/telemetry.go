@@ -432,17 +432,13 @@ func (s Service) sampleOnce(parent context.Context) {
 	defer cancel()
 	var group sync.WaitGroup
 	for _, record := range sessions {
-		if record.State != "READY" || record.Tunnel.ID == "" {
+		if record.State != "READY" {
 			continue
 		}
 		group.Add(1)
 		go func(record Session) {
 			defer group.Done()
-			endpoint, err := s.sessionEndpoint(ctx, record, ports(record.ID, record.Seq).Control)
-			if err != nil {
-				return
-			}
-			sample, err := s.sampleEndpoint(ctx, endpoint)
+			sample, err := s.sampleSession(ctx, record)
 			if err == nil {
 				s.metrics.append(record.ID, sample)
 			}
@@ -455,13 +451,8 @@ func newSessionMetrics() *sessionMetrics {
 	return &sessionMetrics{series: make(map[string][]metricSample)}
 }
 
-func (s Service) sampleEndpoint(ctx context.Context, endpoint tunnelEndpoint) (metricSample, error) {
-	request, err := security.NewRequest(ctx, http.MethodGet, endpoint.URI+"/api/v1/metrics", "", nil)
-	if err != nil {
-		return metricSample{}, err
-	}
-	request.Header.Set(tunnelAuthorizationHeader, "tunnel "+endpoint.ConnectToken)
-	body, status, err := security.Do(security.GuardedClient(nil, s.runner.EffectiveTimeout()), request, maxMetricBodyBytes)
+func (s Service) sampleSession(ctx context.Context, session Session) (metricSample, error) {
+	body, status, err := s.linkspan(ctx, session, http.MethodGet, "/api/v1/metrics", nil, maxMetricBodyBytes)
 	if err != nil {
 		return metricSample{}, err
 	}
@@ -497,7 +488,8 @@ type Run struct {
 
 type runRecord struct {
 	Run
-	Owner security.Principal `json:"owner"`
+	Owner    security.Principal `json:"owner"`
+	Launcher string             `json:"launcher,omitempty"`
 }
 
 const runStatsWindow = 10 * time.Minute
@@ -537,7 +529,7 @@ func (s Service) runOf(session *Session) runRecord {
 			EndedAt: session.UpdatedAt, Samples: s.metrics.samples(session.ID),
 			Logs: logTail.Lines,
 		},
-		Owner: session.Owner,
+		Owner: session.Owner, Launcher: session.Launcher,
 	}
 }
 
@@ -593,7 +585,7 @@ func (s Service) pendingRunStats() ([]runRecord, error) {
 	var due []runRecord
 	err := s.Store.locked(func(current *state) error {
 		for _, run := range current.Runs {
-			if run.Stats == nil && !run.EndedAt.Before(cutoff) {
+			if run.Stats == nil && run.Launcher != launcherClient && !run.EndedAt.Before(cutoff) {
 				due = append(due, run)
 			}
 		}

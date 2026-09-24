@@ -8,7 +8,7 @@ There are no releases; fixes land on `main`, the only supported version.
 
 Report privately through the repository's **Security** tab, **Report a vulnerability**; never in a public issue,
 pull request or discussion. Include the commit (`git rev-parse HEAD`), your operating system, what an attacker can
-reach, and reproduction steps. Redact OIDC ID tokens, Dev Tunnel tokens and Jupyter tokens.
+reach, and reproduction steps. Redact OIDC ID tokens, Dev Tunnel tokens, link tokens and Jupyter tokens.
 
 We acknowledge the report, say whether we can reproduce it before a fix is published, and credit you in the
 advisory unless you decline.

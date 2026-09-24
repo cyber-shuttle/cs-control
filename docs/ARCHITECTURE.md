@@ -27,8 +27,8 @@ internal/devtunnel   Dev Tunnels authorization and management protocols, wire ty
 subsystems/oauth     sign-in routes, CORS, bearer extraction, principal resolution
 subsystems/ssh       per-principal SSH hosts and keys, config rendering, health, authentication
 subsystems/tunnel    Dev Tunnels account linking, sealed credential store, refresh
-subsystems/session   session state, Slurm and tunnel lifecycles, capabilities, reconciliation, logs, metrics,
-                     run records
+subsystems/session   session state, Slurm and tunnel lifecycles, capabilities, link, reconciliation, logs,
+                     metrics, run records
 
 main.go              composition root
 ```
@@ -36,12 +36,14 @@ main.go              composition root
 ## Session lifecycle
 
 A session is the durable record; each `start` launches one Slurm job under the next `seq`, named
-`cs-<session id>-<seq>`. `POST /sessions` records a session at seq 0 without touching a host.
+`cs-<session id>-<seq>`. `POST /sessions` records a session at seq 0 without touching a host. `attach` takes the
+next seq for a job the client submits; cs-plane runs no SSH or scheduler command for it, so reconciliation and
+accounting skip it and `stop` retires it locally.
 
 A launch runs in this order:
 
 1. Discovery (`id`, `sacctmgr`, `sinfo`, `printenv HOME`) and `sbatch --test-only` against the candidate script.
-2. A creator-owned Dev Tunnel for the seq from the owner's linked Dev Tunnels account; then the seq capability
+2. A creator-owned Dev Tunnel for the seq, when the owner linked a Dev Tunnels account; then the seq capability
    written to disk and the record persisted as `SUBMITTING`.
 3. Login-node preparation: Linkspan and the workflow document, in one constant script.
 4. `sbatch` with the job name and the session environment on the command line.
@@ -54,22 +56,23 @@ submission that returns after the session was stopped cancels its job. A seq is 
 ### Preparation
 
 Preparation installs Linkspan into the account, not the session: one `$HOME/.cybershuttle` per account. It refuses
-a Linkspan older than 0.19.0, the first release that reads the `tasks` document. It runs on
+a Linkspan older than 0.20.0, the first release that reads the `tasks` document and dials `--link-url`. It runs on
 the service's context, so an abandoned request leaves no half-built state. Preparation is keyed on the caller's
 config file plus alias; a concurrent launch on the same key is refused `session_provisioning_in_progress`, while
 another caller's preparation of the same host proceeds.
 
 The batch script execs Linkspan and names no application. The workflow, one `on: start` task with a
 `jupyter.sessions.start` step, carries only validated paths and the Jupyter port. Secrets never enter script text:
-`JUPYTER_TOKEN`, `CS_CONTROL_PORT`, `CS_TUNNEL_ID`, `CS_TUNNEL_CLUSTER` and `CS_TUNNEL_HOST_TOKEN` travel in
-`sbatch --export`. The control and Jupyter ports are derived from session ID and seq, so the tunnel can declare both
-before the job starts.
+`JUPYTER_TOKEN`, `LINKSPAN_LINK_TOKEN`, `CS_LINK_URL`, `CS_CONTROL_PORT` and, with a tunnel, `CS_TUNNEL_ID`,
+`CS_TUNNEL_CLUSTER` and `CS_TUNNEL_HOST_TOKEN` travel in `sbatch --export`. The control and Jupyter ports are derived
+from session ID and seq, so a tunnel can declare the control port before the job starts.
 
 ### States and reconciliation
 
 States: `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, `FAILED`. A Slurm state outside this
-vocabulary is treated as no observation. `STARTING` becomes `READY` once the job runs and its log has output. Slurm
-is otherwise authoritative, including for the end of a run.
+vocabulary is treated as no observation. A link for the current seq moves `QUEUED` or `STARTING` to `READY`, and
+reconciliation never demotes a linked `READY` session. Without a link, `STARTING` becomes `READY` once the job runs
+and its log has output. Slurm is otherwise authoritative, including for the end of a run.
 
 Reconciliation runs in the background every 30 seconds, one pass at a time, so no read waits on SSH. A session
 unknown to the scheduler past a two-minute propagation window becomes `STOPPED`, as does one whose scheduler is
@@ -81,20 +84,26 @@ Samples are served on their own route so they do not churn the `GET /sessions` E
 terminal state, cs-plane freezes a run record keyed by `(session id, seq)` holding the final sample window and log
 tail, then drops both buffers.
 
+## Session link
+
+Linkspan dials `<public-url>/api/v1/sessions/{id}/link` and holds the WebSocket, authenticated by the per-seq link
+token. Every connection cs-plane makes into the job, whether metrics, SSH start, Jupyter proxy or forward, is a
+yamux stream over that socket, HTTP pooled per seq. The link registry is process-local; after a restart Linkspan
+redials. A delegated Dev Tunnel is the fallback while the session has no link.
+
 ## Dev Tunnels
 
-Linking is required: `start` answers `409 tunnel_link_required` before anything is provisioned while the caller has
-linked nothing. The broker runs a Microsoft or GitHub device-code authorization bound to the caller's principal,
+Linking is optional. The broker runs a Microsoft or GitHub device-code authorization bound to the caller's principal,
 then seals the resulting credential with `nacl/secretbox` under `tunnel-link.key`. The credential is loaded and, when
 it has a refresh token, refreshed within two minutes of expiry on use; the request's own bearer is never used for
 Dev Tunnels.
 
-Each session seq gets one creator-owned tunnel declaring the control and Jupyter ports, with anonymous connect only on
-the Jupyter port, whose authorization is Jupyter Server's own token, and traffic inspection disabled. `customExpiration` is walltime plus 15 minutes, clamped to one hour
+With a linked account, each session seq gets one creator-owned tunnel declaring only the control port, with no
+anonymous access and traffic inspection disabled. `customExpiration` is walltime plus 15 minutes, clamped to one hour
 through 30 days; expiry is the cleanup backstop. Any create error deletes the deterministic tunnel ID before
-returning. `stop` releases best-effort, skipping the Dev Tunnels call without a usable credential. `/access`
-reads the tunnel with `Authorization: tunnel <connect token>` and answers the Jupyter port's URI with the live
-expiration; metrics reach Linkspan's control port with the connect token in `X-Tunnel-Authorization`.
+returning. `stop` releases best-effort, skipping the Dev Tunnels call without a usable credential. The
+fallback dial reads the tunnel with `Authorization: tunnel <connect token>`, then opens Linkspan's
+`/api/v1/forward/{port}` with the connect token in `X-Tunnel-Authorization`.
 
 ## SSH configuration
 
@@ -122,15 +131,16 @@ re-renders every SSH config. Files on disk are listed in the [README](../README.
 ## Trust boundaries
 
 - **Loopback only.** `serve` refuses a non-loopback listen address before binding.
-- **Exact origins.** One policy, `security.Origins`, covers every route, the SSH authentication WebSocket included: a
-  present `Origin` must be allowlisted; an absent one is a native client. `oauth/config` and
+- **Exact origins.** One policy, `security.Origins`, covers the bearer boundary, the Jupyter proxy and the forward
+  and link upgrades: a present `Origin` must be allowlisted; an absent one is a native client. `oauth/config` and
   `oauth/exchange` also require one.
 - **One bearer, one identity authority.** The ID token is validated against the issuer's discovery document and JWKS,
   with exact issuer and audience pinned to the client ID. Custos `GET /me`, called with the same bearer over a client
   that follows only same-origin redirects, names the principal under tenant `custos`.
 - **Ownership.** Every session, log tail, run, host, key and tunnel link is scoped to the principal.
-- **No ambient authentication.** No cookies, token URLs or static files. Outside the bearer boundary are only the
-  sign-in routes.
+- **No ambient authentication.** No cookies or static files; only the Jupyter proxy takes its token in the URL, as
+  Jupyter clients require. Outside the bearer boundary are only the sign-in routes and the capability routes:
+  forward and Jupyter proxy by Jupyter token, link by link token.
 - **Sign-in relay.** Holds the client secret and never returns it; `redirectUri` must be on an allowed origin; issuer
   errors are not echoed.
 - **Dev Tunnels broker.** Device codes stay in bounded process memory, polling intervals are enforced, and no
@@ -139,9 +149,10 @@ re-renders every SSH config. Files on disk are listed in the [README](../README.
   seconds.
 - **Validation precedes construction.** Aliases, scheduler values, node names, paths, tunnel metadata and ports are
   validated before reaching a command line or state; remote scripts are constants taking arguments.
-- **Redaction.** Tunnel, host, connect and Jupyter tokens are redacted from errors, logs, scripts and responses. The
-  Jupyter token appears only in the job environment and the access response.
-- **No proxying.** `/access` returns the session's direct Jupyter URI over its tunnel; cs-plane relays no session data
-  and opens no login-node port forward.
+- **Redaction.** Tunnel, host, connect, link and Jupyter tokens are redacted from errors, logs, scripts and responses. The
+  Jupyter token appears only in the job environment and the access response; the link token only in the job
+  environment and, for a client-launched run, the `attach` response.
+- **Proxying.** cs-plane relays only to ports a Linkspan task serves, never the control port, and opens no login-node
+  port forward.
 - **Shared nodes.** Jobs are not `--exclusive`; any user on the compute node can reach Linkspan's loopback control port
   ([Linkspan security model](https://github.com/cyber-shuttle/linkspan/blob/main/SECURITY.md#security-model)).

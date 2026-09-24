@@ -1,4 +1,4 @@
-// Package main is cs-plane's single binary, cs, that runs on a researcher's own machine and binds to loopback.
+// Package main is cs-plane's single binary, cs, one server for many users that binds to loopback behind a TLS proxy.
 // run dispatches the CLI; serve validates before listening. newServeComponents composes authentication, SSH,
 // session, and tunnel-link owners over one state directory and closes them on failure or shutdown.
 package main
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,7 +32,7 @@ import (
 )
 
 const (
-	Version                       = "0.1.0"
+	Version                       = "0.2.0"
 	defaultDevTunnelManagementURL = "https://global.rel.tunnels.api.visualstudio.com"
 	defaultOIDCIssuer             = "https://cilogon.org"
 	sshTimeout                    = 20 * time.Second
@@ -43,7 +44,7 @@ func init() { security.UserAgent = "cs-plane/" + Version }
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  cs [global options] serve --oidc-client-id CLIENT_ID --custos-url URL \
+  cs [global options] serve --oidc-client-id CLIENT_ID --custos-url URL --public-url URL \
       --allowed-origin ORIGIN [--allowed-origin ORIGIN ...]
   cs help
   cs version
@@ -52,6 +53,7 @@ Identity (Custos login):
   --oidc-issuer ISSUER (default https://cilogon.org)
   --oidc-client-id CLIENT_ID (required)
   --custos-url URL (required), e.g. https://custos.cybershuttle.org
+  --public-url URL (required), the https URL browsers and session jobs reach cs at
   CS_OIDC_CLIENT_SECRET=SECRET (required, for the sign-in relay's token exchange)
 
 State:
@@ -79,12 +81,14 @@ func defaultStateDir() string {
 
 type services struct {
 	DatabaseURL   string
+	PublicURL     string
 	Configs       ssh.Configurations
 	SessionStore  session.Store
 	LinkspanPath  string
 	TunnelManager session.TunnelManager
 	CapabilityDir string
 	TunnelTimeout time.Duration
+	Origins       security.Origins
 }
 
 type serveComponents struct {
@@ -123,7 +127,8 @@ func newServeComponents(svcs services, authentication *oauth.Service) (*serveCom
 	components.closers = append(components.closers, tunnelService.Close)
 	sessionService := session.NewService(session.Config{
 		Runners: svcs.Configs, Store: svcs.SessionStore, LinkspanPath: svcs.LinkspanPath, TunnelManager: svcs.TunnelManager,
-		TunnelCredentials: tunnelService, CapabilityDir: svcs.CapabilityDir, TunnelTimeout: svcs.TunnelTimeout,
+		TunnelCredentials: tunnelService, CapabilityDir: svcs.CapabilityDir, PublicURL: svcs.PublicURL,
+		TunnelTimeout: svcs.TunnelTimeout, Origins: svcs.Origins,
 	})
 	components.closers = append(components.closers, sessionService.Close)
 	registryRoutes, err := router.New(
@@ -135,7 +140,10 @@ func newServeComponents(svcs services, authentication *oauth.Service) (*serveCom
 	if err != nil {
 		return fail(err)
 	}
-	components.handler = authentication.Protect(registryRoutes)
+	mux := http.NewServeMux()
+	mux.Handle("/", authentication.Protect(registryRoutes))
+	sessionService.Mount(mux)
+	components.handler = mux
 	return components, nil
 }
 
@@ -157,6 +165,7 @@ func runServe(ctx context.Context, svcs services, args []string, listen func(str
 	oidcIssuer := flags.String("oidc-issuer", defaultOIDCIssuer, "OIDC issuer validated against its own discovery document and JWKS")
 	oidcClientID := flags.String("oidc-client-id", "", "OIDC client ID pinned as the ID token audience")
 	custosURL := flags.String("custos-url", "", "Custos base URL resolving a validated ID token to a user via GET {custos-url}/me")
+	publicURL := flags.String("public-url", "", "HTTPS URL clients and session jobs reach this server at, such as https://api.example.edu")
 	var allowedOrigins []string
 	flags.Func("allowed-origin", "exact browser origin allowed to call the API (repeatable)", func(value string) error {
 		allowedOrigins = append(allowedOrigins, value)
@@ -180,6 +189,10 @@ func runServe(ctx context.Context, svcs services, args []string, listen func(str
 	if strings.TrimSpace(*custosURL) == "" {
 		return errors.New("--custos-url is required")
 	}
+	if parsed, err := url.Parse(*publicURL); err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("--public-url must be an https URL without credentials, query or fragment")
+	}
+	svcs.PublicURL = strings.TrimSuffix(*publicURL, "/")
 	oidcClientSecret := os.Getenv("CS_OIDC_CLIENT_SECRET")
 	if strings.TrimSpace(oidcClientSecret) == "" {
 		return errors.New("CS_OIDC_CLIENT_SECRET is required")
@@ -192,6 +205,7 @@ func runServe(ctx context.Context, svcs services, args []string, listen func(str
 	if err != nil {
 		return err
 	}
+	svcs.Origins = origins
 	authentication, err := oauth.NewService(*custosURL, *oidcIssuer, *oidcClientID, oidcClientSecret, origins, nil)
 	if err != nil {
 		return err

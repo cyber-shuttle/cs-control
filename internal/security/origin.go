@@ -1,4 +1,4 @@
-// Origins is the one browser-origin policy the OAuth boundary applies to every API route. An origin is an exact
+// Origins is the one browser-origin policy the OAuth boundary and the session routes apply. An origin is an exact
 // HTTPS or loopback HTTP scheme and host. A request without Origin is a native client and passes; a present Origin
 // must be allowlisted. Routes that serve only browsers additionally require Origin, which is the caller's decision,
 // not this policy's.
