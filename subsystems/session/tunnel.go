@@ -1,7 +1,8 @@
 // Session tunnels are part of the session state machine: deterministic ports, requested lifetime, remote tunnel
 // validation, compensation, and the private per-seq capability all derive from session identity and state. The
 // Dev Tunnels manager supplies vendor operations and TunnelCredentials supplies the owner's linked account; no
-// transport subsystem owns or persists session lifecycle state.
+// transport subsystem owns or persists session lifecycle state. A defined session that never ran has seq 0 and no
+// capability.
 package session
 
 import (
@@ -105,6 +106,9 @@ func getCapability(dir, sessionID string, seq int) (sessionCapability, error) {
 }
 
 func deleteCapability(dir, sessionID string, seq int) error {
+	if seq == 0 {
+		return nil
+	}
 	location, err := capabilityPath(dir, sessionID, seq)
 	if err != nil {
 		return err
@@ -122,11 +126,11 @@ func sessionTunnelDuration(wallMinutes int) uint32 {
 }
 
 func (s Service) sessionEndpoint(ctx context.Context, session Session, number uint16) (tunnelEndpoint, error) {
-	capability, err := getCapability(s.capabilityDir, session.ID, session.Seq)
+	capability, err := getCapability(s.CapabilityDir, session.ID, session.Seq)
 	if err != nil {
 		return tunnelEndpoint{}, errors.New("this session seq has no stored capability")
 	}
-	record, err := s.tunnelManager.Get(ctx, devtunnel.GetRequest{
+	record, err := s.TunnelManager.Get(ctx, devtunnel.GetRequest{
 		AccessToken: capability.ConnectToken, TunnelID: session.Tunnel.ID, ClusterID: session.Tunnel.ClusterID,
 	})
 	if err != nil {
@@ -162,6 +166,14 @@ func (s Service) sessionAccess(ctx context.Context, session Session) (*sessionAc
 	}, nil
 }
 
+func (s Service) Access(ctx context.Context, principal security.Principal, id string) (*sessionAccessResponse, error) {
+	session, err := s.Get(principal, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.sessionAccess(ctx, *session)
+}
+
 func (s Service) createSessionTunnel(ctx context.Context, session *Session, principal security.Principal, credential devtunnel.Credential, seq int) (devtunnel.Record, string, error) {
 	tunnelID := session.ID + "-" + strconv.Itoa(seq)
 	if !idPattern.MatchString(session.ID) || seq < 1 || !devtunnel.ValidID(tunnelID) {
@@ -169,7 +181,7 @@ func (s Service) createSessionTunnel(ctx context.Context, session *Session, prin
 	}
 	requestedAt := s.utcNow()
 	portNumbers := ports(session.ID, seq)
-	record, err := s.tunnelManager.Create(ctx, devtunnel.CreateRequest{
+	record, err := s.TunnelManager.Create(ctx, devtunnel.CreateRequest{
 		Scheme: credential.Scheme, OAuthToken: credential.Token, TunnelID: tunnelID,
 		DurationSeconds: sessionTunnelDuration(session.Resources.WallMinutes),
 		Ports: []devtunnel.PortSpec{
@@ -187,7 +199,7 @@ func (s Service) createSessionTunnel(ctx context.Context, session *Session, prin
 	tokenBytes := make([]byte, 32)
 	_, _ = rand.Read(tokenBytes)
 	jupyterToken := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	if err := putCapability(s.capabilityDir, session.ID, seq, sessionCapability{ConnectToken: record.ConnectToken, JupyterToken: jupyterToken}); err != nil {
+	if err := putCapability(s.CapabilityDir, session.ID, seq, sessionCapability{ConnectToken: record.ConnectToken, JupyterToken: jupyterToken}); err != nil {
 		return devtunnel.Record{}, "", errors.Join(err, s.releaseTunnel(credential, session.ID, seq, tunnel))
 	}
 	candidate := *session
@@ -197,15 +209,15 @@ func (s Service) createSessionTunnel(ctx context.Context, session *Session, prin
 }
 
 func (s Service) releaseTunnel(credential devtunnel.Credential, sessionID string, seq int, tunnel tunnelMetadata) error {
-	ctx, cancel := context.WithTimeout(context.Background(), s.tunnelTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), s.TunnelTimeout)
 	defer cancel()
 	var deleteErr error
 	if tunnel.ID != "" && credential.Token != "" {
-		if err := s.tunnelManager.Delete(ctx, devtunnel.DeleteRequest{
+		if err := s.TunnelManager.Delete(ctx, devtunnel.DeleteRequest{
 			Scheme: credential.Scheme, OAuthToken: credential.Token, TunnelID: tunnel.ID, ClusterID: tunnel.ClusterID,
 		}); err != nil {
 			deleteErr = security.Redact("compensate session Dev Tunnel", err, credential.Token)
 		}
 	}
-	return errors.Join(deleteErr, deleteCapability(s.capabilityDir, sessionID, seq))
+	return errors.Join(deleteErr, deleteCapability(s.CapabilityDir, sessionID, seq))
 }

@@ -1,7 +1,8 @@
 // Session and run persistence belongs to the session subsystem. Rows hold the nested lifecycle values as JSON text
-// beside explicit owner and identity columns for principal isolation and stable composite keys. The package keeps
-// its in-memory mutation model: each complete cycle loads state under the process-wide lock and replaces both
-// tables in one transaction. Queries in query.sql are generated into query.sql.go by sqlc.
+// beside explicit owner and identity columns for principal isolation and stable composite keys. Writes keep the
+// in-memory mutation model: each cycle loads state under the process-wide lock and replaces both tables in one
+// transaction, so a read is one unlocked statement that sees a whole cycle or none of it. Queries in query.sql are
+// generated into query.sql.go by sqlc.
 package session
 
 import (
@@ -11,8 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
 
 	"github.com/cyber-shuttle/cs-plane/internal/db"
 	"github.com/cyber-shuttle/cs-plane/internal/security"
@@ -41,14 +40,14 @@ func (s Store) locked(fn func(*state) error) error {
 		}
 		current := &state{Sessions: make(map[string]*Session, len(sessionRows)), Runs: make([]runRecord, 0, len(runRows))}
 		for _, row := range sessionRows {
-			session, err := db.DecodePayload(row.Payload, func(s Session) bool { return s.ID == row.ID }, "session "+row.ID)
+			session, err := decodeSession(row.ID, row.Payload)
 			if err != nil {
 				return err
 			}
 			current.Sessions[session.ID] = &session
 		}
 		for _, row := range runRows {
-			run, err := db.DecodePayload(row.Payload, func(r runRecord) bool { return r.SessionID == row.SessionID && int64(r.Seq) == row.Seq }, fmt.Sprintf("run %s/%d", row.SessionID, row.Seq))
+			run, err := decodeRun(row.SessionID, row.Seq, row.Payload)
 			if err != nil {
 				return err
 			}
@@ -86,26 +85,77 @@ func (s Store) save(current *state) error {
 	})
 }
 
+func decodeSession(id, payload string) (Session, error) {
+	session, err := db.DecodePayload(payload, func(s Session) bool { return s.ID == id }, "session "+id)
+	return session, err
+}
+
+func decodeRun(sessionID string, seq int64, payload string) (runRecord, error) {
+	return db.DecodePayload(payload, func(r runRecord) bool { return r.SessionID == sessionID && int64(r.Seq) == seq }, fmt.Sprintf("run %s/%d", sessionID, seq))
+}
+
+func (s Store) queries() *Queries { return New(s.Database.Reader()) }
+
 func (s Service) loadSessions() ([]Session, error) {
-	var result []Session
-	err := s.store.locked(func(current *state) error {
-		for _, id := range slices.Sorted(maps.Keys(current.Sessions)) {
-			result = append(result, *current.Sessions[id])
+	rows, err := s.Store.queries().ListSessions(background)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Session, 0, len(rows))
+	for _, row := range rows {
+		session, err := decodeSession(row.ID, row.Payload)
+		if err != nil {
+			return nil, err
 		}
-		return nil
-	})
-	return result, err
+		result = append(result, session)
+	}
+	return result, nil
 }
 
 func (s Service) loadSession(id string) (*Session, error) {
-	var result *Session
-	err := s.store.locked(func(current *state) error {
-		session := current.Sessions[id]
-		if session == nil {
-			return errSessionNotFound
+	payload, err := s.Store.queries().GetSession(background, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	session, err := decodeSession(id, payload)
+	return &session, err
+}
+
+func (s Service) sessionsOf(principal security.Principal) ([]Session, error) {
+	rows, err := s.Store.queries().ListSessionsByOwner(background, security.PrincipalDirName(principal))
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Session, 0, len(rows))
+	for _, row := range rows {
+		session, err := decodeSession(row.ID, row.Payload)
+		if err != nil {
+			return nil, err
 		}
-		result = detached(session)
-		return nil
-	})
-	return result, err
+		if session.Owner == principal {
+			result = append(result, session)
+		}
+	}
+	return result, nil
+}
+
+func (s Service) Runs(principal security.Principal) ([]Run, error) {
+	rows, err := s.Store.queries().ListRunsByOwner(background, security.PrincipalDirName(principal))
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Run, 0, len(rows))
+	for _, row := range rows {
+		run, err := decodeRun(row.SessionID, row.Seq, row.Payload)
+		if err != nil {
+			return nil, err
+		}
+		if run.Owner == principal {
+			result = append(result, run.Run)
+		}
+	}
+	return result, nil
 }

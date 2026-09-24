@@ -27,7 +27,6 @@ import (
 	"github.com/cyber-shuttle/cs-plane/subsystems/oauth"
 	"github.com/cyber-shuttle/cs-plane/subsystems/session"
 	sshapi "github.com/cyber-shuttle/cs-plane/subsystems/ssh"
-	"github.com/cyber-shuttle/cs-plane/subsystems/telemetry"
 	"github.com/cyber-shuttle/cs-plane/subsystems/tunnel"
 )
 
@@ -122,13 +121,15 @@ func newServeComponents(svcs services, authentication *oauth.Service) (*serveCom
 		return fail(err)
 	}
 	components.closers = append(components.closers, tunnelService.Close)
-	sessionService := session.NewService(svcs.Configs, svcs.SessionStore, svcs.LinkspanPath, svcs.TunnelManager, tunnelService, svcs.CapabilityDir, svcs.TunnelTimeout)
+	sessionService := session.NewService(session.Config{
+		Runners: svcs.Configs, Store: svcs.SessionStore, LinkspanPath: svcs.LinkspanPath, TunnelManager: svcs.TunnelManager,
+		TunnelCredentials: tunnelService, CapabilityDir: svcs.CapabilityDir, TunnelTimeout: svcs.TunnelTimeout,
+	})
 	components.closers = append(components.closers, sessionService.Close)
 	registryRoutes, err := router.New(
 		authentication.Routes(),
 		sshService.Routes(),
 		sessionService.Routes(),
-		telemetry.Service{Sessions: sessionService}.Routes(),
 		tunnelService.Routes(),
 	)
 	if err != nil {
@@ -187,7 +188,11 @@ func runServe(ctx context.Context, svcs services, args []string, listen func(str
 	if strings.TrimSpace(svcs.DatabaseURL) == "" {
 		return errors.New("CS_DATABASE_URL is required")
 	}
-	authentication, err := oauth.NewService(*custosURL, *oidcIssuer, *oidcClientID, oidcClientSecret, allowedOrigins, nil)
+	origins, err := security.NewOrigins(allowedOrigins)
+	if err != nil {
+		return err
+	}
+	authentication, err := oauth.NewService(*custosURL, *oidcIssuer, *oidcClientID, oidcClientSecret, origins, nil)
 	if err != nil {
 		return err
 	}

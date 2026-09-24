@@ -328,7 +328,7 @@ func (s Service) collectStartingSessionLogs(ctx context.Context, sessions []Sess
 		return cmp.Or(strings.Compare(a.SSHHost, b.SSHHost), strings.Compare(a.ID, b.ID))
 	})
 	for _, session := range starting {
-		s.logs.setSessionSensitive(session.ID, session.PrivateRoot, session.WorkspaceRoot, s.linkspanExecutable)
+		s.logs.setSessionSensitive(session.ID, session.PrivateRoot, session.WorkspaceRoot, s.LinkspanPath)
 	}
 	byScope := groupByScope(starting, func(session Session) schedulerScope {
 		return schedulerScope{owner: session.Owner, host: session.SSHHost}
@@ -542,12 +542,12 @@ func (s Service) runOf(session *Session) runRecord {
 }
 
 func (s Service) freezeRun(session *Session) error {
-	return s.store.locked(func(current *state) error {
+	return s.Store.locked(func(current *state) error {
 		changed, err := s.freezeIfTerminal(current, session)
 		if !changed {
 			return err
 		}
-		if saveErr := s.store.save(current); saveErr != nil {
+		if saveErr := s.Store.save(current); saveErr != nil {
 			return saveErr
 		}
 		return err
@@ -558,7 +558,7 @@ func (s Service) freezeIfTerminal(current *state, session *Session) (bool, error
 	if !terminalSession(session.State) {
 		return false, nil
 	}
-	if err := deleteCapability(s.capabilityDir, session.ID, session.Seq); err != nil {
+	if err := deleteCapability(s.CapabilityDir, session.ID, session.Seq); err != nil {
 		session.State, session.Error = "STOPPING", "session cleanup pending: "+boundedSessionError(err)
 		return true, err
 	}
@@ -569,35 +569,20 @@ func (s Service) freezeIfTerminal(current *state, session *Session) (bool, error
 	return true, nil
 }
 
-func (s Service) ListRuns(principal security.Principal) ([]Run, error) {
-	var owned []Run
-	if err := s.store.locked(func(current *state) error {
-		for _, run := range current.Runs {
-			if run.Owner == principal {
-				owned = append(owned, run.Run)
-			}
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return owned, nil
-}
-
 func (s Service) readRunStats(ctx context.Context, host, name string, startedAt time.Time) (runStats, error) {
 	usage, err := slurm.Account(ctx, s.runner, host, name, startedAt, s.utcNow())
 	return runStats(usage), err
 }
 
 func (s Service) attachRunStats(sessionID string, seq int, stats runStats) error {
-	return s.store.locked(func(current *state) error {
+	return s.Store.locked(func(current *state) error {
 		for index := range current.Runs {
 			run := &current.Runs[index]
 			if run.SessionID != sessionID || run.Seq != seq || run.Stats != nil {
 				continue
 			}
 			run.Stats = &stats
-			return s.store.save(current)
+			return s.Store.save(current)
 		}
 		return nil
 	})
@@ -606,7 +591,7 @@ func (s Service) attachRunStats(sessionID string, seq int, stats runStats) error
 func (s Service) pendingRunStats() ([]runRecord, error) {
 	cutoff := s.utcNow().Add(-runStatsWindow)
 	var due []runRecord
-	err := s.store.locked(func(current *state) error {
+	err := s.Store.locked(func(current *state) error {
 		for _, run := range current.Runs {
 			if run.Stats == nil && !run.EndedAt.Before(cutoff) {
 				due = append(due, run)

@@ -1,11 +1,12 @@
-// The session state machine.
-// Creation is serialized across processes before tunnel side effects, then persists intent before provisioning.
-// A conclusive submission failure compensates through abandonSubmitIntent; an ambiguous one stays durable.
-// A stop proceeds locally without a usable link: releaseTunnel skips Dev Tunnels when the token is
-// empty and leaves the tunnel to its own expiry.
+// The session state machine. Define records a stopped session under an ID derived from the idempotency key, so a
+// replay answers it; AdoptRuns attaches runs another client finished to a session that never ran, once. Start
+// launches a run through Slurm, serialized across processes before tunnel side effects, and persists intent before
+// provisioning. A conclusive submission failure compensates through abandonSubmitIntent; an ambiguous one stays
+// durable. A stop proceeds locally without a usable link: releaseTunnel skips Dev Tunnels when the token is empty.
 package session
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +14,8 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
+	"time"
 
 	"github.com/cyber-shuttle/cs-plane/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-plane/internal/security"
@@ -37,44 +40,31 @@ func sameCreateRequest(session *Session, request createRequest) bool {
 	return session.SSHHost == request.SSHHost && session.Account == request.Account && session.Partition == request.Partition && session.RootFolder == request.RootFolder && session.Resources == request.Resources
 }
 
-func (s Service) create(ctx context.Context, request createRequest) (*Session, error) {
-	session, _, err := s.createStatus(ctx, request)
-	return session, err
-}
-
-func (s Service) createStatus(ctx context.Context, request createRequest) (_ *Session, created bool, resultErr error) {
-	principal, err := security.PrincipalFromContext(ctx)
-	if err != nil {
-		return nil, false, err
-	}
-	request, err = assignSessionID(request, principal)
-	if err != nil {
-		return nil, false, err
-	}
+func (s Service) launch(ctx context.Context, principal security.Principal, request createRequest) (_ *Session, resultErr error) {
 	defer func() {
 		if resultErr != nil {
 			s.forgetUnpersistedBuffers(request.ID)
 		}
 	}()
-	sum := sha256.Sum256([]byte(request.ID))
+	var result *Session
+	resultErr = s.serialized(request.ID, func() (err error) {
+		result, err = s.launchSerialized(ctx, request, principal)
+		return err
+	})
+	return result, resultErr
+}
+
+func (s Service) serialized(id string, fn func() error) error {
+	sum := sha256.Sum256([]byte(id))
 	slot := int(sum[0]) % len(createLocks)
 	lock := &createLocks[slot]
 	lock.Lock()
 	defer lock.Unlock()
-	var result *Session
-	resultErr = security.WithFileLock(filepath.Join(s.store.Dir, fmt.Sprintf(".session-create-%02x.lock", slot)), func() error {
-		result, err = s.createSerialized(ctx, request, principal, &created)
-		return err
-	})
-	return result, created, resultErr
+	return security.WithFileLock(filepath.Join(s.Store.Dir, fmt.Sprintf(".session-create-%02x.lock", slot)), fn)
 }
 
-func (s Service) createSerialized(ctx context.Context, request createRequest, principal security.Principal, wasCreated *bool) (*Session, error) {
-	reused, err := s.reusableSession(request, principal)
-	if err != nil || reused != nil {
-		return reused, err
-	}
-	credential, err := s.tunnelCredentials.Credential(ctx, principal)
+func (s Service) launchSerialized(ctx context.Context, request createRequest, principal security.Principal) (*Session, error) {
+	credential, err := s.TunnelCredentials.Credential(ctx, principal)
 	if err != nil {
 		return nil, err
 	}
@@ -86,14 +76,10 @@ func (s Service) createSerialized(ctx context.Context, request createRequest, pr
 		return nil, err
 	}
 
-	idempotent, previous, err := s.claimCreateSlot(request, principal)
+	previous, err := s.claimLaunch(request.ID, principal)
 	if err != nil {
 		return nil, err
 	}
-	if idempotent != nil {
-		return idempotent, nil
-	}
-	*wasCreated = true
 	operationCtx, done, err := s.beginOperation()
 	if err != nil {
 		return nil, err
@@ -101,24 +87,18 @@ func (s Service) createSerialized(ctx context.Context, request createRequest, pr
 	defer done()
 
 	intent := prepared.session
-	intent.State, intent.CreatedAt = "SUBMITTING", s.utcNow()
-	intent.UpdatedAt = intent.CreatedAt
-	nextSeq := 1
-	if previous != nil {
-		intent.CreatedAt = previous.CreatedAt
-		nextSeq = previous.Seq + 1
-	}
-	record, jupyterToken, err := s.createSessionTunnel(operationCtx, &intent, principal, credential, nextSeq)
+	intent.State, intent.CreatedAt, intent.UpdatedAt = "SUBMITTING", previous.CreatedAt, s.utcNow()
+	record, jupyterToken, err := s.createSessionTunnel(operationCtx, &intent, principal, credential, previous.Seq+1)
 	if err != nil {
 		return nil, err
 	}
 	prepared.script = buildScript(intent, prepared.linkspan)
-	if err := s.persistSubmitIntent(request.ID, previous, intent); err != nil {
+	if err := s.persistSubmitIntent(previous, intent); err != nil {
 		return nil, errors.Join(err, s.releaseTunnel(credential, intent.ID, intent.Seq, intent.Tunnel))
 	}
 	if err := s.provisionSession(request.SSHHost, intent, prepared.home, prepared.linkspan); err != nil {
 		s.sessionStatus(intent.ID, "Session environment preparation failed")
-		return nil, errors.Join(err, s.abandonSubmitIntent(credential, intent, request.relaunch))
+		return nil, errors.Join(err, s.abandonSubmitIntent(credential, intent))
 	}
 
 	s.sessionStatus(intent.ID, "Submitting session to Slurm")
@@ -129,7 +109,7 @@ func (s Service) createSerialized(ctx context.Context, request createRequest, pr
 			return nil, err
 		}
 		s.sessionStatus(intent.ID, "Session submission failed")
-		return nil, errors.Join(err, s.abandonSubmitIntent(credential, intent, request.relaunch))
+		return nil, errors.Join(err, s.abandonSubmitIntent(credential, intent))
 	}
 	s.sessionStatus(intent.ID, "Session submitted to Slurm")
 	created, superseded, err := s.recordSubmittedJob(intent.ID, jobID)
@@ -156,72 +136,38 @@ func (s Service) createSerialized(ctx context.Context, request createRequest, pr
 	return created, nil
 }
 
-func (s Service) claimCreateSlot(request createRequest, principal security.Principal) (idempotent, previous *Session, err error) {
-	err = s.store.locked(func(current *state) error {
-		existing := current.Sessions[request.ID]
-		if existing == nil {
-			return nil
-		}
-		if existing.Owner != principal {
+func (s Service) claimLaunch(id string, principal security.Principal) (previous *Session, err error) {
+	err = s.Store.locked(func(current *state) error {
+		existing := current.Sessions[id]
+		switch {
+		case existing == nil:
+			return errSessionNotFound
+		case existing.Owner != principal:
 			return errOwnerMismatch
-		}
-		if request.IdempotencyKey != "" {
-			if !sameCreateRequest(existing, request) {
-				return errIdempotencyConflict
-			}
-			idempotent = detached(existing)
-			return nil
-		}
-		if !request.relaunch {
-			return security.New("session_exists", "session ID already exists", http.StatusConflict)
-		}
-		if !terminalSession(existing.State) {
+		case !terminalSession(existing.State):
 			return errSessionRunning
 		}
 		previous = detached(existing)
 		return nil
 	})
-	return idempotent, previous, err
+	return previous, err
 }
 
-func (s Service) persistSubmitIntent(id string, previous *Session, intent Session) error {
-	return s.store.locked(func(current *state) error {
-		existing := current.Sessions[id]
-		same := existing == nil && previous == nil
-		if existing != nil && previous != nil {
-			same = existing.UpdatedAt.Equal(previous.UpdatedAt) && existing.State == previous.State && existing.Owner == previous.Owner
+func (s Service) persistSubmitIntent(previous *Session, intent Session) error {
+	return s.Store.locked(func(current *state) error {
+		existing := current.Sessions[intent.ID]
+		if existing == nil {
+			return errSessionNotFound
 		}
-		if !same {
-			return security.New("session_exists", "session ID already exists", http.StatusConflict)
+		if !existing.UpdatedAt.Equal(previous.UpdatedAt) || existing.State != previous.State || existing.Owner != previous.Owner {
+			return errSessionRunning
 		}
 		current.Sessions[intent.ID] = &intent
-		if err := s.store.save(current); err != nil {
+		if err := s.Store.save(current); err != nil {
 			return fmt.Errorf("persist submit intent: %w", err)
 		}
 		return nil
 	})
-}
-
-func (s Service) reusableSession(request createRequest, principal security.Principal) (*Session, error) {
-	if request.IdempotencyKey == "" {
-		return nil, nil
-	}
-	var existing *Session
-	err := s.store.locked(func(current *state) error {
-		session := current.Sessions[request.ID]
-		if session != nil && session.Owner != principal {
-			return errOwnerMismatch
-		}
-		if session == nil {
-			return nil
-		}
-		if !sameCreateRequest(session, request) {
-			return errIdempotencyConflict
-		}
-		existing = detached(session)
-		return nil
-	})
-	return existing, err
 }
 
 func (s Service) validateForCreate(ctx context.Context, request createRequest, script string) error {
@@ -241,7 +187,7 @@ func (s Service) validateForCreate(ctx context.Context, request createRequest, s
 func (s Service) recordSubmittedJob(sessionID, jobID string) (*Session, bool, error) {
 	var created *Session
 	superseded := false
-	err := s.store.locked(func(current *state) error {
+	err := s.Store.locked(func(current *state) error {
 		session := current.Sessions[sessionID]
 		if session == nil {
 			return errors.New("submitted session disappeared from state")
@@ -252,7 +198,7 @@ func (s Service) recordSubmittedJob(sessionID, jobID string) (*Session, bool, er
 		}
 		superseded = session.State != "QUEUED"
 		session.UpdatedAt = s.utcNow()
-		if err := s.store.save(current); err != nil {
+		if err := s.Store.save(current); err != nil {
 			return fmt.Errorf("persist submitted job %s: %w", jobID, err)
 		}
 		created = detached(session)
@@ -274,14 +220,14 @@ func (s Service) cancelSupersededJob(host, sessionID, jobID string) (*Session, e
 		diagnostic = boundedSessionError(cancelErr)
 	}
 	var result *Session
-	err := s.store.locked(func(current *state) error {
+	err := s.Store.locked(func(current *state) error {
 		session := current.Sessions[sessionID]
 		if session == nil {
 			return nil
 		}
 		if session.JobID == jobID && session.State != "QUEUED" {
 			session.Error, session.UpdatedAt = diagnostic, s.utcNow()
-			if err := s.store.save(current); err != nil {
+			if err := s.Store.save(current); err != nil {
 				return err
 			}
 		}
@@ -291,23 +237,13 @@ func (s Service) cancelSupersededJob(host, sessionID, jobID string) (*Session, e
 	return result, err
 }
 
-func (s Service) start(ctx context.Context, id string) (*Session, error) {
-	principal, err := security.PrincipalFromContext(ctx)
+func (s Service) retireFinished(ctx context.Context, principal security.Principal, id string) (*Session, error) {
+	session, err := s.claimLaunch(id, principal)
 	if err != nil {
 		return nil, err
-	}
-	session, err := s.loadSession(id)
-	if err != nil {
-		return nil, err
-	}
-	if session.Owner != principal {
-		return nil, errOwnerMismatch
-	}
-	if !terminalSession(session.State) {
-		return nil, errSessionRunning
 	}
 	if session.Tunnel.ID != "" {
-		credential, err := s.tunnelCredentials.Credential(ctx, principal)
+		credential, err := s.TunnelCredentials.Credential(ctx, principal)
 		if err != nil {
 			return nil, err
 		}
@@ -315,20 +251,23 @@ func (s Service) start(ctx context.Context, id string) (*Session, error) {
 			return nil, err
 		}
 	}
-	if err := s.freezeRun(session); err != nil {
+	return session, s.freezeRun(session)
+}
+
+func (s Service) Start(ctx context.Context, principal security.Principal, id string) (*Session, error) {
+	s = s.forPrincipal(principal)
+	session, err := s.retireFinished(ctx, principal, id)
+	if err != nil {
 		return nil, err
 	}
-	return s.create(ctx, createRequest{
-		ID: id, relaunch: true, SSHHost: session.SSHHost, Account: session.Account,
+	return s.launch(ctx, principal, createRequest{
+		ID: id, SSHHost: session.SSHHost, Account: session.Account,
 		Partition: session.Partition, RootFolder: session.RootFolder, Resources: session.Resources,
 	})
 }
 
-func (s Service) stop(ctx context.Context, id string) (*Session, error) {
-	principal, err := security.PrincipalFromContext(ctx)
-	if err != nil {
-		return nil, err
-	}
+func (s Service) Stop(principal security.Principal, id string) (*Session, error) {
+	s = s.forPrincipal(principal)
 	operationCtx, done, err := s.beginOperation()
 	if err != nil {
 		return nil, err
@@ -336,7 +275,7 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 	defer done()
 	var snapshot Session
 	var alreadyStopped bool
-	if err := s.store.locked(func(current *state) error {
+	if err := s.Store.locked(func(current *state) error {
 		session := current.Sessions[id]
 		if session == nil {
 			return errSessionNotFound
@@ -347,7 +286,7 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 		alreadyStopped = terminalSession(session.State)
 		if !alreadyStopped {
 			session.State, session.Error, session.UpdatedAt = "STOPPING", "", s.utcNow()
-			if err := s.store.save(current); err != nil {
+			if err := s.Store.save(current); err != nil {
 				return err
 			}
 		}
@@ -359,7 +298,7 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 	if !alreadyStopped {
 		s.sessionStatus(id, "Stopping session")
 	}
-	credential, _ := s.tunnelCredentials.Credential(operationCtx, principal)
+	credential, _ := s.TunnelCredentials.Credential(operationCtx, principal)
 	managementErr := s.releaseTunnel(credential, snapshot.ID, snapshot.Seq, snapshot.Tunnel)
 	candidate := snapshot
 	var narration []string
@@ -374,7 +313,7 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 		}
 	}
 	var result *Session
-	err = s.store.locked(func(current *state) error {
+	err = s.Store.locked(func(current *state) error {
 		session := current.Sessions[id]
 		if session == nil {
 			return errSessionNotFound
@@ -400,7 +339,7 @@ func (s Service) stop(ctx context.Context, id string) (*Session, error) {
 			changed = true
 		}
 		if changed {
-			if err := s.store.save(current); err != nil {
+			if err := s.Store.save(current); err != nil {
 				return err
 			}
 		}
@@ -421,13 +360,9 @@ func (s Service) forgetUnpersistedBuffers(id string) {
 	}
 }
 
-func (s Service) delete(ctx context.Context, id string) (*Session, error) {
-	principal, err := security.PrincipalFromContext(ctx)
-	if err != nil {
-		return nil, err
-	}
+func (s Service) Delete(principal security.Principal, id string) (*Session, error) {
 	var deleted *Session
-	if err := s.store.locked(func(current *state) error {
+	if err := s.Store.locked(func(current *state) error {
 		session := current.Sessions[id]
 		if session == nil {
 			return errSessionNotFound
@@ -440,46 +375,108 @@ func (s Service) delete(ctx context.Context, id string) (*Session, error) {
 		}
 		deleted = detached(session)
 		delete(current.Sessions, id)
-		return s.store.save(current)
+		return s.Store.save(current)
 	}); err != nil {
 		return nil, err
 	}
 	s.forgetSessionBuffers(id)
-	return deleted, deleteCapability(s.capabilityDir, deleted.ID, deleted.Seq)
+	return deleted, deleteCapability(s.CapabilityDir, deleted.ID, deleted.Seq)
 }
 
-func (s Service) abandonSubmitIntent(credential devtunnel.Credential, intent Session, relaunched bool) error {
+func (s Service) abandonSubmitIntent(credential devtunnel.Credential, intent Session) error {
 	compensateErr := s.releaseTunnel(credential, intent.ID, intent.Seq, intent.Tunnel)
-	deleted := false
-	stateErr := s.store.locked(func(current *state) error {
+	stateErr := s.Store.locked(func(current *state) error {
 		currentSession := current.Sessions[intent.ID]
 		if currentSession == nil || currentSession.Seq != intent.Seq || currentSession.JobName != intent.JobName || currentSession.JobID != "" {
 			return nil
 		}
-		next := ""
-		switch {
-		case currentSession.State == "SUBMITTING" && !relaunched:
-			delete(current.Sessions, intent.ID)
-			deleted = true
-		case currentSession.State == "SUBMITTING":
-			next = "FAILED"
-		case currentSession.State == "STOPPING":
-			next = "STOPPED"
-		default:
+		next := map[string]string{"SUBMITTING": "FAILED", "STOPPING": "STOPPED"}[currentSession.State]
+		if next == "" {
 			return nil
 		}
-		if next != "" {
-			currentSession.State, currentSession.Tunnel = next, tunnelMetadata{}
-			sessionError := ""
-			if compensateErr != nil {
-				sessionError = boundedSessionError(compensateErr)
-			}
-			currentSession.Error, currentSession.UpdatedAt = sessionError, s.utcNow()
+		currentSession.State, currentSession.Tunnel, currentSession.Error, currentSession.UpdatedAt = next, tunnelMetadata{}, "", s.utcNow()
+		if compensateErr != nil {
+			currentSession.Error = boundedSessionError(compensateErr)
 		}
-		return s.store.save(current)
+		return s.Store.save(current)
 	})
-	if stateErr == nil && deleted {
-		s.forgetSessionBuffers(intent.ID)
-	}
 	return errors.Join(compensateErr, stateErr)
+}
+
+type finishedRun struct {
+	FinalState string         `json:"finalState"`
+	Error      string         `json:"error,omitempty"`
+	StartedAt  time.Time      `json:"startedAt,omitzero"`
+	EndedAt    time.Time      `json:"endedAt"`
+	Stats      *runStats      `json:"stats,omitempty"`
+	Samples    []metricSample `json:"samples,omitempty"`
+}
+
+type sessionHistory struct {
+	CreatedAt time.Time     `json:"createdAt,omitzero"`
+	Runs      []finishedRun `json:"runs"`
+}
+
+func (s Service) Define(principal security.Principal, request createRequest) (*Session, bool, error) {
+	request, err := assignSessionID(request, principal)
+	if err != nil {
+		return nil, false, err
+	}
+	session := &Session{sessionResponse: sessionResponse{
+		ID: request.ID, State: "STOPPED", SSHHost: request.SSHHost, Account: request.Account,
+		Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources,
+		CreatedAt: s.utcNow(), UpdatedAt: s.utcNow(),
+	}, Owner: principal}
+	created := false
+	err = s.Store.locked(func(current *state) error {
+		if existing := current.Sessions[session.ID]; existing != nil {
+			if existing.Owner != principal {
+				return errOwnerMismatch
+			}
+			if !sameCreateRequest(existing, request) {
+				return errIdempotencyConflict
+			}
+			session = detached(existing)
+			return nil
+		}
+		current.Sessions[session.ID] = session
+		created = true
+		session = detached(session)
+		return s.Store.save(current)
+	})
+	return session, created, err
+}
+
+func (s Service) AdoptRuns(principal security.Principal, id string, history sessionHistory) (*Session, error) {
+	if len(history.Runs) == 0 || len(history.Runs) > 50 || slices.ContainsFunc(history.Runs, func(run finishedRun) bool {
+		return !terminalSession(run.FinalState) || run.EndedAt.IsZero() || len(run.Samples) > maxSessionMetricSamples
+	}) {
+		return nil, security.New("invalid_runs", fmt.Sprintf("runs must be 1 to 50 terminal runs, each with endedAt and at most %d samples", maxSessionMetricSamples), http.StatusBadRequest)
+	}
+	var adopted *Session
+	err := s.Store.locked(func(current *state) error {
+		session := current.Sessions[id]
+		switch {
+		case session == nil:
+			return errSessionNotFound
+		case session.Owner != principal:
+			return errOwnerMismatch
+		case session.Seq != 0 || slices.ContainsFunc(current.Runs, func(run runRecord) bool { return run.SessionID == id }):
+			return errSessionHasHistory
+		}
+		last := history.Runs[len(history.Runs)-1]
+		session.Seq, session.State, session.Error, session.StartedAt = len(history.Runs), last.FinalState, security.TruncateUTF8(last.Error, maxSessionError), last.StartedAt.UTC()
+		session.CreatedAt, session.UpdatedAt = cmp.Or(history.CreatedAt.UTC(), session.CreatedAt), s.utcNow()
+		for index, run := range history.Runs {
+			recordRun(current, runRecord{Run: Run{
+				SessionID: session.ID, Seq: index + 1, SSHHost: session.SSHHost, Account: session.Account,
+				Partition: session.Partition, RootFolder: session.RootFolder, Resources: session.Resources,
+				FinalState: run.FinalState, Error: security.TruncateUTF8(run.Error, maxSessionError),
+				StartedAt: run.StartedAt.UTC(), EndedAt: run.EndedAt.UTC(), Stats: run.Stats, Samples: run.Samples,
+			}, Owner: principal})
+		}
+		adopted = detached(session)
+		return s.Store.save(current)
+	})
+	return adopted, err
 }

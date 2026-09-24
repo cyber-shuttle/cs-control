@@ -66,18 +66,13 @@ type tunnelLinkStart struct {
 }
 
 type tunnelLinkPoll struct {
-	Pending         bool
-	IntervalSeconds int64
-	Status          tunnelLinkStatus
+	Status          string `json:"status"`
+	IntervalSeconds int64  `json:"intervalSeconds,omitempty"`
+	tunnelLinkStatus
 }
 
 type startLinkRequest struct {
 	Provider string `json:"provider"`
-}
-
-type pendingLink struct {
-	Status          string `json:"status"`
-	IntervalSeconds int64  `json:"intervalSeconds"`
 }
 
 type linkBrokerEntry struct {
@@ -297,7 +292,7 @@ func (s *Service) pollCredentialLocked(ctx context.Context, principal security.P
 	}
 	if result.Pending {
 		interval := s.finishPoll(handle, false, result.SlowDown)
-		return tunnelLinkPoll{Pending: true, IntervalSeconds: int64(interval / time.Second)}, nil
+		return tunnelLinkPoll{Status: "pending", IntervalSeconds: int64(interval / time.Second)}, nil
 	}
 	s.finishPoll(handle, true, 0)
 	now = s.now()
@@ -311,7 +306,7 @@ func (s *Service) pollCredentialLocked(ctx context.Context, principal security.P
 	if err = s.saveLink(principal, link); err != nil {
 		return tunnelLinkPoll{}, err
 	}
-	return tunnelLinkPoll{Status: link.status()}, nil
+	return tunnelLinkPoll{Status: "linked", tunnelLinkStatus: link.status()}, nil
 }
 
 func (s *Service) Credential(ctx context.Context, principal security.Principal) (result devtunnel.Credential, err error) {
@@ -404,12 +399,8 @@ func (s *Service) Routes() router.Routes {
 			}),
 		},
 		"/api/v1/tunnel/authorizations/{handle}/poll": {
-			http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (any, error) {
-				result, err := s.poll(request.Context(), principal, request.PathValue("handle"))
-				if err != nil || !result.Pending {
-					return result.Status, err
-				}
-				return pendingLink{Status: "pending", IntervalSeconds: result.IntervalSeconds}, nil
+			http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (tunnelLinkPoll, error) {
+				return s.poll(request.Context(), principal, request.PathValue("handle"))
 			}),
 		},
 	}

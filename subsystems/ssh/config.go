@@ -22,7 +22,7 @@ type hostEntry struct {
 	User            string   `json:"user,omitempty"`
 	Port            int      `json:"port,omitempty"`
 	IdentityFile    string   `json:"identityFile,omitempty"`
-	Key             string   `json:"key,omitempty"`
+	Key             string   `json:"keyId,omitempty"`
 	ExtraDirectives []string `json:"extraDirectives"`
 	Managed         bool     `json:"managed"`
 }

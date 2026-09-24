@@ -1,15 +1,14 @@
-// OAuth middleware applies the API's exact-origin CORS policy and establishes caller identity from one bearer
-// channel. Preflight and dispatch read methods from the same route registry. Browser WebSockets carry the same token
-// through the versioned subprotocol because their API cannot set Authorization; classified identity failures retain
-// their wire meaning rather than being flattened into generic authentication errors.
+// OAuth middleware applies the shared exact-origin policy with CORS headers and establishes caller identity from one
+// bearer channel; the browser-only sign-in routes also require an Origin. Preflight and dispatch read methods from the
+// same route registry. Browser WebSockets carry the same token through the versioned subprotocol because their API
+// cannot set Authorization; classified identity failures retain their wire meaning rather than being flattened into
+// generic authentication errors.
 package oauth
 
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 
@@ -26,52 +25,11 @@ const (
 )
 
 type oauthBoundary struct {
-	next        *router.Registry
-	validate    func(context.Context, string) (security.Principal, error)
-	originSet   map[string]struct{}
-	publicPaths map[string]struct{}
-}
-
-func validateControlOrigin(origin string) error {
-	if origin == "" || origin == "*" || strings.TrimSpace(origin) != origin {
-		return errors.New("control origin is invalid")
-	}
-	parsed, err := url.Parse(origin)
-	if err != nil || parsed.User != nil || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("control origin is invalid")
-	}
-	if parsed.Scheme == "https" {
-		return nil
-	}
-	host := parsed.Hostname()
-	ip := net.ParseIP(host)
-	if parsed.Scheme == "http" && (host == "localhost" || ip != nil && ip.IsLoopback()) {
-		return nil
-	}
-	return errors.New("control origin must use HTTPS or loopback HTTP")
-}
-
-func validatedOriginSet(allowedOrigins []string) (map[string]struct{}, error) {
-	origins := make(map[string]struct{}, len(allowedOrigins))
-	for _, origin := range allowedOrigins {
-		if err := validateControlOrigin(origin); err != nil {
-			return nil, err
-		}
-		origins[origin] = struct{}{}
-	}
-	if len(origins) == 0 {
-		return nil, errors.New("at least one control origin is required")
-	}
-	return origins, nil
-}
-
-func allowOrigin(w http.ResponseWriter, origin string, origins map[string]struct{}) bool {
-	if _, ok := origins[origin]; !ok {
-		return false
-	}
-	w.Header().Set("Access-Control-Allow-Origin", origin)
-	w.Header().Add("Vary", "Origin")
-	return true
+	next         *router.Registry
+	validate     func(context.Context, string) (security.Principal, error)
+	origins      security.Origins
+	publicPaths  map[string]struct{}
+	browserPaths map[string]struct{}
 }
 
 func preflightHeadersAllowed(raw string, allowed ...string) bool {
@@ -88,12 +46,12 @@ func controlWebSocketRoute(request *http.Request) bool {
 	if request.Method != http.MethodGet || request.URL.EscapedPath() != request.URL.Path {
 		return false
 	}
-	const prefix = "/api/v1/ssh/hosts/"
+	const prefix = "/api/v1/hosts/"
 	if !strings.HasPrefix(request.URL.Path, prefix) {
 		return false
 	}
 	segments := strings.Split(strings.TrimPrefix(request.URL.Path, prefix), "/")
-	return len(segments) == 2 && segments[1] == "auth" && ssh.ValidAlias(segments[0])
+	return len(segments) == 2 && segments[1] == "ssh" && ssh.ValidAlias(segments[0])
 }
 
 func controlWebSocketAuthorization(request *http.Request) (string, *http.Request, int) {
@@ -185,14 +143,17 @@ func (b *oauthBoundary) preflight(writer http.ResponseWriter, request *http.Requ
 
 func (b *oauthBoundary) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	_, public := b.publicPaths[request.URL.EscapedPath()]
+	_, browser := b.browserPaths[request.URL.EscapedPath()]
 	origin := request.Header.Get("Origin")
 	if origin != "" {
-		if !allowOrigin(writer, origin, b.originSet) {
-			security.WriteError(writer, security.New("origin_not_allowed", "origin is not allowed", http.StatusForbidden))
+		if !b.origins.Allowed(origin) {
+			security.WriteError(writer, security.ErrOriginNotAllowed)
 			return
 		}
+		writer.Header().Set("Access-Control-Allow-Origin", origin)
+		writer.Header().Add("Vary", "Origin")
 		writer.Header().Set("Access-Control-Expose-Headers", "ETag, Location")
-	} else if public {
+	} else if browser {
 		security.WriteError(writer, security.New("origin_required", "browser origin is required", http.StatusForbidden))
 		return
 	}

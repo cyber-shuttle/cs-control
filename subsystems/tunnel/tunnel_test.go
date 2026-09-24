@@ -4,6 +4,7 @@ package tunnel
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,8 +73,8 @@ func TestLinkBrokerPollStoresSealedCredential(t *testing.T) {
 	now = now.Add(time.Second)
 	poll, err := broker.poll(context.Background(), principal, start.Handle)
 	testutil.Check(t, err)
-	if !poll.Status.Linked || poll.Status.Provider != "github" || poll.Status.Account != "octocat" {
-		t.Fatalf("poll = %#v", poll)
+	if encoded, _ := json.Marshal(poll); !strings.HasPrefix(string(encoded), `{"status":"linked","linked":true,"provider":"github","account":"octocat"`) {
+		t.Fatalf("poll = %s", encoded)
 	}
 
 	path := filepath.Join(hostsDir, security.PrincipalDirName(principal), tunnelLinkFileName)

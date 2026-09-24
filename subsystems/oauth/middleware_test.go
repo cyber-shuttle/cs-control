@@ -26,19 +26,19 @@ func browserWebSocketProtocols(token string) string {
 
 func testOAuthBoundary(t *testing.T, next http.Handler, validator func(context.Context, string) (security.Principal, error), allowedOrigins []string) http.Handler {
 	t.Helper()
-	origins, err := validatedOriginSet(allowedOrigins)
+	origins, err := security.NewOrigins(allowedOrigins)
 	testutil.Check(t, err)
 	forward := func(writer http.ResponseWriter, request *http.Request) { next.ServeHTTP(writer, request) }
 	registry, err := router.New(router.Routes{
-		"/api/v1/sessions":               {http.MethodGet: forward, http.MethodPost: forward},
-		"/api/v1/ssh/hosts/{alias}/auth": {http.MethodGet: forward},
+		"/api/v1/sessions":          {http.MethodGet: forward, http.MethodPost: forward},
+		"/api/v1/hosts/{alias}/ssh": {http.MethodGet: forward},
 	})
 	testutil.Check(t, err)
 	return (&Service{validator: validator, origins: origins}).Protect(registry)
 }
 
 func browserUpgradeRequest(token string) *http.Request {
-	request := httptest.NewRequest(http.MethodGet, "http://control.example/api/v1/ssh/hosts/delta/auth", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://control.example/api/v1/hosts/delta/ssh", nil)
 	for name, value := range map[string]string{
 		"Origin":                 "https://workspace.example.edu",
 		"Connection":             "Upgrade",

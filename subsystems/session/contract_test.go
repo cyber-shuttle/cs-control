@@ -1,10 +1,12 @@
 // Public session routes preserve authentication, ownership, caching, and JSON contracts.
 // Discovery retains classified failures; inventory remains principal-filtered and conditionally cacheable.
-// Access responses expose only the live Jupyter endpoint and its short-lived capability.
+// Access responses expose only the live Jupyter endpoint and its short-lived capability. Define records a session
+// only; a finished history is adopted once, scoped to the caller.
 package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -35,7 +37,7 @@ func readyAccessScenario(t *testing.T, jupyterURI string) (Session, *testTunnelM
 		Ports: []devtunnel.PortRecord{{PortNumber: ports(session.ID, session.Seq).Jupyter, Protocol: "http", PortForwardingURIs: []string{jupyterURI}}},
 	}}
 	service := accessTestService(t, manager, now)
-	testutil.Check(t, putCapability(service.capabilityDir, session.ID, session.Seq, defaultSessionCapability()))
+	testutil.Check(t, putCapability(service.CapabilityDir, session.ID, session.Seq, defaultSessionCapability()))
 	putSessions(t, service, session)
 	return session, manager, service
 }
@@ -221,5 +223,81 @@ func TestSessionPublicJSONContractIsNarrow(t *testing.T) {
 		if strings.Contains(strings.ToLower(string(fixture)), strings.ToLower(forbidden)) {
 			t.Fatalf("public session fixture contains private field %q: %s", forbidden, fixture)
 		}
+	}
+}
+
+func TestDefineRecordsAStoppedSessionOnce(t *testing.T) {
+	service := testService(t)
+	handler := serviceHandler(t, &service)
+	defined := newTestCreateRequest()
+	post := func(body string) (sessionResponse, *httptest.ResponseRecorder) {
+		response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/sessions", []byte(body)))
+		var session sessionResponse
+		_ = json.Unmarshal(response.Body.Bytes(), &session)
+		return session, response
+	}
+	encoded, err := json.Marshal(defined)
+	testutil.Check(t, err)
+	first, response := post(string(encoded))
+	if response.Code != http.StatusCreated || response.Header().Get("Location") != "/api/v1/sessions/"+first.ID || first.State != "STOPPED" || first.Seq != 0 {
+		t.Fatalf("first define = %d %s", response.Code, response.Body.String())
+	}
+	if replay, response := post(string(encoded)); response.Code != http.StatusOK || replay.ID != first.ID {
+		t.Fatalf("replayed define = %d %s", response.Code, response.Body.String())
+	}
+	if other, isNew, err := service.Define(otherTestPrincipal, defined); err != nil || !isNew || other.ID == first.ID {
+		t.Fatalf("another principal's define with the same key = %#v: %v", other, err)
+	}
+	if _, response := post(strings.Replace(string(encoded), `"partition":"cpu"`, `"partition":"gpu"`, 1)); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "idempotency_conflict") {
+		t.Fatalf("a changed replay = %d %s", response.Code, response.Body.String())
+	}
+	if _, response := post(strings.Replace(string(encoded), "{", `{"runs":[],`, 1)); response.Code != http.StatusBadRequest {
+		t.Fatalf("a define carrying runs = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdoptRunsAttachesAFinishedHistoryOnce(t *testing.T) {
+	service := testService(t)
+	handler := serviceHandler(t, &service)
+	defined, _, err := service.Define(testPrincipal, newTestCreateRequest())
+	testutil.Check(t, err)
+	adopt := func(principal security.Principal, history sessionHistory) *httptest.ResponseRecorder {
+		body, err := json.Marshal(history)
+		testutil.Check(t, err)
+		return testutil.Serve(handler, requestAs(principal, http.MethodPost, "/api/v1/sessions/"+defined.ID+"/runs", body))
+	}
+	history := sessionHistory{CreatedAt: time.Unix(50, 0), Runs: []finishedRun{
+		{FinalState: "STOPPED", EndedAt: time.Unix(100, 0), Stats: &runStats{CPUEfficiencyPct: 9.5}, Samples: []metricSample{{At: time.Unix(90, 0).UTC()}}},
+		{FinalState: "FAILED", Error: "node failure", StartedAt: time.Unix(150, 0), EndedAt: time.Unix(200, 0)},
+	}}
+	for _, invalid := range [][]finishedRun{nil, {{FinalState: "READY", EndedAt: time.Unix(1, 0)}}} {
+		if response := adopt(testPrincipal, sessionHistory{Runs: invalid}); response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_runs") {
+			t.Fatalf("invalid runs %v = %d %s", invalid, response.Code, response.Body.String())
+		}
+	}
+	if response := adopt(otherTestPrincipal, history); response.Code != http.StatusForbidden {
+		t.Fatalf("another principal's adopt = %d %s", response.Code, response.Body.String())
+	}
+	response := adopt(testPrincipal, history)
+	var adopted sessionResponse
+	_ = json.Unmarshal(response.Body.Bytes(), &adopted)
+	if response.Code != http.StatusOK || adopted.State != "FAILED" || adopted.Seq != 2 || adopted.Error != "node failure" || !adopted.CreatedAt.Equal(time.Unix(50, 0)) {
+		t.Fatalf("adopt = %d %s", response.Code, response.Body.String())
+	}
+	if response := adopt(testPrincipal, history); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "session_has_history") {
+		t.Fatalf("second adopt = %d %s", response.Code, response.Body.String())
+	}
+	runs := func() []Run {
+		runs, err := service.Runs(testPrincipal)
+		testutil.Check(t, err)
+		return runs
+	}
+	if got := runs(); len(got) != 2 || got[0].Seq != 2 || got[0].FinalState != "FAILED" || got[1].Seq != 1 || got[1].Stats.CPUEfficiencyPct != 9.5 || len(got[1].Samples) != 1 {
+		t.Fatalf("adopted runs = %#v", got)
+	}
+	started, err := service.Start(context.Background(), testPrincipal, defined.ID)
+	testutil.Check(t, err)
+	if started.State != "QUEUED" || started.Seq != 3 || len(runs()) != 2 {
+		t.Fatalf("start after adopt = %#v with %d runs", started.sessionResponse, len(runs()))
 	}
 }

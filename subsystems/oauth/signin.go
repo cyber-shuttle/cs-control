@@ -1,7 +1,7 @@
-// The sign-in relay finishes the browser's CILogon authorization-code flow with PKCE while keeping the client
-// secret server-side. Its four canonical OAuth routes enforce the same exact-origin policy as authenticated API
-// requests and share OIDC discovery with bearer validation. Upstream failures are classified without returning
-// provider details or tokens.
+// The sign-in relay finishes CILogon grants while keeping the client secret server-side: the browser's
+// authorization-code flow with PKCE, and the device grant for a client that cannot receive a redirect. Only config and
+// exchange serve browsers alone and require an Origin; device, its poll and refresh also serve native clients. A
+// device poll answers pending as a status, not an error. Upstream failures are classified without provider details.
 package oauth
 
 import (
@@ -26,7 +26,6 @@ type oauthConfigResponse struct {
 }
 
 type exchangeRequest struct {
-	DeviceCode   string `json:"deviceCode"`
 	Code         string `json:"code"`
 	CodeVerifier string `json:"codeVerifier"`
 	RedirectURI  string `json:"redirectUri"`
@@ -37,6 +36,16 @@ type deviceResponse struct {
 	UserCode        string `json:"userCode"`
 	CompleteURI     string `json:"verificationUriComplete"`
 	IntervalSeconds int64  `json:"intervalSeconds"`
+}
+
+type devicePollRequest struct {
+	DeviceCode string `json:"deviceCode"`
+}
+
+type devicePoll struct {
+	Status          string `json:"status"`
+	IntervalSeconds int64  `json:"intervalSeconds,omitempty"`
+	*tokenResponse
 }
 
 type refreshRequest struct {
@@ -54,18 +63,14 @@ type Service struct {
 	custos       *identity.Custos
 	clientID     string
 	clientSecret string
-	origins      map[string]struct{}
+	origins      security.Origins
 	// validator is s.validate in production; tests substitute a fake.
 	validator func(context.Context, string) (security.Principal, error)
 }
 
-func redirectOriginAllowed(redirectURI string, origins map[string]struct{}) bool {
+func redirectOriginAllowed(redirectURI string, origins security.Origins) bool {
 	parsed, err := url.Parse(redirectURI)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil {
-		return false
-	}
-	_, ok := origins[parsed.Scheme+"://"+parsed.Host]
-	return ok
+	return err == nil && parsed.Scheme != "" && parsed.Host != "" && parsed.User == nil && origins.Allowed(parsed.Scheme+"://"+parsed.Host)
 }
 
 func (s *Service) handleConfig(writer http.ResponseWriter, request *http.Request) {
@@ -81,11 +86,6 @@ func (s *Service) handleExchange(writer http.ResponseWriter, request *http.Reque
 	var body exchangeRequest
 	if err := security.DecodeJSON(request, &body); err != nil {
 		security.WriteError(writer, err)
-		return
-	}
-	if body.DeviceCode != "" {
-		tokens, err := s.oidc.RedeemDevice(request.Context(), s.clientSecret, body.DeviceCode)
-		s.writeTokens(writer, tokens, err)
 		return
 	}
 	if body.Code == "" || body.CodeVerifier == "" || !redirectOriginAllowed(body.RedirectURI, s.origins) {
@@ -110,39 +110,57 @@ func (s *Service) handleRefresh(writer http.ResponseWriter, request *http.Reques
 	s.writeTokens(writer, tokens, err)
 }
 
-func (s *Service) writeTokens(writer http.ResponseWriter, tokens identity.Tokens, err error) {
+func tokenError(err error) error {
 	switch {
-	case errors.Is(err, identity.ErrAuthorizationPending):
-		security.WriteError(writer, security.New("authorization_pending", "the sign-in has not been approved yet", http.StatusBadRequest))
 	case errors.Is(err, identity.ErrGrantRejected):
-		security.WriteError(writer, security.New("invalid_grant", "the authorization code or refresh token was rejected", http.StatusBadRequest))
+		return security.New("invalid_grant", "the authorization code or refresh token was rejected", http.StatusBadRequest)
 	case errors.Is(err, identity.ErrTokenInvalid):
-		security.WriteError(writer, security.New("upstream_invalid", "the identity provider returned an invalid response", http.StatusBadGateway))
-	case err != nil:
-		security.WriteError(writer, security.New("upstream_unavailable", "the identity provider is unavailable", http.StatusBadGateway))
-	default:
-		security.WriteJSON(writer, http.StatusOK, tokenResponse{IDToken: tokens.IDToken, RefreshToken: tokens.RefreshToken, ExpiresInSeconds: tokens.ExpiresIn})
+		return security.New("upstream_invalid", "the identity provider returned an invalid response", http.StatusBadGateway)
 	}
+	return security.New("upstream_unavailable", "the identity provider is unavailable", http.StatusBadGateway)
 }
 
-// handleDevice starts the device grant for a client that cannot receive a redirect, such as an editor extension; it
-// then posts the device code to exchange until the user approves it.
+func tokenBody(tokens identity.Tokens) *tokenResponse {
+	return &tokenResponse{IDToken: tokens.IDToken, RefreshToken: tokens.RefreshToken, ExpiresInSeconds: tokens.ExpiresIn}
+}
+
+func (s *Service) writeTokens(writer http.ResponseWriter, tokens identity.Tokens, err error) {
+	if err != nil {
+		security.WriteError(writer, tokenError(err))
+		return
+	}
+	security.WriteJSON(writer, http.StatusOK, tokenBody(tokens))
+}
+
 func (s *Service) handleDevice(writer http.ResponseWriter, request *http.Request) {
 	device, err := s.oidc.DeviceAuthorize(request.Context(), s.clientSecret, signInScope)
 	if err != nil {
-		s.writeTokens(writer, identity.Tokens{}, err)
+		security.WriteError(writer, tokenError(err))
 		return
 	}
 	security.WriteJSON(writer, http.StatusOK, deviceResponse{DeviceCode: device.DeviceCode, UserCode: device.UserCode, CompleteURI: device.CompleteURI, IntervalSeconds: device.Interval})
 }
 
-func NewService(custosURL, issuer, clientID, clientSecret string, allowedOrigins []string, client *http.Client) (*Service, error) {
-	if strings.TrimSpace(clientSecret) == "" {
-		return nil, errors.New("auth service dependencies are required")
+func (s *Service) handleDevicePoll(writer http.ResponseWriter, request *http.Request) {
+	var body devicePollRequest
+	if err := security.DecodeJSON(request, &body); err != nil || body.DeviceCode == "" {
+		security.WriteError(writer, security.New("invalid_json", "request body is invalid", http.StatusBadRequest))
+		return
 	}
-	origins, err := validatedOriginSet(allowedOrigins)
-	if err != nil {
-		return nil, err
+	tokens, err := s.oidc.RedeemDevice(request.Context(), s.clientSecret, body.DeviceCode)
+	switch {
+	case errors.Is(err, identity.ErrAuthorizationPending):
+		security.WriteJSON(writer, http.StatusOK, devicePoll{Status: "pending", IntervalSeconds: identity.MinDeviceInterval})
+	case err != nil:
+		security.WriteError(writer, tokenError(err))
+	default:
+		security.WriteJSON(writer, http.StatusOK, devicePoll{Status: "complete", tokenResponse: tokenBody(tokens)})
+	}
+}
+
+func NewService(custosURL, issuer, clientID, clientSecret string, origins security.Origins, client *http.Client) (*Service, error) {
+	if strings.TrimSpace(clientSecret) == "" || len(origins) == 0 {
+		return nil, errors.New("auth service dependencies are required")
 	}
 	oidc, err := identity.NewOIDC(issuer, clientID, client)
 	if err != nil {
@@ -159,10 +177,11 @@ func NewService(custosURL, issuer, clientID, clientSecret string, allowedOrigins
 
 func (s *Service) Routes() router.Routes {
 	return router.Routes{
-		"/api/v1/oauth/config":   {http.MethodGet: s.handleConfig},
-		"/api/v1/oauth/exchange": {http.MethodPost: s.handleExchange},
-		"/api/v1/oauth/refresh":  {http.MethodPost: s.handleRefresh},
-		"/api/v1/oauth/device":   {http.MethodPost: s.handleDevice},
+		"/api/v1/oauth/config":      {http.MethodGet: s.handleConfig},
+		"/api/v1/oauth/exchange":    {http.MethodPost: s.handleExchange},
+		"/api/v1/oauth/refresh":     {http.MethodPost: s.handleRefresh},
+		"/api/v1/oauth/device":      {http.MethodPost: s.handleDevice},
+		"/api/v1/oauth/device/poll": {http.MethodPost: s.handleDevicePoll},
 	}
 }
 
@@ -172,5 +191,6 @@ func (s *Service) Protect(next *router.Registry) http.Handler {
 	for path := range s.Routes() {
 		public[path] = struct{}{}
 	}
-	return &oauthBoundary{next: next, validate: s.validator, originSet: s.origins, publicPaths: public}
+	browser := map[string]struct{}{"/api/v1/oauth/config": {}, "/api/v1/oauth/exchange": {}}
+	return &oauthBoundary{next: next, validate: s.validator, origins: s.origins, publicPaths: public, browserPaths: browser}
 }

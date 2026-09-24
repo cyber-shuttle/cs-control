@@ -46,31 +46,29 @@ func TestWorkspaceExpressionsRejectUnsafeOrUnavailableValues(t *testing.T) {
 	}
 }
 
-func TestCreateRejectsWorkspaceInsidePrivateSession(t *testing.T) {
+func TestStartRejectsWorkspaceInsidePrivateSession(t *testing.T) {
 	request := newTestCreateRequest()
 	request.RootFolder = "/home/tester/.cybershuttle/sessions/s-012345abcdef/workspace"
 	service := testService(t)
-	if _, err := service.create(testTunnelContext(), request); err == nil || security.For(err).Code != "invalid_root_folder" {
+	if _, err := defineAndStart(context.Background(), service, request); err == nil || security.For(err).Code != "invalid_root_folder" {
 		t.Fatalf("private session overlap was not rejected: %v", err)
 	}
 }
 
-func TestCreateRejectsSessionsBelowTheFloor(t *testing.T) {
+func TestDefineRejectsSessionsBelowTheFloor(t *testing.T) {
+	service := testService(t)
+	request := newTestCreateRequest()
 	for _, below := range []resources{
 		{Cores: minCores - 1, MemoryMB: minMemoryMB, WallMinutes: 60},
 		{Cores: minCores, MemoryMB: minMemoryMB - 1, WallMinutes: 60},
 	} {
-		request := newTestCreateRequest()
 		request.Resources = below
-		service := testService(t)
-		if _, err := service.create(testTunnelContext(), request); err == nil || security.For(err).Code != "invalid_resources" {
+		if _, _, err := service.Define(testPrincipal, request); err == nil || security.For(err).Code != "invalid_resources" {
 			t.Fatalf("%d cores / %d MB was not rejected: %v", below.Cores, below.MemoryMB, err)
 		}
 	}
-	request := newTestCreateRequest()
 	request.Resources = resources{Cores: minCores, MemoryMB: minMemoryMB, WallMinutes: 60}
-	service := testService(t)
-	if _, err := service.create(testTunnelContext(), request); err != nil {
+	if _, _, err := service.Define(testPrincipal, request); err != nil {
 		t.Fatalf("the floor itself was rejected: %v", err)
 	}
 }
@@ -152,15 +150,15 @@ func TestProvisionScriptGuardsItsArgumentVector(t *testing.T) {
 	}
 }
 
-func TestCreateRevalidatesExactScriptBeforeSubmit(t *testing.T) {
+func TestStartRevalidatesExactScriptBeforeSubmit(t *testing.T) {
 	sshBin, scriptLog, commandLog := fakeSSH(t)
 	service := fakeSSHService(t, sshBin)
 	configureTestTunnel(t, &service)
 	request := newTestCreateRequest()
 	request.ID = ""
-	validatedResult, err := service.validate(testTunnelContext(), request)
+	validatedResult, err := service.Validate(context.Background(), testPrincipal, request)
 	testutil.Check(t, err)
-	created, err := service.create(testTunnelContext(), request)
+	created, err := defineAndStart(context.Background(), service, request)
 	testutil.Check(t, err)
 	testutil.Equal(t, created.ID, validatedResult.SessionID, "created session ID")
 	submitted, err := os.ReadFile(scriptLog)
@@ -184,22 +182,29 @@ func TestCreateRevalidatesExactScriptBeforeSubmit(t *testing.T) {
 	if strings.Count(string(commands), "'sbatch' '--test-only'") != 2 || strings.Count(string(commands), "'sbatch' '--job-name=") != 1 {
 		t.Fatalf("expected validation, create revalidation, then one submit:\n%s", commands)
 	}
+	before, _ := service.logs.tail(created.ID)
+	_, err = service.Validate(context.Background(), testPrincipal, request)
+	testutil.Check(t, err)
+	if after, _ := service.logs.tail(created.ID); len(after.Lines) != len(before.Lines) {
+		t.Fatalf("validating a persisted session narrated into its log tail: %v", after.Lines[len(before.Lines):])
+	}
 }
 
-func TestCreateValidationFailureDoesNotPersistOrSubmit(t *testing.T) {
+func TestStartValidationFailureLeavesTheSessionUnlaunched(t *testing.T) {
 	sshBin, _, commandLog := fakeSSH(t)
 	service := fakeSSHService(t, sshBin)
-	store := service.store
+	store := service.Store
 	manager := configureTestTunnel(t, &service)
 	t.Setenv("FAKE_VALIDATION_FAIL", "1")
 	t.Setenv("FAKE_VALIDATION_STDERR", "sbatch: error: rejected")
-	_, err := service.create(testTunnelContext(), newTestCreateRequest())
+	_, err := defineAndStart(context.Background(), service, newTestCreateRequest())
 	if security.For(err).Code != "slurm_validation_failed" {
-		t.Fatalf("unexpected create error: %v", err)
+		t.Fatalf("unexpected start error: %v", err)
 	}
 	testutil.Check(t, store.locked(func(current *state) error {
-		if len(current.Sessions) != 0 || len(current.Runs) != 0 {
-			t.Fatalf("failed validation persisted state: %#v", current)
+		session := current.Sessions[newTestCreateRequest().ID]
+		if len(current.Sessions) != 1 || session.State != "STOPPED" || session.Seq != 0 || len(current.Runs) != 0 {
+			t.Fatalf("failed validation launched the session: %#v", current)
 		}
 		return nil
 	}))
@@ -210,7 +215,7 @@ func TestCreateValidationFailureDoesNotPersistOrSubmit(t *testing.T) {
 	if len(manager.creates) != 0 {
 		t.Fatalf("failed validation created a tunnel: %#v", manager.creates)
 	}
-	if entries, err := os.ReadDir(service.capabilityDir); err == nil && len(entries) != 0 {
+	if entries, err := os.ReadDir(service.CapabilityDir); err == nil && len(entries) != 0 {
 		t.Fatalf("failed validation wrote capabilities: %#v", entries)
 	} else if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)

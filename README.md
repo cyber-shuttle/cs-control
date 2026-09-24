@@ -12,8 +12,8 @@ records; and it submits the [Linkspan](https://github.com/cyber-shuttle/linkspan
 through [Slurm](https://slurm.schedmd.com/), preparing the login node and creating a tunnel the compute node
 hosts outbound, so a session is reachable without the cluster opening an inbound port.
 
-A session is the record a client creates and polls; a Slurm job serves it, and one session can outlive
-several. Each user's work runs as that user: their own SSH host configuration, their SSH credentials, their
+A session is the record a client defines, starts and polls; a Slurm job serves each start, and one session can
+outlive several. Each user's work runs as that user: their own SSH host configuration, their SSH credentials, their
 Slurm account. One cs-plane serves many users from a server, listening on loopback behind a TLS reverse
 proxy, and it never proxies session traffic: once a session is running, the browser reaches it directly over
 the tunnel. [cs-infra](https://github.com/cyber-shuttle/cs-infra) deploys it.
@@ -41,7 +41,7 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
 - **A Microsoft or GitHub account entitled to
   [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview),** linked once through
   `POST /api/v1/tunnel/authorizations` and kept sealed under the caller's principal. Sessions run over that account;
-  a caller with no link is refused at session creation.
+  a caller with no link is refused at session start.
 - **An SSH-reachable Linux Slurm cluster** whose login node provides `sacctmgr`, `sinfo`, `sbatch`, `squeue`,
   `sacct`, `scancel`, `curl`, `tar`, `base64`, `od`, `install`, `printenv`, `sed` and `sort -V`, and whose
   nodes run Linux `x86_64` or `arm64` with `curl`.
@@ -82,8 +82,8 @@ exactly; the Custos URL must use HTTPS or loopback HTTP.
 accepted, wildcards are not. `--listen` defaults to `127.0.0.1:8045` and must be an explicit loopback address.
 
 There are no CLI commands for keys, hosts, or sessions — a client drives cs-plane over the API. Its routes are
-under `/api/v1/oauth`, `/api/v1/ssh`, `/api/v1/tunnel`, `/api/v1/sessions`, and `/api/v1/telemetry`; see the
-[API reference](docs/API.md). Confirm it is listening and that authentication is in front:
+under `/api/v1/oauth`, `/api/v1/hosts`, `/api/v1/keys`, `/api/v1/tunnel`, `/api/v1/sessions`, and
+`/api/v1/telemetry`; see the [API reference](docs/API.md). Confirm it is listening and that authentication is in front:
 
 ```console
 $ curl -si http://127.0.0.1:8045/api/v1/sessions | head -1
@@ -112,7 +112,7 @@ authorization only between recognized HTTPS management hosts.
 
 ## What it runs on the cluster
 
-Creating a session prepares the login node over SSH before it submits anything. In one connection, as your
+Starting a session prepares the login node over SSH before it submits anything. In one connection, as your
 account, it:
 
 - downloads a [Linkspan](https://github.com/cyber-shuttle/linkspan) release tarball from GitHub into
@@ -135,7 +135,7 @@ cs-plane depends on are listed in
 
 - `credentials/` — per-seq Dev Tunnel and Jupyter capabilities, mode `0600`
 - `hosts/<principal>/config` — each caller's own SSH host entries, rendered from the database, mode `0600`
-- `hosts/<principal>/keys/<name>` — login keys the caller uploaded, mode `0600`
+- `hosts/<principal>/keys/<id>` — login keys the caller uploaded, mode `0600`
 - `hosts/<principal>/tunnel-link` — the caller's linked Dev Tunnels credential, sealed, mode `0600`
 - `tunnel-link.key` — the 32-byte key sealing every `tunnel-link` file, created at mode `0600` on first boot
 
@@ -153,7 +153,7 @@ cs-plane's format marker is refused before anything else is touched.
 ## Related projects
 
 - **[cs-jupyter](https://github.com/cyber-shuttle/cs-jupyter)** — the browser client that drives this API: it
-  signs in, creates and polls sessions, and connects to a `READY` one.
+  signs in, defines, starts and polls sessions, and connects to a `READY` one.
 - **[linkspan](https://github.com/cyber-shuttle/linkspan)** — the compute-node agent cs-plane installs and
   submits as the job's main process.
 

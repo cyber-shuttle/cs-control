@@ -1,7 +1,7 @@
 // Package session owns session orchestration and its HTTP surface. RunnerProvider supplies principal-scoped
 // SSH execution, while TunnelCredentials supplies linked Dev Tunnels credentials; sessions owns the resulting
-// state, tunnel, telemetry, and run lifecycles. Every handler scopes Service to the authenticated principal before
-// invoking those flows.
+// state, tunnel, telemetry, and run lifecycles. Every exported operation takes the acting principal explicitly and
+// checks ownership itself, so it is usable without HTTP; Routes are one-line adapters over those operations.
 package session
 
 import (
@@ -61,8 +61,7 @@ type resources struct {
 }
 
 type createRequest struct {
-	ID             string `json:"-"`
-	relaunch       bool
+	ID             string    `json:"-"`
 	IdempotencyKey string    `json:"idempotencyKey,omitempty"`
 	SSHHost        string    `json:"sshHost"`
 	Account        string    `json:"account,omitempty"`
@@ -153,20 +152,24 @@ type TunnelManager interface {
 	Delete(context.Context, devtunnel.DeleteRequest) error
 }
 
+type Config struct {
+	Runners           RunnerProvider
+	Store             Store
+	LinkspanPath      string
+	TunnelManager     TunnelManager
+	TunnelCredentials TunnelCredentials
+	CapabilityDir     string
+	TunnelTimeout     time.Duration
+}
+
 type Service struct {
-	runner             ssh.Runner
-	runners            RunnerProvider
-	store              Store
-	linkspanExecutable string
-	logs               *sessionLogs
-	metrics            *sessionMetrics
-	tunnelManager      TunnelManager
-	tunnelCredentials  TunnelCredentials
-	capabilityDir      string
-	tunnelTimeout      time.Duration
-	hostPreparations   *sync.Map
-	now                func() time.Time
-	runtime            *sessionRuntime
+	Config
+	runner           ssh.Runner
+	logs             *sessionLogs
+	metrics          *sessionMetrics
+	hostPreparations *sync.Map
+	now              func() time.Time
+	runtime          *sessionRuntime
 }
 
 type sessionRuntime struct {
@@ -241,22 +244,13 @@ func (s Service) beginOperation() (context.Context, func(), error) {
 	return operationCtx, done, nil
 }
 
-func NewService(
-	runners RunnerProvider,
-	store Store,
-	linkspanPath string,
-	tunnelManager TunnelManager,
-	tunnelCredentials TunnelCredentials,
-	capabilityDir string,
-	tunnelTimeout time.Duration,
-) *Service {
-	if !safeRemoteExecutable(linkspanPath) {
-		linkspanPath = DefaultLinkspanPath
+func NewService(config Config) *Service {
+	if !safeRemoteExecutable(config.LinkspanPath) {
+		config.LinkspanPath = DefaultLinkspanPath
 	}
 	service := &Service{
-		runners: runners, store: store, linkspanExecutable: linkspanPath, logs: newSessionLogs(), metrics: newSessionMetrics(),
-		tunnelManager: tunnelManager, tunnelCredentials: tunnelCredentials, capabilityDir: capabilityDir,
-		tunnelTimeout: tunnelTimeout, hostPreparations: &sync.Map{}, now: time.Now, runtime: newSessionRuntime(),
+		Config: config, logs: newSessionLogs(), metrics: newSessionMetrics(),
+		hostPreparations: &sync.Map{}, now: time.Now, runtime: newSessionRuntime(),
 	}
 	service.runtime.start(func(ctx context.Context) {
 		every(ctx, backgroundInterval, func(context.Context) { service.triggerRefresh() })
@@ -286,7 +280,7 @@ func detached(session *Session) *Session {
 
 func (s Service) forPrincipal(principal security.Principal) Service {
 	scoped := s
-	scoped.runner = s.runners.Runner(principal)
+	scoped.runner = s.Runners.Runner(principal)
 	return scoped
 }
 
@@ -295,7 +289,8 @@ var (
 	errOwnerMismatch       = security.New("session_owner_mismatch", "session is owned by another principal", http.StatusForbidden)
 	errSessionRunning      = security.New("session_running", "session is still running; stop it before running it again", http.StatusConflict)
 	errIdempotencyConflict = security.New("idempotency_conflict", "idempotency key was already used for another request", http.StatusConflict)
-	errServiceStopping     = security.New("session_provisioning_failed", "The session service is stopping.", http.StatusServiceUnavailable)
+	errServiceStopping     = security.New("service_stopping", "The session service is stopping.", http.StatusServiceUnavailable)
+	errSessionHasHistory   = security.New("session_has_history", "session already has a run history", http.StatusConflict)
 )
 
 func (s Service) utcNow() time.Time { return s.now().UTC() }
@@ -305,58 +300,6 @@ func (s Service) ownTimeout() (context.Context, context.CancelFunc) {
 }
 
 func (s Service) Close() { s.runtime.close() }
-
-func routedSessionID(request *http.Request) (string, error) {
-	id := request.PathValue("id")
-	if !idPattern.MatchString(id) {
-		return "", router.ErrNotFound
-	}
-	return id, nil
-}
-
-// caller and owned are the two session handler shapes: one answers from the principal-scoped service, the other
-// answers from it for the routed session that principal owns.
-func caller[T any](s Service, produce func(Service, *http.Request) (T, error)) http.HandlerFunc {
-	return security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (T, error) {
-		return produce(s.forPrincipal(principal), request)
-	})
-}
-
-func owned[T any](s Service, produce func(Service, context.Context, *Session) (T, error)) http.HandlerFunc {
-	return caller(s, func(service Service, request *http.Request) (T, error) {
-		var zero T
-		principal, err := security.PrincipalFromContext(request.Context())
-		if err != nil {
-			return zero, err
-		}
-		id, err := routedSessionID(request)
-		if err != nil {
-			return zero, err
-		}
-		session, err := service.loadSession(id)
-		if err != nil {
-			return zero, err
-		}
-		if session.Owner != principal {
-			return zero, errOwnerMismatch
-		}
-		return produce(service, request.Context(), session)
-	})
-}
-
-func sessionAction(act func(Service, context.Context, string) (*Session, error)) func(Service, *http.Request) (sessionResponse, error) {
-	return func(service Service, request *http.Request) (sessionResponse, error) {
-		id, err := routedSessionID(request)
-		if err != nil {
-			return sessionResponse{}, err
-		}
-		session, err := act(service, request.Context(), id)
-		if err != nil {
-			return sessionResponse{}, err
-		}
-		return session.sessionResponse, nil
-	}
-}
 
 func ifNoneMatch(raw, current string) bool {
 	for validator := range strings.SplitSeq(raw, ",") {
@@ -368,24 +311,68 @@ func ifNoneMatch(raw, current string) bool {
 	return false
 }
 
-func (s Service) createSession(writer http.ResponseWriter, request *http.Request) {
+func (s Service) Get(principal security.Principal, id string) (*Session, error) {
+	session, err := s.loadSession(id)
+	if err == nil && session.Owner != principal {
+		return nil, errOwnerMismatch
+	}
+	return session, err
+}
+
+func (s Service) List(principal security.Principal) (sessionList, error) {
+	sessions, err := s.sessionsOf(principal)
+	list := sessionList{Sessions: make([]sessionResponse, 0, len(sessions)), Logs: []sessionLogTail{}}
+	for _, session := range sessions {
+		list.Sessions = append(list.Sessions, session.sessionResponse)
+		if tail, ok := s.logs.tail(session.ID); ok {
+			list.Logs = append(list.Logs, tail)
+		}
+	}
+	return list, err
+}
+
+func (s Service) Discover(ctx context.Context, principal security.Principal, alias string) (resource, error) {
+	return s.forPrincipal(principal).discover(ctx, alias)
+}
+
+func (s Service) Metrics(principal security.Principal, id string) (sessionSeries, error) {
+	session, err := s.Get(principal, id)
+	if err != nil {
+		return sessionSeries{}, err
+	}
+	return sessionSeries{SessionID: session.ID, Samples: s.metrics.samples(session.ID)}, nil
+}
+
+func view(session *Session, err error) (sessionResponse, error) {
+	if err != nil {
+		return sessionResponse{}, err
+	}
+	return session.sessionResponse, nil
+}
+
+func decoded[T any](request *http.Request) (T, error) {
+	var body T
+	return body, security.DecodeJSON(request, &body)
+}
+
+func (s Service) defineSession(writer http.ResponseWriter, request *http.Request) {
 	principal, err := security.PrincipalFromContext(request.Context())
 	if err != nil {
 		security.WriteError(writer, err)
 		return
 	}
-	var create createRequest
-	if err := security.DecodeJSON(request, &create); err != nil {
+	body, err := decoded[createRequest](request)
+	if err != nil {
 		security.WriteError(writer, err)
 		return
 	}
-	session, created, err := s.forPrincipal(principal).createStatus(request.Context(), create)
+	session, isNew, err := s.Define(principal, body)
 	if err != nil {
 		security.WriteError(writer, err)
 		return
 	}
 	status := http.StatusOK
-	if created {
+	if isNew {
 		status = http.StatusCreated
 		writer.Header().Set("Location", "/api/v1/sessions/"+session.ID)
 	}
@@ -398,23 +385,12 @@ func (s Service) listSessions(writer http.ResponseWriter, request *http.Request)
 		security.WriteError(writer, err)
 		return
 	}
-	sessions, err := s.loadSessions()
+	list, err := s.List(principal)
 	if err != nil {
 		security.WriteError(writer, err)
 		return
 	}
-	responses := make([]sessionResponse, 0, len(sessions))
-	tails := make([]sessionLogTail, 0, len(sessions))
-	for _, session := range sessions {
-		if session.Owner != principal {
-			continue
-		}
-		responses = append(responses, session.sessionResponse)
-		if tail, ok := s.logs.tail(session.ID); ok {
-			tails = append(tails, tail)
-		}
-	}
-	body, err := json.Marshal(sessionList{Sessions: responses, Logs: tails})
+	body, err := json.Marshal(list)
 	if err != nil {
 		security.WriteError(writer, err)
 		return
@@ -430,36 +406,55 @@ func (s Service) listSessions(writer http.ResponseWriter, request *http.Request)
 	security.WriteJSONBytes(writer, http.StatusOK, body)
 }
 
+type runList struct {
+	Runs []Run `json:"runs"`
+}
+
 func (s Service) Routes() router.Routes {
+	id := func(request *http.Request) string { return request.PathValue("id") }
 	return router.Routes{
-		"/api/v1/ssh/hosts/{alias}/slurm": {http.MethodGet: caller(s, func(service Service, request *http.Request) (resource, error) {
-			return service.discover(request.Context(), request.PathValue("alias"))
+		"/api/v1/hosts/{alias}/slurm": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (resource, error) {
+			return s.Discover(request.Context(), principal, request.PathValue("alias"))
 		})},
-		"/api/v1/sessions": {http.MethodGet: s.listSessions, http.MethodPost: s.createSession},
-		"/api/v1/sessions/validate": {http.MethodPost: caller(s, func(service Service, request *http.Request) (*validationResult, error) {
-			var create createRequest
-			if err := security.DecodeJSON(request, &create); err != nil {
+		"/api/v1/sessions": {http.MethodGet: s.listSessions, http.MethodPost: s.defineSession},
+		"/api/v1/sessions/validate": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*validationResult, error) {
+			body, err := decoded[createRequest](request)
+			if err != nil {
 				return nil, err
 			}
-			return service.validate(request.Context(), create)
+			return s.Validate(request.Context(), principal, body)
 		})},
-		"/api/v1/sessions/{id}": {http.MethodGet: owned(s, func(_ Service, _ context.Context, session *Session) (sessionResponse, error) {
-			return session.sessionResponse, nil
-		}), http.MethodDelete: security.NoContentAsPrincipal(func(_ security.Principal, request *http.Request) error {
-			id, err := routedSessionID(request)
-			if err != nil {
+		"/api/v1/sessions/{id}": {
+			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
+				return view(s.Get(principal, id(request)))
+			}),
+			http.MethodDelete: security.NoContentAsPrincipal(func(principal security.Principal, request *http.Request) error {
+				_, err := s.Delete(principal, id(request))
 				return err
+			}),
+		},
+		"/api/v1/sessions/{id}/start": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
+			return view(s.Start(request.Context(), principal, id(request)))
+		})},
+		"/api/v1/sessions/{id}/stop": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
+			return view(s.Stop(principal, id(request)))
+		})},
+		"/api/v1/sessions/{id}/runs": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
+			body, err := decoded[sessionHistory](request)
+			if err != nil {
+				return sessionResponse{}, err
 			}
-			_, err = s.delete(request.Context(), id)
-			return err
+			return view(s.AdoptRuns(principal, id(request), body))
 		})},
-		"/api/v1/sessions/{id}/start": {http.MethodPost: caller(s, sessionAction(Service.start))},
-		"/api/v1/sessions/{id}/stop":  {http.MethodPost: caller(s, sessionAction(Service.stop))},
-		"/api/v1/sessions/{id}/access": {http.MethodGet: owned(s, func(service Service, ctx context.Context, session *Session) (*sessionAccessResponse, error) {
-			return service.sessionAccess(ctx, *session)
+		"/api/v1/sessions/{id}/access": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*sessionAccessResponse, error) {
+			return s.Access(request.Context(), principal, id(request))
 		})},
-		"/api/v1/sessions/{id}/metrics": {http.MethodGet: owned(s, func(service Service, _ context.Context, session *Session) (sessionSeries, error) {
-			return sessionSeries{SessionID: session.ID, Samples: service.metrics.samples(session.ID)}, nil
+		"/api/v1/sessions/{id}/metrics": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionSeries, error) {
+			return s.Metrics(principal, id(request))
+		})},
+		"/api/v1/telemetry": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (runList, error) {
+			runs, err := s.Runs(principal)
+			return runList{Runs: runs}, err
 		})},
 	}
 }

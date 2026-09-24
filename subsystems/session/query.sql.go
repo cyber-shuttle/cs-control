@@ -27,6 +27,17 @@ func (q *Queries) ClearSessions(ctx context.Context) error {
 	return err
 }
 
+const getSession = `-- name: GetSession :one
+SELECT payload FROM sessions WHERE id = $1
+`
+
+func (q *Queries) GetSession(ctx context.Context, id string) (string, error) {
+	row := q.db.QueryRowContext(ctx, getSession, id)
+	var payload string
+	err := row.Scan(&payload)
+	return payload, err
+}
+
 const insertRun = `-- name: InsertRun :exec
 INSERT INTO runs (session_id, seq, owner, payload) VALUES ($1, $2, $3, $4)
 `
@@ -96,8 +107,41 @@ func (q *Queries) ListRuns(ctx context.Context) ([]ListRunsRow, error) {
 	return items, nil
 }
 
+const listRunsByOwner = `-- name: ListRunsByOwner :many
+SELECT session_id, seq, payload FROM runs WHERE owner = $1 ORDER BY position
+`
+
+type ListRunsByOwnerRow struct {
+	SessionID string
+	Seq       int64
+	Payload   string
+}
+
+func (q *Queries) ListRunsByOwner(ctx context.Context, owner string) ([]ListRunsByOwnerRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRunsByOwner, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRunsByOwnerRow
+	for rows.Next() {
+		var i ListRunsByOwnerRow
+		if err := rows.Scan(&i.SessionID, &i.Seq, &i.Payload); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSessions = `-- name: ListSessions :many
-SELECT id, payload FROM sessions
+SELECT id, payload FROM sessions ORDER BY id
 `
 
 type ListSessionsRow struct {
@@ -114,6 +158,38 @@ func (q *Queries) ListSessions(ctx context.Context) ([]ListSessionsRow, error) {
 	var items []ListSessionsRow
 	for rows.Next() {
 		var i ListSessionsRow
+		if err := rows.Scan(&i.ID, &i.Payload); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionsByOwner = `-- name: ListSessionsByOwner :many
+SELECT id, payload FROM sessions WHERE owner = $1 ORDER BY id
+`
+
+type ListSessionsByOwnerRow struct {
+	ID      string
+	Payload string
+}
+
+func (q *Queries) ListSessionsByOwner(ctx context.Context, owner string) ([]ListSessionsByOwnerRow, error) {
+	rows, err := q.db.QueryContext(ctx, listSessionsByOwner, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSessionsByOwnerRow
+	for rows.Next() {
+		var i ListSessionsByOwnerRow
 		if err := rows.Scan(&i.ID, &i.Payload); err != nil {
 			return nil, err
 		}
