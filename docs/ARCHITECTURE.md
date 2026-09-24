@@ -25,7 +25,7 @@ internal/slurm       Slurm command construction, framed output parsing, schedule
 internal/devtunnel   Dev Tunnels authorization and management protocols, wire types, URI policy
 
 subsystems/oauth     sign-in routes, CORS, bearer extraction, principal resolution
-subsystems/ssh       per-principal SSH hosts and keys, config rendering, live probe, authentication
+subsystems/ssh       per-principal SSH hosts and keys, config rendering, health, authentication
 subsystems/tunnel    Dev Tunnels account linking, sealed credential store, refresh
 subsystems/session   session state, Slurm and tunnel lifecycles, capabilities, reconciliation, logs, metrics,
                      run records
@@ -104,10 +104,9 @@ that file, so an alias resolves only through its owner's configuration, and alia
 Control masters are keyed by configuration and alias, so one caller's authentication never serves another. The
 account cs-plane runs as has no standing: its `~/.ssh/config` is ignored.
 
-A pasted `ssh` command is parsed server-side into host, user, port, identity file, `ProxyJump` and allowlisted `-o`
-options; nothing that runs a local program or includes other configuration is accepted. A host uses an uploaded key
-named by `keyId`, stored as its `IdentityFile` with `IdentitiesOnly yes`, or an explicit `-i` path the account cs-plane
-runs as can read. Key creation stages the file, commits metadata, then promotes the file; deletion renames the file
+A pasted `ssh` command is parsed server-side into host, user, port, `ProxyJump` and allowlisted `-o` options; nothing
+that runs a local program or includes other configuration is accepted. A host's only credential is an uploaded key
+named by `keyId`. Key creation stages the file, commits metadata, then promotes the file; deletion renames the file
 to a tombstone before committing. Startup resolves either interruption from committed metadata.
 
 ## Persistence

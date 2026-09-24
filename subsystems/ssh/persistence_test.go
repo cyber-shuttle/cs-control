@@ -36,7 +36,7 @@ func TestSSHHostsArePrincipalIsolatedAndRenderPrivateConfigs(t *testing.T) {
 	}
 	config, err := os.ReadFile(configPath)
 	testutil.Check(t, err)
-	if string(config) != string(renderConfig(hosts)) {
+	if string(config) != string(service.Store.renderConfig(mine, hosts)) {
 		t.Fatalf("rendered config differs from stored hosts:\n%s", config)
 	}
 	if info, err := os.Stat(configPath); err != nil || info.Mode().Perm() != 0o600 {
@@ -61,7 +61,7 @@ func TestReconcileRestoresStoredConfigsAndEmptiesOrphans(t *testing.T) {
 	testutil.Check(t, err)
 	config, err := os.ReadFile(path)
 	testutil.Check(t, err)
-	if string(config) != string(renderConfig(hosts)) {
+	if string(config) != string(service.Store.renderConfig(security.PrincipalDirName(testPrincipal), hosts)) {
 		t.Fatalf("reconciliation did not restore committed hosts:\n%s", config)
 	}
 	orphan, err := os.ReadFile(filepath.Join(orphanDir, "config"))
@@ -93,7 +93,7 @@ func TestKeyDeletionRollsBackMetadataReferencesAndFileWhenConfigWriteFails(t *te
 	}
 	hosts, err := service.Store.loadHosts(mine)
 	testutil.Check(t, err)
-	if len(hosts) != 1 || hosts[0].Key != "delta-key" || hosts[0].IdentityFile == "" {
+	if len(hosts) != 1 || hosts[0].Key != "delta-key" {
 		t.Fatalf("host reference was not rolled back: %+v", hosts)
 	}
 }

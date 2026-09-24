@@ -136,7 +136,7 @@ func TestCanonicalRouteManifest(t *testing.T) {
 		"/api/v1/oauth/device/poll":                   "POST",
 		"/api/v1/hosts":                               "GET POST",
 		"/api/v1/hosts/{alias}":                       "DELETE PUT",
-		"/api/v1/hosts/{alias}/test":                  "POST",
+		"/api/v1/hosts/{alias}/health":                "GET",
 		"/api/v1/hosts/{alias}/slurm":                 "GET",
 		"/api/v1/hosts/{alias}/ssh":                   "GET",
 		"/api/v1/keys/ssh":                            "GET POST",

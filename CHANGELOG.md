@@ -12,7 +12,7 @@ Notable changes to CyberShuttle Plane. The format follows
   (`oauth/device`, `oauth/device/poll`) and `oauth/refresh`.
 - Bearer authentication by OIDC ID token, resolved to a principal through Custos `GET /me`.
 - One exact-origin policy for the API and the SSH authentication WebSocket.
-- Per-caller SSH hosts from a pasted `ssh` command, with a live probe, Slurm discovery and interactive authentication.
+- Per-caller SSH hosts from a pasted `ssh` command, with health, Slurm discovery and interactive authentication.
 - Per-caller SSH keys, referenced by hosts as `keyId`.
 - Dev Tunnels account linking by device code, sealed at rest; required to start a session.
 - Sessions: validate, record, start, stop, delete, adopt runs, access, metrics.

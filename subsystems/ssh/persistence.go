@@ -25,7 +25,6 @@ var Schema string
 
 const (
 	maxSSHConfigBytes = 64 << 20
-	identitiesOnly    = "IdentitiesOnly yes"
 )
 
 var background = context.Background()
@@ -62,27 +61,12 @@ func replaceHost(queries *Queries, principal string, host hostEntry) error {
 	return err
 }
 
-func renderConfig(hosts []hostEntry) []byte {
-	sorted := slices.SortedFunc(slices.Values(hosts), func(a, b hostEntry) int { return strings.Compare(a.Name, b.Name) })
-	var lines []string
-	for _, host := range sorted {
-		lines = append(lines, host.stanza()...)
+func (s Store) renderConfig(principal string, hosts []hostEntry) []byte {
+	lines := make([]string, 0, len(hosts))
+	for _, host := range slices.SortedFunc(slices.Values(hosts), func(a, b hostEntry) int { return strings.Compare(a.Name, b.Name) }) {
+		lines = append(lines, host.stanza(s.sshPath(principal, host.Key))...)
 	}
 	return []byte(strings.Join(lines, "\n"))
-}
-
-func withSSHCredential(host hostEntry, name, path string) hostEntry {
-	host.Key = name
-	host.IdentityFile = ""
-	host.ExtraDirectives = slices.DeleteFunc(slices.Clone(host.ExtraDirectives), func(directive string) bool {
-		fields := strings.Fields(directive)
-		return len(fields) != 0 && strings.EqualFold(fields[0], "IdentitiesOnly")
-	})
-	if name != "" {
-		host.IdentityFile = path
-		host.ExtraDirectives = append(host.ExtraDirectives, identitiesOnly)
-	}
-	return host
 }
 
 type Store struct {
@@ -129,7 +113,7 @@ func (s Store) reconcileConfigs() error {
 			if err := security.EnsurePrivateDir(principalDir); err != nil {
 				return err
 			}
-			if err := security.ReplaceFile(filepath.Join(principalDir, "config"), renderConfig(hosts)); err != nil {
+			if err := security.ReplaceFile(filepath.Join(principalDir, "config"), s.renderConfig(principal, hosts)); err != nil {
 				return err
 			}
 		}
@@ -166,7 +150,7 @@ func (s Store) mutateHosts(principal, path string, mutate func(*Queries) error, 
 				return err
 			}
 			replacementAttempted = true
-			return security.ReplaceFile(path, renderConfig(hosts))
+			return security.ReplaceFile(path, s.renderConfig(principal, hosts))
 		})
 		if err != nil {
 			var restoreErr error
@@ -196,7 +180,7 @@ func (s Store) resolveSSHCredential(queries *Queries, principal string, host hos
 	} else if !found {
 		return hostEntry{}, errSSHKeyNotFound
 	}
-	return withSSHCredential(host, host.Key, s.sshPath(principal, host.Key)), nil
+	return host, nil
 }
 
 // putHost resolves the host's key reference, then stores the resolved entry with store inside one config mutation.
@@ -255,7 +239,8 @@ func (s Store) deleteSSHKey(principal, configPath, name string) error {
 		}
 		for _, host := range hosts {
 			if host.Key == name {
-				if err := replaceHost(queries, principal, withSSHCredential(host, "", "")); err != nil {
+				host.Key = ""
+				if err := replaceHost(queries, principal, host); err != nil {
 					return err
 				}
 			}

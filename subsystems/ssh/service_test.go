@@ -1,6 +1,6 @@
 // SSH service tests protect the canonical route surface, principal isolation, key secrecy, host/key atomicity,
-// and sanitized live-probe responses. Lower-level OpenSSH execution and credential-file durability are tested by
-// their internal packages; these cases exercise only the feature composition.
+// and health checks that dial only a public first hop. Lower-level OpenSSH execution and credential-file durability
+// are tested by their internal packages; these cases exercise only the feature composition.
 package ssh
 
 import (
@@ -10,10 +10,12 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -99,8 +101,11 @@ func TestSSHResourcesArePrincipalScopedAndNeverReturnPrivateKeys(t *testing.T) {
 	}
 
 	createdHost := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/hosts", []byte(`{"name":"delta","command":"ssh me@login.example.edu","keyId":"delta-key"}`)))
-	if createdHost.Code != http.StatusCreated || !strings.Contains(createdHost.Body.String(), `"managed":true`) {
-		t.Fatalf("host create = %d %s", createdHost.Code, createdHost.Body.String())
+	config, err := os.ReadFile(service.Configs.ConfigPath(testPrincipal))
+	testutil.Check(t, err)
+	keyPath := service.Store.sshPath(security.PrincipalDirName(testPrincipal), "delta-key")
+	if createdHost.Code != http.StatusCreated || !strings.Contains(createdHost.Body.String(), `"managed":true`) || strings.Contains(createdHost.Body.String(), keyPath) || !strings.Contains(string(config), "identityfile "+keyPath) {
+		t.Fatalf("host create = %d %s config=%s", createdHost.Code, createdHost.Body.String(), config)
 	}
 	if response := testutil.Serve(handler, requestAs(otherTestPrincipal, http.MethodGet, "/api/v1/hosts", nil)); strings.Contains(response.Body.String(), "delta") {
 		t.Fatalf("another principal saw the host: %s", response.Body.String())
@@ -114,7 +119,7 @@ func TestSSHResourcesArePrincipalScopedAndNeverReturnPrivateKeys(t *testing.T) {
 		t.Fatalf("key delete = %d %s", deleted.Code, deleted.Body.String())
 	}
 	listed := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/hosts", nil))
-	if strings.Contains(listed.Body.String(), "delta-key") || strings.Contains(listed.Body.String(), "identityFile") {
+	if strings.Contains(listed.Body.String(), "delta-key") {
 		t.Fatalf("key deletion left a host reference: %s", listed.Body.String())
 	}
 	if _, err := os.Stat(service.Store.sshPath(security.PrincipalDirName(testPrincipal), "delta-key")); !os.IsNotExist(err) {
@@ -125,17 +130,6 @@ func TestSSHResourcesArePrincipalScopedAndNeverReturnPrivateKeys(t *testing.T) {
 	}
 	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/hosts", nil)); strings.Contains(response.Body.String(), `"name":"delta"`) {
 		t.Fatalf("deleted host remains: %s", response.Body.String())
-	}
-
-	const identity = "~/.ssh/id_ed25519"
-	createdHost = testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/hosts", []byte(`{"name":"raw","command":"ssh -i ~/.ssh/id_ed25519 me@raw.example.edu"}`)))
-	listed = testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/hosts", nil))
-	hosts, err := service.Store.loadHosts(security.PrincipalDirName(testPrincipal))
-	testutil.Check(t, err)
-	config, err := os.ReadFile(service.Configs.ConfigPath(testPrincipal))
-	testutil.Check(t, err)
-	if createdHost.Code != http.StatusCreated || !strings.Contains(createdHost.Body.String(), identity) || !strings.Contains(listed.Body.String(), identity) || len(hosts) != 1 || hosts[0].IdentityFile != identity || !strings.Contains(string(config), "identityfile "+identity) {
-		t.Fatalf("raw identity did not survive host persistence: create=%d %s list=%s hosts=%+v config=%s", createdHost.Code, createdHost.Body.String(), listed.Body.String(), hosts, config)
 	}
 }
 
@@ -173,14 +167,14 @@ func TestConcurrentHostAssignmentAndKeyDeletionLeaveNoReference(t *testing.T) {
 		hosts, err := service.Store.loadHosts(security.PrincipalDirName(testPrincipal))
 		testutil.Check(t, err)
 		for _, host := range hosts {
-			if host.Name == name && (host.Key != "" || host.IdentityFile != "") {
+			if host.Name == name && host.Key != "" {
 				t.Fatalf("deleted %s remains assigned: %+v", name, host)
 			}
 		}
 	}
 }
 
-func TestSSHAuthAndProbeExposeOnlyCanonicalSanitizedResponses(t *testing.T) {
+func TestSSHAuthAndHealthExposeOnlyCanonicalResponses(t *testing.T) {
 	service := isolatedService(t)
 	handler := serviceHandler(t, service)
 	if response := testutil.Serve(handler, httptest.NewRequest(http.MethodGet, "/api/v1/hosts/delta/ssh", nil)); response.Code != http.StatusUnauthorized {
@@ -189,33 +183,39 @@ func TestSSHAuthAndProbeExposeOnlyCanonicalSanitizedResponses(t *testing.T) {
 	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/hosts/delta/ssh", nil)); response.Code != http.StatusUpgradeRequired {
 		t.Fatalf("non-WebSocket auth = %d", response.Code)
 	}
-	dir := t.TempDir()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	testutil.Check(t, err)
+	defer func() { _ = listener.Close() }()
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 	configPath := service.Configs.ConfigPath(testPrincipal)
 	testutil.Check(t, security.EnsurePrivateDir(filepath.Dir(configPath)))
-	testutil.Check(t, os.WriteFile(configPath, []byte("Host delta broken\n"), 0o600))
-	sshBin := filepath.Join(dir, "ssh")
+	testutil.Check(t, os.WriteFile(configPath, []byte("Host delta jumpy\n"), 0o600))
+	sshBin := filepath.Join(t.TempDir(), "ssh")
 	testutil.WriteScript(t, sshBin, `#!/bin/sh
-case " $* " in
-  *" -G "*)
-    for alias do :; done
-    printf 'host %s\nhostname %s.example\n' "$alias" "$alias"
-    exit 0
-    ;;
+for last do :; done
+case "$last" in
+  delta|ssh://alice@bastion:*) printf 'hostname 127.0.0.1\nport `+port+`\nproxyjump none\n' ;;
+  jumpy) printf 'hostname internal.example\nport 22\nproxyjump alice@bastion:`+port+`,other\n' ;;
 esac
-case " $* " in
-  *" broken "*) echo 'secret remote diagnostic' >&2; exit 1 ;;
-esac
-echo 'Permission denied (publickey,keyboard-interactive).' >&2
-exit 255
 `)
 	service.Configs.Template = internalssh.Runner{SSHBin: sshBin, Timeout: time.Second}
 	handler = serviceHandler(t, service)
-	interactive := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/hosts/delta/test", nil))
-	if interactive.Code != http.StatusOK || !strings.Contains(interactive.Body.String(), "interactive login") {
-		t.Fatalf("interactive probe = %d %s", interactive.Code, interactive.Body.String())
+	health := func(alias string) (int, string) {
+		response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/hosts/"+alias+"/health", nil))
+		return response.Code, response.Body.String()
 	}
-	failed := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/hosts/broken/test", nil))
-	if failed.Code != http.StatusOK || !strings.Contains(failed.Body.String(), "The SSH connection failed.") || strings.Contains(failed.Body.String(), "secret remote diagnostic") {
-		t.Fatalf("failed probe leaked output: %d %s", failed.Code, failed.Body.String())
+	if code, body := health("delta"); code != http.StatusOK || !strings.Contains(body, `"ok":false`) {
+		t.Fatalf("a loopback listener was dialed: %d %s", code, body)
+	}
+	original := dialHealth
+	dialHealth = (&net.Dialer{}).DialContext
+	t.Cleanup(func() { dialHealth = original })
+	for _, alias := range []string{"delta", "jumpy"} {
+		if code, body := health(alias); code != http.StatusOK || !strings.Contains(body, `"ok":true`) || !strings.Contains(body, "127.0.0.1:"+port) {
+			t.Fatalf("%s health = %d %s", alias, code, body)
+		}
+	}
+	if code, _ := health("absent"); code != http.StatusNotFound {
+		t.Fatalf("an unconfigured alias answered %d", code)
 	}
 }
