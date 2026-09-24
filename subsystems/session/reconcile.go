@@ -2,6 +2,8 @@
 // Slurm vocabulary and wire parsing stay in internal/slurm; this file owns session-state and walltime policy.
 // Silence is not evidence, so a session with no observation stays put until its propagation window expires.
 // Foreground and background refreshes share one serialized, rate-limited service runtime.
+// A run is READY once its link connects; a running job's log tail is the READY signal only without a link.
+// Client-launched sessions are never observed or accounted; a stop retires them locally.
 package session
 
 import (
@@ -157,6 +159,9 @@ func (s Service) applyObservation(session *Session, observation slurm.Observatio
 	}
 	previous := session.State
 	next := nextState(previous, observation.State)
+	if (next == "QUEUED" || next == "STARTING") && s.link(*session) != nil {
+		next = "READY"
+	}
 	session.State = next
 	if next != previous {
 		line := stateNarration[next]
@@ -179,7 +184,10 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Session) ([
 	narration := make([][]string, len(results))
 	var indexes []int
 	for i := range results {
-		if reconcilable(results[i].State) {
+		switch {
+		case results[i].Launcher == launcherClient && results[i].State == "STOPPING":
+			results[i].State, results[i].Error = "STOPPED", ""
+		case results[i].Launcher != launcherClient && reconcilable(results[i].State):
 			indexes = append(indexes, i)
 		}
 	}

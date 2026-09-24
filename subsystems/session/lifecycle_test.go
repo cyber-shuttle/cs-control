@@ -7,6 +7,7 @@ package session
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -189,10 +190,10 @@ func newTestService(t *testing.T, runner ssh.Runner, store Store) Service {
 	service := Service{
 		Config: Config{
 			Runners: testRunnerProvider{runner: runner}, Store: store, LinkspanPath: "/opt/cybershuttle/linkspan",
-			TunnelTimeout: runner.EffectiveTimeout(),
+			TunnelTimeout: runner.EffectiveTimeout(), PublicURL: "https://plane.example.edu",
 		},
 		runner: runner, logs: newSessionLogs(), metrics: newSessionMetrics(),
-		hostPreparations: &sync.Map{}, now: time.Now, runtime: newSessionRuntime(),
+		hostPreparations: &sync.Map{}, now: time.Now, runtime: newSessionRuntime(), links: &sync.Map{},
 	}
 	t.Cleanup(service.Close)
 	return service
@@ -278,6 +279,27 @@ func TestConcurrentStartsLaunchOneRun(t *testing.T) {
 	testutil.Check(t, <-first)
 	if err := <-second; security.For(err).Code != "session_running" {
 		t.Fatalf("a start racing an in-flight launch answered %v, not session_running", err)
+	}
+}
+
+func TestStartWithoutADevTunnelsLinkRunsOverTheLinkAlone(t *testing.T) {
+	sshBin, _, commandLog := fakeSSH(t)
+	service := fakeSSHService(t, sshBin)
+	manager := configureTestTunnel(t, &service)
+	service.TunnelCredentials = &testLinkBroker{}
+	session, err := defineAndStart(context.Background(), service, newTestCreateRequest())
+	testutil.Check(t, err)
+	if session.State != "QUEUED" || session.Tunnel.ID != "" || len(manager.creates) != 0 {
+		t.Fatalf("a session with no delegated account made a tunnel: %#v, %d creates", session, len(manager.creates))
+	}
+	commands := string(mustRead(t, commandLog))
+	for _, want := range []string{"CS_LINK_URL=wss://plane.example.edu/api/v1/sessions/" + session.ID + "/link", "LINKSPAN_LINK_TOKEN="} {
+		if !strings.Contains(commands, want) {
+			t.Fatalf("submission is missing %q:\n%s", want, commands)
+		}
+	}
+	if strings.Contains(commands, "CS_TUNNEL_ID=") {
+		t.Fatalf("submission named a tunnel it does not have:\n%s", commands)
 	}
 }
 
@@ -423,11 +445,7 @@ func newTestLinkBroker() *testLinkBroker {
 func (b *testLinkBroker) Credential(_ context.Context, principal security.Principal) (devtunnel.Credential, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	link, ok := b.links[principal]
-	if !ok {
-		return devtunnel.Credential{}, security.New("tunnel_link_required", "a Dev Tunnels link is required", http.StatusConflict)
-	}
-	return link, nil
+	return b.links[principal], nil
 }
 
 func reconciledList(ctx context.Context, service Service) ([]Session, error) {
@@ -440,12 +458,9 @@ func reconciledList(ctx context.Context, service Service) ([]Session, error) {
 type testTunnelManager struct {
 	mu               sync.Mutex
 	creates          []devtunnel.CreateRequest
-	gets             []devtunnel.GetRequest
 	deletes          []devtunnel.DeleteRequest
 	createErr        error
 	deleteErr        error
-	getResponse      *devtunnel.Record
-	expiresAt        time.Time
 	operationStarted chan struct{}
 	operationBlock   chan struct{}
 }
@@ -463,18 +478,11 @@ func (m *testTunnelManager) Create(_ context.Context, request devtunnel.CreateRe
 	if m.createErr != nil {
 		return devtunnel.Record{}, m.createErr
 	}
-	m.expiresAt = time.Now().UTC().Add(time.Duration(request.DurationSeconds) * time.Second)
-	return devtunnel.Record{ID: request.TunnelID, ClusterID: "use", ConnectToken: testConnectToken, HostToken: testHostToken, ExpiresAt: m.expiresAt}, nil
+	return devtunnel.Record{ID: request.TunnelID, ClusterID: "use", ConnectToken: testConnectToken, HostToken: testHostToken, ExpiresAt: time.Now().UTC().Add(time.Duration(request.DurationSeconds) * time.Second)}, nil
 }
 
-func (m *testTunnelManager) Get(_ context.Context, request devtunnel.GetRequest) (devtunnel.Record, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.gets = append(m.gets, request)
-	if m.getResponse != nil {
-		return *m.getResponse, nil
-	}
-	return devtunnel.Record{ID: request.TunnelID, ClusterID: request.ClusterID, ExpiresAt: m.expiresAt, Ports: []devtunnel.PortRecord{{PortNumber: 31001, Protocol: "http", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms"}}}}, nil
+func (m *testTunnelManager) Get(context.Context, devtunnel.GetRequest) (devtunnel.Record, error) {
+	return devtunnel.Record{}, nil
 }
 
 func (m *testTunnelManager) Delete(_ context.Context, request devtunnel.DeleteRequest) error {
@@ -798,4 +806,44 @@ func defineAndStart(ctx context.Context, service Service, request createRequest)
 		return nil, err
 	}
 	return service.Start(ctx, testPrincipal, session.ID)
+}
+
+func TestAttachAdmitsAClientLaunchedRunThatNeverReachesTheScheduler(t *testing.T) {
+	sshBin, _, commandLog := fakeSSH(t)
+	service := fakeSSHService(t, sshBin)
+	manager := configureTestTunnel(t, &service)
+	session, _, err := service.Define(testPrincipal, newTestCreateRequest())
+	testutil.Check(t, err)
+	response := testutil.Serve(serviceHandler(t, &service), requestAs(testPrincipal, http.MethodPost, "/api/v1/sessions/"+session.ID+"/attach", nil))
+	var attached attachResponse
+	_ = json.Unmarshal(response.Body.Bytes(), &attached)
+	if response.Code != http.StatusOK || attached.Session.State != "QUEUED" || attached.Session.Launcher != launcherClient || attached.Session.Seq != 1 {
+		t.Fatalf("attach = %d %#v", response.Code, attached.Session)
+	}
+	capability, err := getCapability(service.CapabilityDir, session.ID, 1)
+	if err != nil || attached.Link.Token != capability.LinkToken || attached.Link.URL != "wss://plane.example.edu/api/v1/sessions/"+session.ID+"/link" {
+		t.Fatalf("link = %#v, capability %v", attached.Link, err)
+	}
+	if len(manager.creates) != 0 || capability.ConnectToken != "" {
+		t.Fatalf("attach made a Dev Tunnel: %d creates", len(manager.creates))
+	}
+	if _, err := service.Attach(context.Background(), testPrincipal, session.ID); !errors.Is(err, errSessionRunning) {
+		t.Fatalf("attach on a running session = %v", err)
+	}
+	service.now = func() time.Time { return time.Now().Add(time.Hour) }
+	listed, err := reconciledList(context.Background(), service)
+	if err != nil || listed[0].State != "QUEUED" {
+		t.Fatalf("reconciliation retired a client-launched run: %#v %v", listed, err)
+	}
+	stopped, err := service.Stop(testPrincipal, session.ID)
+	if err != nil || stopped.State != "STOPPED" {
+		t.Fatalf("stop = %#v %v", stopped, err)
+	}
+	runs, err := service.Runs(testPrincipal)
+	if err != nil || len(runs) != 1 || runs[0].Seq != 1 || runs[0].FinalState != "STOPPED" {
+		t.Fatalf("stop did not freeze the run: %#v %v", runs, err)
+	}
+	if _, err := os.Stat(commandLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a client-launched run reached the scheduler:\n%s", mustRead(t, commandLog))
+	}
 }

@@ -90,7 +90,7 @@ func TestSessionScriptExecsLinkspanWithTheSessionIdentity(t *testing.T) {
 	argsLog := filepath.Join(dir, "args")
 	testutil.WriteScript(t, linkspan, `#!/bin/sh
 printf '%s\n' "$@" > "$ARGS_LOG"
-printf '%s\n' "$JUPYTER_TOKEN" > "$ENV_LOG"
+printf '%s\n' "$JUPYTER_TOKEN" "$LINKSPAN_LINK_TOKEN" > "$ENV_LOG"
 exit 7
 `)
 	session := Session{
@@ -98,31 +98,38 @@ exit 7
 		JobName:         jobName("s-012345abcdef", 1), PrivateRoot: dir + "/private", WorkspaceRoot: dir,
 	}
 	script := buildScript(session, linkspan)
-	const jupyterToken, hostToken = "jupyter-secret", "host-secret"
-	for _, secret := range []string{jupyterToken, hostToken} {
+	const jupyterToken, hostToken, linkToken = "jupyter-secret", "host-secret", "link-secret"
+	for _, secret := range []string{jupyterToken, hostToken, linkToken} {
 		if strings.Contains(script, secret) {
 			t.Fatalf("session script contains a secret literal:\n%s", script)
 		}
 	}
 	command := exec.Command("bash")
 	command.Stdin = strings.NewReader(script)
-	const tunnelID, tunnelCluster = "s-012345abcdef-g-0123456789abcdef", "usw3"
+	const tunnelID, tunnelCluster, linkURL = "s-012345abcdef-g-0123456789abcdef", "usw3", "wss://plane.example.edu/api/v1/sessions/s-012345abcdef/link"
 	ports := ports(session.ID, session.Seq)
 	command.Env = append(os.Environ(), "HOME="+dir, "ARGS_LOG="+argsLog, "ENV_LOG="+filepath.Join(dir, "env"),
-		"JUPYTER_TOKEN="+jupyterToken, "CS_TUNNEL_HOST_TOKEN="+hostToken,
+		"JUPYTER_TOKEN="+jupyterToken, "CS_TUNNEL_HOST_TOKEN="+hostToken, "LINKSPAN_LINK_TOKEN="+linkToken, "CS_LINK_URL="+linkURL,
 		fmt.Sprintf("CS_CONTROL_PORT=%d", ports.Control),
 		"CS_TUNNEL_ID="+tunnelID, "CS_TUNNEL_CLUSTER="+tunnelCluster)
 	err := command.Run()
 	if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 7 {
 		t.Fatalf("script did not exec Linkspan or preserve status 7: %v", err)
 	}
-	for _, required := range []string{hostToken, tunnelID, tunnelCluster, strconv.Itoa(int(ports.Control)), sessionWorkflowPath(session)} {
+	for _, required := range []string{hostToken, tunnelID, tunnelCluster, "--link-url\n" + linkURL, strconv.Itoa(int(ports.Control)), sessionWorkflowPath(session)} {
 		if got := string(mustRead(t, argsLog)); !strings.Contains(got, required) {
 			t.Fatalf("Linkspan argv missing %q: %q", required, got)
 		}
 	}
-	if got := string(mustRead(t, filepath.Join(dir, "env"))); !strings.Contains(got, jupyterToken) {
-		t.Fatalf("Linkspan did not inherit the Jupyter token: %q", got)
+	if got := string(mustRead(t, filepath.Join(dir, "env"))); got != jupyterToken+"\n"+linkToken+"\n" {
+		t.Fatalf("Linkspan did not inherit the Jupyter and link tokens: %q", got)
+	}
+	rerun := exec.Command("bash")
+	rerun.Stdin, rerun.Env = strings.NewReader(script), command.Env
+	rerun.Env = append(rerun.Env, "CS_TUNNEL_ID=")
+	_ = rerun.Run()
+	if got := string(mustRead(t, argsLog)); strings.Contains(got, "--tunnel") || !strings.Contains(got, "--link-url\n"+linkURL) {
+		t.Fatalf("Linkspan argv without a delegated tunnel: %q", got)
 	}
 }
 

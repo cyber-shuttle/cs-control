@@ -3,6 +3,7 @@
 // launches a run through Slurm, serialized across processes before tunnel side effects, and persists intent before
 // provisioning. A conclusive submission failure compensates through abandonSubmitIntent; an ambiguous one stays
 // durable. A stop proceeds locally without a usable link: releaseTunnel skips Dev Tunnels when the token is empty.
+// Attach admits a run the client launches itself, which cs-plane never schedules or cancels.
 package session
 
 import (
@@ -76,10 +77,6 @@ func (s Service) launchSerialized(ctx context.Context, request createRequest, pr
 		return nil, err
 	}
 
-	previous, err := s.claimLaunch(request.ID, principal)
-	if err != nil {
-		return nil, err
-	}
 	operationCtx, done, err := s.beginOperation()
 	if err != nil {
 		return nil, err
@@ -87,22 +84,19 @@ func (s Service) launchSerialized(ctx context.Context, request createRequest, pr
 	defer done()
 
 	intent := prepared.session
-	intent.State, intent.CreatedAt, intent.UpdatedAt = "SUBMITTING", previous.CreatedAt, s.utcNow()
-	record, jupyterToken, err := s.createSessionTunnel(operationCtx, &intent, principal, credential, previous.Seq+1)
+	intent.State, intent.Launcher = "SUBMITTING", launcherPlane
+	intent, hostToken, capability, err := s.claimRun(operationCtx, principal, credential, intent)
 	if err != nil {
 		return nil, err
 	}
 	prepared.script = buildScript(intent, prepared.linkspan)
-	if err := s.persistSubmitIntent(previous, intent); err != nil {
-		return nil, errors.Join(err, s.releaseTunnel(credential, intent.ID, intent.Seq, intent.Tunnel))
-	}
 	if err := s.provisionSession(request.SSHHost, intent, prepared.home, prepared.linkspan); err != nil {
 		s.sessionStatus(intent.ID, "Session environment preparation failed")
 		return nil, errors.Join(err, s.abandonSubmitIntent(credential, intent))
 	}
 
 	s.sessionStatus(intent.ID, "Submitting session to Slurm")
-	jobID, err := s.submitSessionScript(operationCtx, request.SSHHost, intent, prepared.script, jupyterToken, record.HostToken)
+	jobID, err := s.submitSessionScript(operationCtx, request.SSHHost, intent, prepared.script, capability, hostToken)
 	if err != nil {
 		if slurm.AmbiguousSubmission(err) {
 			s.sessionStatus(intent.ID, "Session submission outcome is unresolved")
@@ -151,6 +145,21 @@ func (s Service) claimLaunch(id string, principal security.Principal) (previous 
 		return nil
 	})
 	return previous, err
+}
+
+func (s Service) claimRun(ctx context.Context, principal security.Principal, credential devtunnel.Credential, intent Session) (Session, string, sessionCapability, error) {
+	previous, err := s.claimLaunch(intent.ID, principal)
+	if err != nil {
+		return intent, "", sessionCapability{}, err
+	}
+	intent.CreatedAt, intent.UpdatedAt = previous.CreatedAt, s.utcNow()
+	hostToken, capability, err := s.issueSession(ctx, &intent, principal, credential, previous.Seq+1)
+	if err == nil {
+		if err = s.persistSubmitIntent(previous, intent); err != nil {
+			err = errors.Join(err, s.releaseTunnel(credential, intent.ID, intent.Seq, intent.Tunnel))
+		}
+	}
+	return intent, hostToken, capability, err
 }
 
 func (s Service) persistSubmitIntent(previous *Session, intent Session) error {
@@ -266,6 +275,28 @@ func (s Service) Start(ctx context.Context, principal security.Principal, id str
 	})
 }
 
+func (s Service) Attach(ctx context.Context, principal security.Principal, id string) (*attachResponse, error) {
+	previous, err := s.retireFinished(ctx, principal, id)
+	if err != nil {
+		return nil, err
+	}
+	operationCtx, done, err := s.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	intent, capability := *previous, sessionCapability{}
+	intent.State, intent.Launcher, intent.Error, intent.JobID, intent.Node, intent.StartedAt = "QUEUED", launcherClient, "", "", "", time.Time{}
+	if err := s.serialized(id, func() (err error) {
+		intent, _, capability, err = s.claimRun(operationCtx, principal, devtunnel.Credential{}, intent)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	s.sessionStatus(id, "Waiting for the client's Linkspan to connect")
+	return &attachResponse{Session: intent.sessionResponse, Link: linkAccess{URL: s.linkURL(id), Token: capability.LinkToken}}, nil
+}
+
 func (s Service) Stop(principal security.Principal, id string) (*Session, error) {
 	s = s.forPrincipal(principal)
 	operationCtx, done, err := s.beginOperation()
@@ -300,10 +331,15 @@ func (s Service) Stop(principal security.Principal, id string) (*Session, error)
 	}
 	credential, _ := s.TunnelCredentials.Credential(operationCtx, principal)
 	managementErr := s.releaseTunnel(credential, snapshot.ID, snapshot.Seq, snapshot.Tunnel)
+	if link, ok := s.links.LoadAndDelete(id); ok {
+		_ = link.(*sessionLink).mux.Close()
+	}
 	candidate := snapshot
 	var narration []string
 	if reconcilable(snapshot.State) {
-		s.sessionStatus(id, "Requesting scheduler cancellation")
+		if snapshot.Launcher != launcherClient {
+			s.sessionStatus(id, "Requesting scheduler cancellation")
+		}
 		stopCtx, cancel := s.ownTimeout()
 		candidates, lines := s.reconcileSnapshots(stopCtx, []Session{snapshot})
 		cancel()
@@ -423,7 +459,7 @@ func (s Service) Define(principal security.Principal, request createRequest) (*S
 		return nil, false, err
 	}
 	session := &Session{sessionResponse: sessionResponse{
-		ID: request.ID, State: "STOPPED", SSHHost: request.SSHHost, Account: request.Account,
+		ID: request.ID, State: "STOPPED", Launcher: launcherPlane, SSHHost: request.SSHHost, Account: request.Account,
 		Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources,
 		CreatedAt: s.utcNow(), UpdatedAt: s.utcNow(),
 	}, Owner: principal}

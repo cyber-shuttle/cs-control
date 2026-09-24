@@ -316,7 +316,7 @@ func (s *Service) Credential(ctx context.Context, principal security.Principal) 
 			return err
 		}
 		if !ok {
-			return security.New("tunnel_link_required", "a Dev Tunnels link is required", http.StatusConflict)
+			return nil
 		}
 		if link.RefreshToken != "" && !link.ExpiresAt.IsZero() && s.now().Add(tunnelLinkRefreshWindow).After(link.ExpiresAt) {
 			tokens, err := s.authorizer.Refresh(ctx, link.Provider, link.RefreshToken)

@@ -38,9 +38,10 @@ func testServices(t *testing.T, stateDir string) services {
 
 func TestServeValidatesOriginsBeforeListening(t *testing.T) {
 	t.Setenv("CS_OIDC_CLIENT_SECRET", "the-client-secret")
-	oidcArgs := []string{"--oidc-client-id", "the-client-id", "--custos-url", "https://custos.example.edu"}
+	oidcArgs := []string{"--oidc-client-id", "the-client-id", "--custos-url", "https://custos.example.edu", "--public-url", "https://plane.example.edu"}
 	for _, args := range [][]string{
 		oidcArgs,
+		append(append([]string{}, oidcArgs...), "--public-url", "http://plane.example.edu", "--allowed-origin", "https://workspace.example"),
 		append(append([]string{}, oidcArgs...), "--allowed-origin", "*"),
 		append(append([]string{}, oidcArgs...), "--allowed-origin", "http://workspace.example"),
 		append(append([]string{"--listen", "0.0.0.0:8045"}, oidcArgs...), "--allowed-origin", "https://workspace.example"),
@@ -74,7 +75,7 @@ func TestServeRefusesIncompatibleStateBeforeCreatingCredentials(t *testing.T) {
 	testutil.Check(t, database.Close())
 
 	svcs := testServices(t, stateDir)
-	args := []string{"--oidc-client-id", "the-client-id", "--custos-url", "https://custos.example.edu", "--allowed-origin", "https://workspace.example.edu"}
+	args := []string{"--oidc-client-id", "the-client-id", "--custos-url", "https://custos.example.edu", "--public-url", "https://plane.example.edu", "--allowed-origin", "https://workspace.example.edu"}
 	listen := func(string, string) (net.Listener, error) {
 		t.Fatal("serve listened with an incompatible state database")
 		return nil, nil
@@ -146,8 +147,10 @@ func TestCanonicalRouteManifest(t *testing.T) {
 		"/api/v1/tunnel/authorizations/{handle}/poll": "POST",
 		"/api/v1/sessions":                            "GET POST",
 		"/api/v1/sessions/validate":                   "POST",
+		"/api/v1/sessions/{id}/ssh":                   "POST",
 		"/api/v1/sessions/{id}":                       "DELETE GET",
 		"/api/v1/sessions/{id}/start":                 "POST",
+		"/api/v1/sessions/{id}/attach":                "POST",
 		"/api/v1/sessions/{id}/stop":                  "POST",
 		"/api/v1/sessions/{id}/runs":                  "POST",
 		"/api/v1/sessions/{id}/access":                "GET",

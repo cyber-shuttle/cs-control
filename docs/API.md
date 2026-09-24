@@ -1,6 +1,7 @@
 # API
 
-`cs serve` answers on its loopback address (default `127.0.0.1:8045`). Paths are relative to that address.
+`cs serve` answers on its loopback address (default `127.0.0.1:8045`), reached publicly at `--public-url`. Paths are
+relative to that URL.
 
 | Route | Methods |
 | --- | --- |
@@ -20,8 +21,13 @@
 | `/api/v1/sessions/validate` | `POST` |
 | `/api/v1/sessions/{id}` | `GET`, `DELETE` |
 | `/api/v1/sessions/{id}/access` | `GET` |
+| `/api/v1/sessions/{id}/attach` | `POST` |
+| `/api/v1/sessions/{id}/forward/{port}` (WebSocket) | `GET` |
+| `/api/v1/sessions/{id}/jupyter/{path}` (Jupyter Server) | any |
+| `/api/v1/sessions/{id}/link` (WebSocket, Linkspan) | `GET` |
 | `/api/v1/sessions/{id}/metrics` | `GET` |
 | `/api/v1/sessions/{id}/runs` | `POST` |
+| `/api/v1/sessions/{id}/ssh` | `POST` |
 | `/api/v1/sessions/{id}/start` | `POST` |
 | `/api/v1/sessions/{id}/stop` | `POST` |
 | `/api/v1/telemetry` | `GET` |
@@ -40,7 +46,7 @@
 
 ## Authentication
 
-Every route except the sign-in routes requires:
+Every route except the sign-in routes and the session capability routes (forward, Jupyter, link) requires:
 
 ```
 Authorization: Bearer <OIDC ID token>
@@ -64,13 +70,13 @@ other bearer route accepts subprotocol authentication.
 
 ## Origins
 
-`--allowed-origin` lists exact HTTPS or loopback HTTP origins. On every route, including the SSH authentication WebSocket, a
-present `Origin` outside the list is `403 origin_not_allowed`; a request without `Origin` is a native
+`--allowed-origin` lists exact HTTPS or loopback HTTP origins. On every route, including the Jupyter proxy and every
+WebSocket, a present `Origin` outside the list is `403 origin_not_allowed`; a request without `Origin` is a native
 client. `oauth/config` and `oauth/exchange` refuse a missing `Origin` with `403 origin_required`.
 
 An allowed `Origin` gets `Access-Control-Allow-Origin`, `Vary: Origin` and `Access-Control-Expose-Headers: ETag,
-Location`. A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) is answered `204` with the path's
-methods from the route table. It may request `Authorization`, `Content-Type` and
+Location`. A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) outside the capability routes is
+answered `204` with the path's methods from the route table. It may request `Authorization`, `Content-Type` and
 `If-None-Match`, or only `Content-Type` on sign-in routes; anything else is `403 preflight_not_allowed`.
 
 ## Errors
@@ -91,7 +97,7 @@ detail logged, not returned.
 | `session_owner_mismatch`, `origin_required`, `origin_not_allowed`, `preflight_not_allowed`, `authorization_denied` | 403 |
 | `not_found`, `session_not_found`, `ssh_host_not_found`, `ssh_key_not_found` | 404 |
 | `method_not_allowed` | 405 |
-| `session_running`, `session_not_stopped`, `session_has_history`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_key_exists`, `ssh_authentication_required`, `ssh_authentication_in_progress`, `tunnel_link_required` | 409 |
+| `session_running`, `session_not_stopped`, `session_has_history`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_key_exists`, `ssh_authentication_required`, `ssh_authentication_in_progress` | 409 |
 | `authorization_expired` | 410 |
 | `upgrade_required` | 426 |
 | `rate_limited` | 429 |
@@ -282,8 +288,8 @@ An unknown `{id}` is `404 session_not_found`; another principal's is `403 sessio
 | --- | --- |
 | Check a request | `POST /api/v1/sessions/validate` |
 | Record a session | `POST /api/v1/sessions` |
-| Run it | `POST /api/v1/sessions/{id}/start` |
-| Reach it | `GET /api/v1/sessions/{id}/access`, then Jupyter over the session's Dev Tunnel |
+| Run it | `POST /api/v1/sessions/{id}/start`, or `POST /api/v1/sessions/{id}/attach` for a job the client submits |
+| Reach it | `GET /api/v1/sessions/{id}/access`, then the Jupyter proxy, or `POST /api/v1/sessions/{id}/ssh` |
 | End the run | `POST /api/v1/sessions/{id}/stop` |
 | Drop the record | `DELETE /api/v1/sessions/{id}` |
 
@@ -294,6 +300,7 @@ An unknown `{id}` is `404 session_not_found`; another principal's is `403 sessio
   "id": "s-012345abcdef",
   "seq": 1,
   "state": "READY",
+  "launcher": "cs-plane",
   "sshHost": "delta",
   "account": "project-a",
   "partition": "cpu",
@@ -307,12 +314,14 @@ An unknown `{id}` is `404 session_not_found`; another principal's is `403 sessio
 
 | Field | Meaning |
 | --- | --- |
-| `seq` | 0 until the first `start`, then the run currently serving the session; each `start` increments it |
+| `seq` | 0 until the first `start`, then the run currently serving the session; each `start` or `attach` increments it |
 | `state` | `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED` or `FAILED` |
-| `startedAt` | when Slurm first reported the job running; absent before that. With `wallMinutes` it gives the deadline |
+| `launcher` | `cs-plane` when `start` launched the run; `client` when `attach` admitted a job the client submitted |
+| `startedAt` | when Slurm first reported the job running, or its link connected if earlier; absent before that. With `wallMinutes` it gives the deadline |
 | `account`, `error` | omitted when empty |
 
-`READY` means the job is running and its Linkspan has written to its log.
+`READY` means reachable: the job's Linkspan linked for this seq, or, without a link, the job is running and has
+written to its log.
 
 ### `POST /api/v1/sessions/validate` → 200
 
@@ -387,22 +396,37 @@ The session record.
 ### `POST /api/v1/sessions/{id}/start` → 200
 
 Launches through Slurm. Validates the session against the host as `validate` does, then takes the next seq, a new
-Dev Tunnel, a new capability and a new job. Answers the session record.
+capability, a new job and, when the owner linked Dev Tunnels, a new tunnel. Answers the session record with
+`launcher: "cs-plane"`.
 
 | Refusal | Code |
 | --- | --- |
 | Session not terminal, including one another `start` is launching | `409 session_running` |
-| No Dev Tunnels account linked | `409 tunnel_link_required` |
 | Slurm rejects the script | `400 slurm_validation_failed` |
 | Another launch is preparing the same host for this caller | `409 session_provisioning_in_progress` |
 | Login-node preparation fails | `502` or `504 session_provisioning_failed` |
 
 A conclusive submission failure leaves the session `FAILED` at the new seq.
 
+### `POST /api/v1/sessions/{id}/attach` → 200
+
+```json
+{
+  "session": { "id": "s-012345abcdef", "seq": 2, "state": "QUEUED", "launcher": "client", "...": "..." },
+  "link": { "url": "wss://api.example.edu/api/v1/sessions/s-012345abcdef/link", "token": "<43-character token>" }
+}
+```
+
+Admits a job the client submits itself. Takes no body. Freezes the previous run as `start` does, then takes the next
+seq and a new capability without a Dev Tunnel, and persists the session `QUEUED` with `launcher: "client"`. The
+client runs Linkspan with `--link-url <url>` and `LINKSPAN_LINK_TOKEN=<token>`; the link moves the session to
+`READY`. A session that is not terminal is `409 session_running`.
+
 ### `POST /api/v1/sessions/{id}/stop` → 200
 
-Marks the session `STOPPING`, releases its tunnel and capability, and asks Slurm to cancel the job. Answers the
-session record; stopping a terminal session answers it unchanged.
+Marks the session `STOPPING`, drops its link, releases its tunnel and capability, and asks Slurm to cancel the job. A
+`client` run is marked `STOPPED` without Slurm; its client cancels the job. Answers the session record; stopping a
+terminal session answers it unchanged.
 
 ### `DELETE /api/v1/sessions/{id}` → 204
 
@@ -439,16 +463,43 @@ under seq 1, 2, and so on. Answers the session record with `seq` equal to the ru
   "seq": 1,
   "expiresAt": "2030-01-01T01:00:00Z",
   "jupyter": {
-    "uri": "https://31001.use.devtunnels.ms",
+    "uri": "https://api.example.edu/api/v1/sessions/s-012345abcdef/jupyter/",
     "token": "<43-character token>"
   }
 }
 ```
 
-The only session route that returns a secret. `uri` is the session's Jupyter URI over its Dev Tunnel, `token` is
-Jupyter Server's token, and `expiresAt` is the live tunnel expiration. A session that is not `READY`, has no stored
-capability, or whose tunnel cannot be reached or has expired is `409 session_access_unavailable`, with the reason in
-the message.
+Besides `attach`, the only session route that returns a secret. `token` is Jupyter Server's token and the capability
+every forward offers; `expiresAt` is the walltime deadline. A session that is not `READY`, has no stored capability,
+or has neither a link nor a delegated tunnel is `409 session_access_unavailable`, with the reason in the message.
+
+### `GET /api/v1/sessions/{id}/forward/{port}` → 101
+
+A WebSocket carrying one TCP connection, as binary frames, to the port a Linkspan task serves in the session: the
+SSH server `POST .../ssh` started, Jupyter, or any other. It takes no bearer; the client offers exactly
+`cybershuttle.v1` then `capability.<token>`, with `token` from `/access`.
+
+| Refusal | Answer |
+| --- | --- |
+| Malformed or zero port, or Linkspan's control port | `404 not_found` |
+| Other subprotocols, wrong token, session not `READY` | `401` |
+| Foreign `Origin` | `403 origin_not_allowed` |
+| Port unreachable | `502 upstream_unavailable` |
+
+### `/api/v1/sessions/{id}/jupyter/{path}`
+
+Proxies any method, WebSockets included, to `{path}` on the session's Jupyter Server. The Jupyter token goes in
+`Authorization: token <token>` or a `token` query parameter; a CORS preflight needs none and is answered by the
+server. A foreign `Origin` is `403 origin_not_allowed`, a wrong token or a session that is not `READY` is `401`, and
+an unreachable server is `502 upstream_unavailable`.
+
+### `GET /api/v1/sessions/{id}/link` → 101
+
+The WebSocket a session's Linkspan dials and holds. It offers exactly `cybershuttle.v1` then `link.<token>`, the
+per-seq link token from its environment or `attach`; any other offer or a terminal session is `401`. The socket
+carries yamux in binary frames with cs-plane as client. On each stream cs-plane writes the target port as two
+big-endian bytes; Linkspan answers `1` when connected or `0` when no task serves the port. A newer socket replaces
+the older one.
 
 ### `GET /api/v1/sessions/{id}/metrics` → 200
 
@@ -466,10 +517,23 @@ the message.
 }
 ```
 
-Up to the last 20 samples, taken from Linkspan over the session's Dev Tunnel every five seconds while the session is
-`READY`; possibly empty.
+Up to the last 20 samples, taken from Linkspan every five seconds while the session is `READY`; possibly empty.
 Every figure is optional: an unreadable counter is absent, not zero. `at` is when cs-plane took the sample, so
 consecutive `cpuUsageUsec` values give a rate.
+
+### `POST /api/v1/sessions/{id}/ssh` → 200
+
+```json
+{ "publicKey": "ssh-ed25519 ..." }
+```
+
+```json
+{ "port": 2222 }
+```
+
+Starts an SSH server in the owner's `READY` session authorizing `publicKey`, and answers the port to reach through
+`forward/{port}`. Idempotent per key. A key Linkspan refuses is `invalid_ssh_key`; a session that is not reachable is
+`session_access_unavailable`; any other Linkspan failure is `502 upstream_failure`.
 
 ## Telemetry
 
@@ -512,7 +576,8 @@ empty.
 
 ## Dev Tunnels link
 
-A Microsoft or GitHub account, required before a session starts, that gives each run its own Dev Tunnel. The credential is stored sealed under the caller's principal and never returned. These routes need the
+An optional Microsoft or GitHub account that gives each session the caller starts a delegated Dev Tunnel as fallback
+to its link. The credential is stored sealed under the caller's principal and never returned. These routes need the
 bearer.
 
 ### `GET /api/v1/tunnel` → 200

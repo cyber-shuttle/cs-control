@@ -60,7 +60,6 @@ type PortRecord struct {
 type PortSpec struct {
 	PortNumber  uint16
 	Description string
-	Anonymous   bool
 }
 
 type CreateRequest struct {
@@ -97,20 +96,9 @@ type createTunnelBody struct {
 }
 
 type createTunnelPort struct {
-	PortNumber    uint16               `json:"portNumber"`
-	Protocol      string               `json:"protocol"`
-	Description   string               `json:"description"`
-	AccessControl *tunnelAccessControl `json:"accessControl,omitempty"`
-}
-
-type tunnelAccessControl struct {
-	Entries []tunnelAccessEntry `json:"entries"`
-}
-
-type tunnelAccessEntry struct {
-	Type     string   `json:"type"`
-	Subjects []string `json:"subjects"`
-	Scopes   []string `json:"scopes"`
+	PortNumber  uint16 `json:"portNumber"`
+	Protocol    string `json:"protocol"`
+	Description string `json:"description"`
 }
 
 type tunnelOptions struct {
@@ -210,7 +198,7 @@ func (m *client) tunnelURL(tunnelID, clusterID string, includeTokens, includePor
 	query := url.Values{}
 	query.Add("api-version", apiVersion)
 	if includeTokens {
-		query.Add("tokenScopes", "host manage:ports")
+		query.Add("tokenScopes", "host")
 		query.Add("tokenScopes", "connect")
 	}
 	if includePorts {
@@ -247,7 +235,7 @@ func (m *client) doRecord(request *http.Request, token, expectedID string, requi
 	if result.TunnelID != expectedID || !clusterIDPattern.MatchString(result.ClusterID) || result.Expiration.IsZero() {
 		return Record{}, errors.New("Dev Tunnel response identity is invalid")
 	}
-	hostToken := result.AccessTokens["host manage:ports"]
+	hostToken := result.AccessTokens["host"]
 	connectToken := result.AccessTokens["connect"]
 	if requireTokens && (!security.ValidCredential(hostToken) || !security.ValidCredential(connectToken)) {
 		return Record{}, errors.New("Dev Tunnel response omitted required access tokens")
@@ -269,11 +257,7 @@ func (m *client) Create(ctx context.Context, req CreateRequest) (Record, error) 
 	}
 	ports := make([]createTunnelPort, 0, len(req.Ports))
 	for _, spec := range req.Ports {
-		port := createTunnelPort{PortNumber: spec.PortNumber, Protocol: "http", Description: spec.Description}
-		if spec.Anonymous {
-			port.AccessControl = &tunnelAccessControl{Entries: []tunnelAccessEntry{{Type: "Anonymous", Subjects: []string{}, Scopes: []string{"connect"}}}}
-		}
-		ports = append(ports, port)
+		ports = append(ports, createTunnelPort{PortNumber: spec.PortNumber, Protocol: "http", Description: spec.Description})
 	}
 	body, err := json.Marshal(createTunnelBody{
 		TunnelID:         req.TunnelID,

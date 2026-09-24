@@ -80,6 +80,7 @@ type sessionResponse struct {
 	ID         string    `json:"id"`
 	Seq        int       `json:"seq"`
 	State      string    `json:"state"`
+	Launcher   string    `json:"launcher"`
 	SSHHost    string    `json:"sshHost"`
 	Account    string    `json:"account,omitempty"`
 	Partition  string    `json:"partition"`
@@ -105,6 +106,16 @@ type Session struct {
 type sessionList struct {
 	Sessions []sessionResponse `json:"sessions"`
 	Logs     []sessionLogTail  `json:"logs"`
+}
+
+type linkAccess struct {
+	URL   string `json:"url"`
+	Token string `json:"token"`
+}
+
+type attachResponse struct {
+	Session sessionResponse `json:"session"`
+	Link    linkAccess      `json:"link"`
 }
 
 type sessionAccessResponse struct {
@@ -133,6 +144,11 @@ type state struct {
 	Runs     []runRecord
 }
 
+const (
+	launcherPlane  = "cs-plane"
+	launcherClient = "client"
+)
+
 const DefaultLinkspanPath = "$HOME/.cybershuttle/bin/linkspan"
 
 const defaultSessionBase = ".cybershuttle/sessions"
@@ -159,7 +175,9 @@ type Config struct {
 	TunnelManager     TunnelManager
 	TunnelCredentials TunnelCredentials
 	CapabilityDir     string
+	PublicURL         string
 	TunnelTimeout     time.Duration
+	Origins           security.Origins
 }
 
 type Service struct {
@@ -167,6 +185,8 @@ type Service struct {
 	runner           ssh.Runner
 	logs             *sessionLogs
 	metrics          *sessionMetrics
+	links            *sync.Map
+	transport        *http.Transport
 	hostPreparations *sync.Map
 	now              func() time.Time
 	runtime          *sessionRuntime
@@ -249,9 +269,10 @@ func NewService(config Config) *Service {
 		config.LinkspanPath = DefaultLinkspanPath
 	}
 	service := &Service{
-		Config: config, logs: newSessionLogs(), metrics: newSessionMetrics(),
+		Config: config, logs: newSessionLogs(), metrics: newSessionMetrics(), links: &sync.Map{},
 		hostPreparations: &sync.Map{}, now: time.Now, runtime: newSessionRuntime(),
 	}
+	service.transport = newSessionTransport(service.dialHost)
 	service.runtime.start(func(ctx context.Context) {
 		every(ctx, backgroundInterval, func(context.Context) { service.triggerRefresh() })
 	})
@@ -436,6 +457,9 @@ func (s Service) Routes() router.Routes {
 		"/api/v1/sessions/{id}/start": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
 			return view(s.Start(request.Context(), principal, id(request)))
 		})},
+		"/api/v1/sessions/{id}/attach": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*attachResponse, error) {
+			return s.Attach(request.Context(), principal, id(request))
+		})},
 		"/api/v1/sessions/{id}/stop": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
 			return view(s.Stop(principal, id(request)))
 		})},
@@ -447,7 +471,16 @@ func (s Service) Routes() router.Routes {
 			return view(s.AdoptRuns(principal, id(request), body))
 		})},
 		"/api/v1/sessions/{id}/access": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*sessionAccessResponse, error) {
-			return s.Access(request.Context(), principal, id(request))
+			return s.Access(principal, id(request))
+		})},
+		"/api/v1/sessions/{id}/ssh": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*sshAccessResponse, error) {
+			body, err := decoded[struct {
+				PublicKey string `json:"publicKey"`
+			}](request)
+			if err != nil {
+				return nil, err
+			}
+			return s.StartSSH(request.Context(), principal, id(request), body.PublicKey)
 		})},
 		"/api/v1/sessions/{id}/metrics": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionSeries, error) {
 			return s.Metrics(principal, id(request))

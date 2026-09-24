@@ -94,12 +94,11 @@ func TestLinkBrokerPollStoresSealedCredential(t *testing.T) {
 	}
 }
 
-func TestLinkBrokerCredentialRequiresALink(t *testing.T) {
+func TestLinkBrokerCredentialIsEmptyWithoutALink(t *testing.T) {
 	broker, _ := newTestLinkBroker(t)
-	_, err := broker.Credential(context.Background(), security.Principal{Subject: "owner", Tenant: "custos"})
-	api := security.For(err)
-	if err == nil || api.Code != "tunnel_link_required" {
-		t.Fatalf("error = %v", err)
+	credential, err := broker.Credential(context.Background(), security.Principal{Subject: "owner", Tenant: "custos"})
+	if err != nil || credential != (devtunnel.Credential{}) {
+		t.Fatalf("credential = %#v, %v", credential, err)
 	}
 }
 

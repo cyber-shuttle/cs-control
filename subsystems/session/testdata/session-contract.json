@@ -2,6 +2,7 @@
   "id": "s-012345abcdef",
   "seq": 1,
   "state": "READY",
+  "launcher": "cs-plane",
   "sshHost": "delta",
   "account": "project-a",
   "partition": "cpu",

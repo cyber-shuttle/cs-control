@@ -26,7 +26,7 @@ func realisticTunnelResponse(id, hostToken, connectToken string) string {
 	return fmt.Sprintf(`{
 		"tunnelId":%q,
 		"clusterId":"use",
-		"accessTokens":{"host manage:ports":%q,"connect":%q},
+		"accessTokens":{"host":%q,"connect":%q},
 		"created":%q,
 		"expiration":%q,
 		"customExpiration":3600,
@@ -50,7 +50,7 @@ func TestDevTunnelCreateRequestsScopedTokensAndAcceptsAdditiveFields(t *testing.
 		if r.Method != http.MethodPut || r.Header.Get("Authorization") != "Bearer oauth" || r.Header.Get("If-None-Match") != "*" {
 			t.Fatalf("request = %s headers=%v", r.Method, r.Header)
 		}
-		if got := r.URL.Query()["tokenScopes"]; len(got) != 2 || got[0] != "host manage:ports" || got[1] != "connect" {
+		if got := r.URL.Query()["tokenScopes"]; len(got) != 2 || got[0] != "host" || got[1] != "connect" {
 			t.Fatalf("token scopes = %#v", got)
 		}
 		testutil.Check(t, json.NewDecoder(r.Body).Decode(&body))

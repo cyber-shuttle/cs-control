@@ -1,6 +1,6 @@
-// Session tunnel tests protect capability files, secret separation, live access, and compensation.
+// Session tunnel tests protect capability files, secret separation, and compensation.
 // Capabilities remain strict private files and reject malformed data or symlink traversal.
-// Persisted session payloads never contain connection, host, or Jupyter tokens.
+// Persisted session payloads never contain connection, host, link or Jupyter tokens.
 // An uncertain provider create is deleted without exposing its credential in errors.
 package session
 
@@ -13,7 +13,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cyber-shuttle/cs-plane/internal/devtunnel"
 	"github.com/cyber-shuttle/cs-plane/internal/security"
@@ -22,13 +21,13 @@ import (
 )
 
 func defaultSessionCapability() sessionCapability {
-	return sessionCapability{ConnectToken: testConnectToken, JupyterToken: testJupyterToken}
+	return sessionCapability{ConnectToken: testConnectToken, JupyterToken: testJupyterToken, LinkToken: testLinkToken}
 }
 
 func TestSessionCapabilityStorage(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session-capabilities")
 	const sessionID, seq = "s-123456789abc", 1
-	first := sessionCapability{ConnectToken: "first-connect-token", JupyterToken: strings.Repeat("A", 43)}
+	first := sessionCapability{ConnectToken: "first-connect-token", JupyterToken: strings.Repeat("A", 43), LinkToken: testLinkToken}
 	testutil.Check(t, putCapability(dir, sessionID, seq, first))
 	if got, err := getCapability(dir, sessionID, seq); err != nil || got != first {
 		t.Fatalf("getCapability = %#v, %v", got, err)
@@ -40,7 +39,7 @@ func TestSessionCapabilityStorage(t *testing.T) {
 	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 		t.Fatalf("file mode = %v, %v", info.Mode(), err)
 	}
-	replacement := sessionCapability{ConnectToken: "replacement-connect-token", JupyterToken: strings.Repeat("B", 42) + "A"}
+	replacement := sessionCapability{JupyterToken: strings.Repeat("B", 42) + "A", LinkToken: testLinkToken}
 	testutil.Check(t, putCapability(dir, sessionID, seq, replacement))
 	if got, err := getCapability(dir, sessionID, seq); err != nil || got != replacement {
 		t.Fatalf("replacement = %#v, %v", got, err)
@@ -60,10 +59,13 @@ func TestSessionCapabilityRefusesInvalidRecordsAndSymlinks(t *testing.T) {
 	}
 	testutil.Check(t, os.Mkdir(dir, 0o700))
 	path, _ := capabilityPath(dir, sessionID, seq)
+	capability := defaultSessionCapability()
+	valid, _ := json.Marshal(capability)
+	missingLink, _ := json.Marshal(map[string]string{"connectToken": capability.ConnectToken, "jupyterToken": capability.JupyterToken})
 	for _, raw := range []string{
-		`{"connectToken":"connect"}`,
-		`{"connectToken":"connect","jupyterToken":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","extra":true}`,
-		`{"connectToken":"connect","jupyterToken":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}{}`,
+		strings.TrimSuffix(string(valid), "}") + `,"extra":true}`,
+		string(valid) + "{}",
+		string(missingLink),
 	} {
 		testutil.Check(t, os.WriteFile(path, []byte(raw), 0o600))
 		if _, err := getCapability(dir, sessionID, seq); err == nil {
@@ -71,7 +73,7 @@ func TestSessionCapabilityRefusesInvalidRecordsAndSymlinks(t *testing.T) {
 		}
 	}
 	foreign := filepath.Join(root, "foreign.token")
-	testutil.Check(t, os.WriteFile(foreign, []byte(`{"connectToken":"planted","jupyterToken":"`+strings.Repeat("A", 43)+`"}`), 0o600))
+	testutil.Check(t, os.WriteFile(foreign, valid, 0o600))
 	testutil.Check(t, os.Remove(path))
 	testutil.Check(t, os.Symlink(foreign, path))
 	if _, err := getCapability(dir, sessionID, seq); err == nil {
@@ -89,85 +91,29 @@ func TestSessionCapabilityRefusesInvalidRecordsAndSymlinks(t *testing.T) {
 	}
 }
 
-func readyAccessSession(now time.Time) Session {
-	session := pendingSession("s-012345abcdef", "delta", "123")
-	setTestSessionMetadata(&session)
-	session.State = "READY"
-	session.Tunnel.ExpiresAt = now.Add(time.Hour).Truncate(time.Second)
-	return session
-}
-
-func accessTestService(t *testing.T, manager TunnelManager, now time.Time) Service {
+func accessTestService(t *testing.T, manager TunnelManager) Service {
 	t.Helper()
 	service := newTestService(t, ssh.Runner{}, testSessionStore(t))
-	service.TunnelManager, service.CapabilityDir, service.now = manager, t.TempDir()+"/credentials", func() time.Time { return now }
+	service.TunnelManager, service.CapabilityDir = manager, t.TempDir()+"/credentials"
 	return service
 }
 
 func TestCreateSessionTunnelPersistsCapabilityOnlyInPrivateCredential(t *testing.T) {
 	manager := &testTunnelManager{}
-	service := accessTestService(t, manager, time.Now())
+	service := accessTestService(t, manager)
 	session := pendingSession("s-012345abcdef", "delta", "")
-	record, jupyterToken, err := service.createSessionTunnel(context.Background(), &session, testPrincipal, devtunnel.Credential{Scheme: "Bearer", Token: "oauth-token"}, 1)
+	hostToken, capability, err := service.issueSession(context.Background(), &session, testPrincipal, devtunnel.Credential{Scheme: "Bearer", Token: "oauth-token"}, 1)
 	testutil.Check(t, err)
 	stored, err := getCapability(service.CapabilityDir, session.ID, session.Seq)
-	if err != nil || stored.ConnectToken != record.ConnectToken {
-		t.Fatalf("private capability = %#v, %v", stored, err)
-	}
-	if jupyterToken != stored.JupyterToken {
-		t.Fatalf("returned Jupyter token does not match the stored capability")
+	if err != nil || stored != capability || capability.JupyterToken == capability.LinkToken || capability.ConnectToken == "" || hostToken == "" || session.Tunnel.ID == "" {
+		t.Fatalf("private capability = %#v, host token %q, tunnel %q: %v", stored, hostToken, session.Tunnel.ID, err)
 	}
 	persistedSession, err := json.Marshal(session)
 	testutil.Check(t, err)
-	for _, secret := range []string{stored.ConnectToken, stored.JupyterToken, record.HostToken} {
+	for _, secret := range []string{stored.JupyterToken, stored.LinkToken, stored.ConnectToken, hostToken} {
 		if strings.Contains(string(persistedSession), secret) {
 			t.Fatalf("session state contains seq secret: %s", persistedSession)
 		}
-	}
-}
-
-func TestSessionAccessFollowsTheLiveTunnelExpiration(t *testing.T) {
-	for name, test := range map[string]struct {
-		liveExpiresAt func(sessionExpiresAt time.Time) time.Time
-		check         func(t *testing.T, expiresAt time.Time, err error)
-	}{
-		"extended": {
-			liveExpiresAt: func(sessionExpiresAt time.Time) time.Time { return sessionExpiresAt.Add(17 * time.Minute) },
-			check: func(t *testing.T, expiresAt time.Time, err error) {
-				if err != nil {
-					t.Fatalf("extended tunnel expiration refused session access: %v", err)
-				}
-			},
-		},
-		"expired": {
-			liveExpiresAt: func(time.Time) time.Time { return time.Now().UTC().Add(-time.Second) },
-			check: func(t *testing.T, _ time.Time, err error) {
-				if err == nil || !strings.Contains(err.Error(), "expired") {
-					t.Fatalf("expected an expiry-specific refusal, got %v", err)
-				}
-			},
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			now := time.Now().UTC().Truncate(time.Second)
-			session := readyAccessSession(now)
-			live := test.liveExpiresAt(session.Tunnel.ExpiresAt)
-			manager := &testTunnelManager{getResponse: &devtunnel.Record{
-				ID: session.Tunnel.ID, ClusterID: session.Tunnel.ClusterID, ExpiresAt: live,
-				Ports: []devtunnel.PortRecord{{PortNumber: ports(session.ID, session.Seq).Jupyter, Protocol: "http", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
-			}}
-			service := accessTestService(t, manager, now)
-			testutil.Check(t, putCapability(service.CapabilityDir, session.ID, session.Seq, defaultSessionCapability()))
-			access, err := service.sessionAccess(context.Background(), session)
-			var expiresAt time.Time
-			if err == nil {
-				expiresAt = access.ExpiresAt
-				if !expiresAt.Equal(live) {
-					t.Fatalf("session access reported %s, want the live expiration %s", expiresAt, live)
-				}
-			}
-			test.check(t, expiresAt, err)
-		})
 	}
 }
 
@@ -181,9 +127,9 @@ func TestCreateSessionTunnelCompensatesUncertainCreateError(t *testing.T) {
 	before := session
 	credentialDir := t.TempDir()
 	testutil.Check(t, os.Chmod(credentialDir, 0o700))
-	service := accessTestService(t, manager, time.Now())
+	service := accessTestService(t, manager)
 	service.CapabilityDir = credentialDir
-	_, _, err := service.createSessionTunnel(context.Background(), &session, security.Principal{Subject: "owner", Tenant: "tenant"}, devtunnel.Credential{Scheme: "Bearer", Token: oauth}, 1)
+	_, _, err := service.issueSession(context.Background(), &session, security.Principal{Subject: "owner", Tenant: "tenant"}, devtunnel.Credential{Scheme: "Bearer", Token: oauth}, 1)
 	if err == nil || strings.Contains(err.Error(), oauth) || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("create/cleanup error = %v", err)
 	}

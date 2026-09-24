@@ -3,10 +3,12 @@
 // Dev Tunnels manager supplies vendor operations and TunnelCredentials supplies the owner's linked account; no
 // transport subsystem owns or persists session lifecycle state. A defined session that never ran has seq 0 and no
 // capability.
+// The capability holds the Jupyter and link tokens and, only when the owner linked Dev Tunnels, the connect token.
 package session
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -39,15 +41,14 @@ type sessionPorts struct {
 }
 
 type sessionCapability struct {
-	ConnectToken string `json:"connectToken"`
+	ConnectToken string `json:"connectToken,omitempty"`
 	JupyterToken string `json:"jupyterToken"`
+	LinkToken    string `json:"linkToken"`
 }
 
 type tunnelEndpoint struct {
 	URI          string
 	ConnectToken string
-	JupyterToken string
-	ExpiresAt    time.Time
 }
 
 func ports(sessionID string, seq int) sessionPorts {
@@ -64,8 +65,18 @@ func capabilityPath(dir, sessionID string, seq int) (string, error) {
 }
 
 func validCapability(capability sessionCapability) bool {
-	decoded, ok := security.DecodeBase64URL(capability.JupyterToken)
-	return security.ValidCredential(capability.ConnectToken) && ok && len(decoded) == 32
+	return (capability.ConnectToken == "" || security.ValidCredential(capability.ConnectToken)) && validSecret(capability.JupyterToken) && validSecret(capability.LinkToken)
+}
+
+func validSecret(value string) bool {
+	decoded, ok := security.DecodeBase64URL(value)
+	return ok && len(decoded) == 32
+}
+
+func newSecret() string {
+	secret := make([]byte, 32)
+	_, _ = rand.Read(secret)
+	return base64.RawURLEncoding.EncodeToString(secret)
 }
 
 func putCapability(dir, sessionID string, seq int, capability sessionCapability) error {
@@ -127,8 +138,8 @@ func sessionTunnelDuration(wallMinutes int) uint32 {
 
 func (s Service) sessionEndpoint(ctx context.Context, session Session, number uint16) (tunnelEndpoint, error) {
 	capability, err := getCapability(s.CapabilityDir, session.ID, session.Seq)
-	if err != nil {
-		return tunnelEndpoint{}, errors.New("this session seq has no stored capability")
+	if err != nil || capability.ConnectToken == "" {
+		return tunnelEndpoint{}, errors.New("this session seq has no delegated Dev Tunnel")
 	}
 	record, err := s.TunnelManager.Get(ctx, devtunnel.GetRequest{
 		AccessToken: capability.ConnectToken, TunnelID: session.Tunnel.ID, ClusterID: session.Tunnel.ClusterID,
@@ -146,66 +157,69 @@ func (s Service) sessionEndpoint(ctx context.Context, session Session, number ui
 	if err != nil {
 		return tunnelEndpoint{}, errors.New("Dev Tunnel session port is invalid")
 	}
-	return tunnelEndpoint{URI: uri, ConnectToken: capability.ConnectToken, JupyterToken: capability.JupyterToken, ExpiresAt: record.ExpiresAt.UTC()}, nil
+	return tunnelEndpoint{URI: uri, ConnectToken: capability.ConnectToken}, nil
 }
 
-func (s Service) sessionAccess(ctx context.Context, session Session) (*sessionAccessResponse, error) {
-	unavailable := func(reason string) (*sessionAccessResponse, error) {
-		return nil, security.New("session_access_unavailable", "Session access is unavailable: "+reason, http.StatusConflict)
+func (s Service) reachable(session Session) (sessionCapability, error) {
+	capability, err := getCapability(s.CapabilityDir, session.ID, session.Seq)
+	var reason string
+	switch {
+	case session.State != "READY":
+		reason = "the session is " + strings.ToLower(session.State)
+	case s.link(session) == nil && session.Tunnel.ID == "":
+		reason = errNoRoute.Error()
+	case err != nil:
+		reason = "this session seq has no stored capability"
+	default:
+		return capability, nil
 	}
-	if session.State != "READY" {
-		return unavailable("the session is " + strings.ToLower(session.State))
-	}
-	endpoint, err := s.sessionEndpoint(ctx, session, ports(session.ID, session.Seq).Jupyter)
-	if err != nil {
-		return unavailable(err.Error())
-	}
-	return &sessionAccessResponse{
-		SessionID: session.ID, Seq: session.Seq, ExpiresAt: endpoint.ExpiresAt,
-		Jupyter: sessionJupyterAccess{URI: endpoint.URI, Token: endpoint.JupyterToken},
-	}, nil
+	return sessionCapability{}, security.New("session_access_unavailable", "Session access is unavailable: "+reason, http.StatusConflict)
 }
 
-func (s Service) Access(ctx context.Context, principal security.Principal, id string) (*sessionAccessResponse, error) {
+func (s Service) Access(principal security.Principal, id string) (*sessionAccessResponse, error) {
 	session, err := s.Get(principal, id)
 	if err != nil {
 		return nil, err
 	}
-	return s.sessionAccess(ctx, *session)
+	capability, err := s.reachable(*session)
+	if err != nil {
+		return nil, err
+	}
+	return &sessionAccessResponse{
+		SessionID: session.ID, Seq: session.Seq, ExpiresAt: cmp.Or(session.StartedAt, s.utcNow()).Add(time.Duration(session.Resources.WallMinutes) * time.Minute),
+		Jupyter: sessionJupyterAccess{URI: s.PublicURL + "/api/v1/sessions/" + session.ID + "/jupyter/", Token: capability.JupyterToken},
+	}, nil
 }
 
-func (s Service) createSessionTunnel(ctx context.Context, session *Session, principal security.Principal, credential devtunnel.Credential, seq int) (devtunnel.Record, string, error) {
+func (s Service) issueSession(ctx context.Context, session *Session, principal security.Principal, credential devtunnel.Credential, seq int) (string, sessionCapability, error) {
 	tunnelID := session.ID + "-" + strconv.Itoa(seq)
 	if !idPattern.MatchString(session.ID) || seq < 1 || !devtunnel.ValidID(tunnelID) {
-		return devtunnel.Record{}, "", errors.New("session tunnel identity is invalid")
+		return "", sessionCapability{}, errors.New("session tunnel identity is invalid")
 	}
-	requestedAt := s.utcNow()
-	portNumbers := ports(session.ID, seq)
-	record, err := s.TunnelManager.Create(ctx, devtunnel.CreateRequest{
-		Scheme: credential.Scheme, OAuthToken: credential.Token, TunnelID: tunnelID,
-		DurationSeconds: sessionTunnelDuration(session.Resources.WallMinutes),
-		Ports: []devtunnel.PortSpec{
-			{PortNumber: portNumbers.Control, Description: "cybershuttle-control"},
-			{PortNumber: portNumbers.Jupyter, Description: "cybershuttle-jupyter", Anonymous: true},
-		},
-	})
-	if err != nil {
-		return devtunnel.Record{}, "", errors.Join(security.Redact("create session Dev Tunnel", err, credential.Token), s.releaseTunnel(credential, session.ID, seq, tunnelMetadata{ID: tunnelID}))
+	capability := sessionCapability{JupyterToken: newSecret(), LinkToken: newSecret()}
+	var tunnel tunnelMetadata
+	hostToken := ""
+	if credential.Token != "" {
+		requestedAt := s.utcNow()
+		record, err := s.TunnelManager.Create(ctx, devtunnel.CreateRequest{
+			Scheme: credential.Scheme, OAuthToken: credential.Token, TunnelID: tunnelID,
+			DurationSeconds: sessionTunnelDuration(session.Resources.WallMinutes),
+			Ports:           []devtunnel.PortSpec{{PortNumber: ports(session.ID, seq).Control, Description: "cybershuttle-control"}},
+		})
+		if err != nil {
+			return "", sessionCapability{}, errors.Join(security.Redact("create session Dev Tunnel", err, credential.Token), s.releaseTunnel(credential, session.ID, seq, tunnelMetadata{ID: tunnelID}))
+		}
+		tunnel = tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID, ExpiresAt: record.ExpiresAt.UTC()}
+		if record.ID != tunnelID || !devtunnel.ValidClusterID(record.ClusterID) || !security.ValidCredential(record.HostToken) || !security.ValidCredential(record.ConnectToken) || !record.ExpiresAt.After(requestedAt) {
+			return "", sessionCapability{}, errors.Join(errors.New("created Dev Tunnel metadata is invalid"), s.releaseTunnel(credential, session.ID, seq, tunnel))
+		}
+		capability.ConnectToken, hostToken = record.ConnectToken, record.HostToken
 	}
-	tunnel := tunnelMetadata{ID: record.ID, ClusterID: record.ClusterID, ExpiresAt: record.ExpiresAt.UTC()}
-	if record.ID != tunnelID || !devtunnel.ValidClusterID(record.ClusterID) || !security.ValidCredential(record.HostToken) || !security.ValidCredential(record.ConnectToken) || !record.ExpiresAt.After(requestedAt) {
-		return devtunnel.Record{}, "", errors.Join(errors.New("created Dev Tunnel metadata is invalid"), s.releaseTunnel(credential, session.ID, seq, tunnel))
+	if err := putCapability(s.CapabilityDir, session.ID, seq, capability); err != nil {
+		return "", sessionCapability{}, errors.Join(err, s.releaseTunnel(credential, session.ID, seq, tunnel))
 	}
-	tokenBytes := make([]byte, 32)
-	_, _ = rand.Read(tokenBytes)
-	jupyterToken := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	if err := putCapability(s.CapabilityDir, session.ID, seq, sessionCapability{ConnectToken: record.ConnectToken, JupyterToken: jupyterToken}); err != nil {
-		return devtunnel.Record{}, "", errors.Join(err, s.releaseTunnel(credential, session.ID, seq, tunnel))
-	}
-	candidate := *session
-	candidate.Seq, candidate.JobName, candidate.Owner, candidate.Tunnel = seq, jobName(session.ID, seq), principal, tunnel
-	*session = candidate
-	return record, jupyterToken, nil
+	session.Seq, session.JobName, session.Owner, session.Tunnel = seq, jobName(session.ID, seq), principal, tunnel
+	return hostToken, capability, nil
 }
 
 func (s Service) releaseTunnel(credential devtunnel.Credential, sessionID string, seq int, tunnel tunnelMetadata) error {

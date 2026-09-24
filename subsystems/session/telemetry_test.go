@@ -1,16 +1,13 @@
 // Session telemetry tests cover bounded redaction, remote collection, metrics, and durable runs.
 // Remote log reads stay sequence-scoped and below the SSH output ceiling.
-// Metric authorization cannot cross origins, and sample windows remain bounded.
+// Sample windows remain bounded.
 // Terminal runs retain owned history while delayed Slurm accounting remains independently bounded.
 package session
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -205,12 +202,6 @@ func TestSessionLogTailScriptWorstCaseStaysUnderTheRemoteOutputCap(t *testing.T)
 	}
 }
 
-func sampleFrom(t *testing.T, uri string) (metricSample, error) {
-	t.Helper()
-	service := newTestService(t, ssh.Runner{Timeout: 2 * time.Second}, Store{})
-	return service.sampleEndpoint(context.Background(), tunnelEndpoint{URI: uri, ConnectToken: "connect-token"})
-}
-
 func TestSampleWindowIsBoundedAndNewestLast(t *testing.T) {
 	metrics := newSessionMetrics()
 	for index := 0; index < maxSessionMetricSamples+5; index++ {
@@ -225,45 +216,6 @@ func TestSampleWindowIsBoundedAndNewestLast(t *testing.T) {
 	metrics.forget("s-111111111111")
 	if got := metrics.samples("s-111111111111"); len(got) != 0 {
 		t.Fatalf("a forgotten session kept %d samples", len(got))
-	}
-}
-
-func TestSampleCarriesTheTunnelAuthorizationAndIsStampedHere(t *testing.T) {
-	var authorization string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authorization = r.Header.Get(tunnelAuthorizationHeader)
-		used, cpu := int64(2048), int64(500)
-		_ = json.NewEncoder(w).Encode(metricSample{MemBytes: &used, CPUUsageUsec: &cpu,
-			GPUs: []gpuSample{{Index: 0, UtilPct: 40, MemUsedMiB: 1024, MemTotalMiB: 40960}}})
-	}))
-	defer server.Close()
-	sample, err := sampleFrom(t, server.URL)
-	testutil.Check(t, err)
-	if authorization != "tunnel connect-token" {
-		t.Fatalf("Linkspan was asked without the tunnel sessionCapability: %q", authorization)
-	}
-	if sample.At.IsZero() {
-		t.Fatal("the sample was not stamped when it was observed")
-	}
-}
-
-func TestSampleNeverCarriesTheTunnelAuthorizationAcrossARedirect(t *testing.T) {
-	var otherSawAuthorization bool
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		otherSawAuthorization = r.Header.Get(tunnelAuthorizationHeader) != ""
-		w.WriteHeader(http.StatusForbidden)
-	}))
-	defer other.Close()
-	tunnel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, other.URL+"/steal", http.StatusFound)
-	}))
-	defer tunnel.Close()
-
-	if _, err := sampleFrom(t, tunnel.URL); err == nil {
-		t.Fatal("a cross-origin redirect was read as a sample")
-	}
-	if otherSawAuthorization {
-		t.Fatal("the tunnel authorization header followed a cross-origin redirect")
 	}
 }
 
