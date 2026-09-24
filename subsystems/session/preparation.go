@@ -37,6 +37,9 @@ func (s Service) Validate(ctx context.Context, principal security.Principal, req
 	if err != nil {
 		return nil, err
 	}
+	if _, err := s.tunnelCredential(ctx, principal, request.TunnelModes); err != nil {
+		return nil, err
+	}
 	prepared, err := s.prepareSession(ctx, request)
 	if err != nil {
 		return nil, err
@@ -165,7 +168,15 @@ func validWorkspaceExpression(value string) bool {
 	return safeWorkspaceSuffix(value)
 }
 
-func validateCreate(request *createRequest) error {
+func canonicalTunnelModes(modes []string) ([]string, error) {
+	modes = slices.Sorted(slices.Values(modes))
+	if len(modes) == 0 || len(slices.Compact(slices.Clone(modes))) != len(modes) || slices.ContainsFunc(modes, func(mode string) bool { return linkspanModeArgs[mode] == "" }) {
+		return nil, security.New("invalid_tunnel_modes", "tunnelModes must be distinct values from websocket and devtunnel", http.StatusBadRequest)
+	}
+	return modes, nil
+}
+
+func validateCreate(request *createRequest) (err error) {
 	if request.ID == "" && request.IdempotencyKey == "" {
 		return security.New("invalid_idempotency_key", "idempotencyKey is required", http.StatusBadRequest)
 	}
@@ -193,7 +204,11 @@ func validateCreate(request *createRequest) error {
 	if request.IdempotencyKey != "" && (len(request.IdempotencyKey) > 128 || strings.ContainsAny(request.IdempotencyKey, "\x00\r\n")) {
 		return security.New("invalid_idempotency_key", "invalid idempotency key", http.StatusBadRequest)
 	}
-	return nil
+	if request.TunnelModes == nil {
+		request.TunnelModes = []string{modeWebsocket}
+	}
+	request.TunnelModes, err = canonicalTunnelModes(request.TunnelModes)
+	return err
 }
 
 func validateWorkspacePrivateLayout(home, workspace, privateRoot, sessionID, expression string) error {
@@ -295,11 +310,11 @@ else
     rm -f "$staged"; printf '%s\n' 'error=linkspan-install'; exit 80; }
   printf '%s\n' 'linkspan=installed'
 fi
-# The session needs a Linkspan that reads the tasks form and dials --link-url,
-# which 0.20.0 does; an older one refuses its flags or document and takes the
-# session with it, so it is refused here instead.
+# A Linkspan below the floor refuses the session's flags or document and takes
+# the session with it, so it is refused here instead.
+floor=` + linkspanFloor + `
 version=$("$linkspan" --version 2>/dev/null | head -1 | tr -d 'v \r')
-[ "$(printf '%s\n%s\n' 0.20.0 "$version" | sort -V | head -1)" = 0.20.0 ] || {
+[ "$(printf '%s\n%s\n' "$floor" "$version" | sort -V | head -1)" = "$floor" ] || {
   printf '%s\n' 'error=linkspan-unsupported'; exit 81; }
 
 # What the session is for travels with it, staged and moved so a partial
@@ -319,7 +334,7 @@ var provisionFailures = map[string]string{
 	"architecture":         "the host reports an architecture Linkspan is not released for",
 	"linkspan-download":    "could not download the Linkspan release",
 	"linkspan-install":     "could not install the downloaded Linkspan binary",
-	"linkspan-unsupported": "the Linkspan on this host is older than 0.20.0, so it cannot link this session to cs-plane",
+	"linkspan-unsupported": "the Linkspan on this host is older than " + linkspanFloor + ", so it cannot link this session to cs-plane",
 	"workflow":             "could not write the workflow the session runs",
 }
 
@@ -369,7 +384,7 @@ func buildScript(session Session, linkspan string) string {
 	lines = append(lines,
 		"set -eu", "umask 077", `LOG_DIR="$HOME/.cybershuttle/logs"`, `install -d -m 700 "$LOG_DIR"`, `exec >"$LOG_DIR/`+logBase+`.out" 2>"$LOG_DIR/`+logBase+`.err"`, "unset XDG_RUNTIME_DIR TMPDIR",
 		"LINKSPAN_BIN="+ssh.ShellQuote(linkspan),
-		`exec "$LINKSPAN_BIN" --port "$CS_CONTROL_PORT" --link-url "$CS_LINK_URL" ${CS_TUNNEL_ID:+--tunnel-enable --tunnel-id "$CS_TUNNEL_ID" --tunnel-cluster "$CS_TUNNEL_CLUSTER" --tunnel-host-token "$CS_TUNNEL_HOST_TOKEN"} --workflow `+ssh.ShellQuote(sessionWorkflowPath(session)),
+		`exec "$LINKSPAN_BIN" --port "$CS_CONTROL_PORT" `+linkspanTunnelArgs(session.TunnelModes)+` --workflow `+ssh.ShellQuote(sessionWorkflowPath(session)),
 		"")
 	return strings.Join(lines, "\n")
 }
@@ -415,15 +430,8 @@ func (s Service) linkURL(id string) string {
 }
 
 func (s Service) submitSessionScript(ctx context.Context, host string, session Session, script string, capability sessionCapability, hostToken string) (string, error) {
-	environment := map[string]string{
-		"JUPYTER_TOKEN":       capability.JupyterToken,
-		"LINKSPAN_LINK_TOKEN": capability.LinkToken,
-		"CS_LINK_URL":         s.linkURL(session.ID),
-		"CS_CONTROL_PORT":     strconv.Itoa(int(ports(session.ID, session.Seq).Control)),
-	}
-	if session.Tunnel.ID != "" {
-		environment["CS_TUNNEL_ID"], environment["CS_TUNNEL_CLUSTER"], environment["CS_TUNNEL_HOST_TOKEN"] = session.Tunnel.ID, session.Tunnel.ClusterID, hostToken
-	}
+	environment := linkspanEnvironment(session.TunnelModes, s.linkURL(session.ID), capability.LinkToken, session.Tunnel, hostToken)
+	environment["JUPYTER_TOKEN"], environment["CS_CONTROL_PORT"] = capability.JupyterToken, strconv.Itoa(int(ports(session.ID, session.Seq).Control))
 	return slurm.Submit(ctx, s.runner, host, slurm.SubmitRequest{JobName: session.JobName, Script: script, Environment: environment})
 }
 
@@ -495,7 +503,7 @@ func (s Service) prepareSession(ctx context.Context, request createRequest) (_ *
 		return nil, err
 	}
 	session := Session{
-		sessionResponse: sessionResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources},
+		sessionResponse: sessionResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources, TunnelModes: request.TunnelModes},
 		PrivateRoot:     privateRoot, WorkspaceRoot: workspaceRoot,
 	}
 	s.sessionStatus(request.ID, "Session preparation complete")

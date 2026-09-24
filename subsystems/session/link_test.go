@@ -236,7 +236,7 @@ func TestALinkForTheCurrentSeqMakesTheRunReady(t *testing.T) {
 	service := testService(t)
 	defined, _, err := service.Define(testPrincipal, newTestCreateRequest())
 	testutil.Check(t, err)
-	attached, err := service.Attach(context.Background(), testPrincipal, defined.ID)
+	attached, err := service.Attach(context.Background(), testPrincipal, defined.ID, nil)
 	testutil.Check(t, err)
 	session := Session{sessionResponse: attached.Session}
 	fakeLinkspan(t, planeServer(t, &service), service, session, nil)
@@ -252,6 +252,37 @@ func TestALinkForTheCurrentSeqMakesTheRunReady(t *testing.T) {
 	service.applyObservation(current, slurm.Observation{State: slurm.Pending}, "")
 	if current.State != "READY" {
 		t.Fatalf("a scheduler observation demoted a linked run to %s", current.State)
+	}
+}
+
+func TestADevtunnelOnlyAttachIsReadyAndReachableThroughItsTunnel(t *testing.T) {
+	service := testService(t)
+	defined, _, err := service.Define(testPrincipal, newTestCreateRequest())
+	testutil.Check(t, err)
+	attached, err := service.Attach(context.Background(), testPrincipal, defined.ID, []string{modeDevtunnel})
+	testutil.Check(t, err)
+	if attached.Link != nil || attached.Devtunnel == nil || *attached.Devtunnel != (devtunnelAccess{ID: defined.ID + "-1", Cluster: "use", HostToken: testHostToken}) {
+		t.Fatalf("devtunnel attach = %#v %#v", attached.Link, attached.Devtunnel)
+	}
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/health" {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer health.Close()
+	control := sessionHost(Session{sessionResponse: attached.Session}, ports(defined.ID, 1).Control)
+	service.transport = newSessionTransport(func(ctx context.Context, _, address string) (net.Conn, error) {
+		if current, err := service.loadSession(defined.ID); err != nil || address != control || service.link(*current) != nil || current.Tunnel.ID == "" {
+			return nil, errNoRoute
+		}
+		return (&net.Dialer{}).DialContext(ctx, "tcp", health.Listener.Addr().String())
+	})
+	listed, err := reconciledList(context.Background(), service)
+	if err != nil || listed[0].State != "READY" || listed[0].StartedAt.IsZero() {
+		t.Fatalf("a devtunnel-only run answering through its tunnel = %#v %v", listed, err)
+	}
+	if _, err := service.Access(testPrincipal, defined.ID); err != nil {
+		t.Fatalf("access to a devtunnel-only READY run = %v", err)
 	}
 }
 

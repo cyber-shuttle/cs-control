@@ -9,9 +9,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,52 +86,77 @@ func runProvisionScript(t *testing.T, arguments ...string) (string, error) {
 	return string(output), err
 }
 
-func TestSessionScriptExecsLinkspanWithTheSessionIdentity(t *testing.T) {
-	dir := t.TempDir()
-	linkspan := filepath.Join(dir, "linkspan")
-	argsLog := filepath.Join(dir, "args")
-	testutil.WriteScript(t, linkspan, `#!/bin/sh
+func TestSessionScriptExecsLinkspanWithExactlyTheSelectedModes(t *testing.T) {
+	const jupyterToken, hostToken, linkToken = "jupyter-secret", "host-secret", "link-secret"
+	const tunnelID, tunnelCluster, linkURL = "s-012345abcdef-g-0123456789abcdef", "usw3", "wss://plane.example.edu/api/v1/sessions/s-012345abcdef/link"
+	websocketArgs := "--tunnel-websocket-args\n--url " + linkURL + "\n"
+	devtunnelArgs := "--tunnel-devtunnel-args\n--id " + tunnelID + " --cluster " + tunnelCluster + "\n"
+	for _, test := range []struct {
+		modes               []string
+		args, env, exported string
+	}{
+		{[]string{modeWebsocket}, "--tunnel-mode\nwebsocket\n" + websocketArgs, jupyterToken + "\n" + linkToken + "\n\n", "CS_LINK_URL LINKSPAN_LINK_TOKEN"},
+		{[]string{modeDevtunnel}, "--tunnel-mode\ndevtunnel\n" + devtunnelArgs, jupyterToken + "\n\n" + hostToken + "\n", "CS_TUNNEL_CLUSTER CS_TUNNEL_ID LINKSPAN_TUNNEL_HOST_TOKEN"},
+		{[]string{modeDevtunnel, modeWebsocket}, "--tunnel-mode\ndevtunnel,websocket\n" + devtunnelArgs + websocketArgs, jupyterToken + "\n" + linkToken + "\n" + hostToken + "\n", "CS_LINK_URL CS_TUNNEL_CLUSTER CS_TUNNEL_ID LINKSPAN_LINK_TOKEN LINKSPAN_TUNNEL_HOST_TOKEN"},
+	} {
+		dir := t.TempDir()
+		linkspan := filepath.Join(dir, "linkspan")
+		argsLog := filepath.Join(dir, "args")
+		testutil.WriteScript(t, linkspan, `#!/bin/sh
 printf '%s\n' "$@" > "$ARGS_LOG"
-printf '%s\n' "$JUPYTER_TOKEN" "$LINKSPAN_LINK_TOKEN" > "$ENV_LOG"
+printf '%s\n' "$JUPYTER_TOKEN" "$LINKSPAN_LINK_TOKEN" "$LINKSPAN_TUNNEL_HOST_TOKEN" > "$ENV_LOG"
 exit 7
 `)
-	session := Session{
-		sessionResponse: sessionResponse{ID: "s-012345abcdef", Seq: 1, Partition: "cpu", Resources: resources{Cores: 1, MemoryMB: 128, WallMinutes: 1}},
-		JobName:         jobName("s-012345abcdef", 1), PrivateRoot: dir + "/private", WorkspaceRoot: dir,
-	}
-	script := buildScript(session, linkspan)
-	const jupyterToken, hostToken, linkToken = "jupyter-secret", "host-secret", "link-secret"
-	for _, secret := range []string{jupyterToken, hostToken, linkToken} {
-		if strings.Contains(script, secret) {
-			t.Fatalf("session script contains a secret literal:\n%s", script)
+		session := Session{
+			sessionResponse: sessionResponse{ID: "s-012345abcdef", Seq: 1, Partition: "cpu", Resources: resources{Cores: 1, MemoryMB: 128, WallMinutes: 1}, TunnelModes: test.modes},
+			JobName:         jobName("s-012345abcdef", 1), PrivateRoot: dir + "/private", WorkspaceRoot: dir,
+		}
+		script := buildScript(session, linkspan)
+		for _, secret := range []string{jupyterToken, hostToken, linkToken} {
+			if strings.Contains(script, secret) {
+				t.Fatalf("session script contains a secret literal:\n%s", script)
+			}
+		}
+		environment := linkspanEnvironment(test.modes, linkURL, linkToken, tunnelMetadata{ID: tunnelID, ClusterID: tunnelCluster}, hostToken)
+		if got := strings.Join(slices.Sorted(maps.Keys(environment)), " "); got != test.exported {
+			t.Fatalf("%v exports %q", test.modes, got)
+		}
+		environment["JUPYTER_TOKEN"], environment["CS_CONTROL_PORT"] = jupyterToken, strconv.Itoa(int(ports(session.ID, session.Seq).Control))
+		command := exec.Command("bash")
+		command.Stdin, command.Env = strings.NewReader(script), append(os.Environ(), "HOME="+dir, "ARGS_LOG="+argsLog, "ENV_LOG="+filepath.Join(dir, "env"))
+		for name, value := range environment {
+			command.Env = append(command.Env, name+"="+value)
+		}
+		err := command.Run()
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 7 {
+			t.Fatalf("script did not exec Linkspan or preserve status 7: %v", err)
+		}
+		args := string(mustRead(t, argsLog))
+		if want := "--port\n" + environment["CS_CONTROL_PORT"] + "\n--tunnel-enable\n" + test.args + "--workflow\n" + sessionWorkflowPath(session) + "\n"; args != want {
+			t.Fatalf("%v argv = %q, want %q", test.modes, args, want)
+		}
+		if got := string(mustRead(t, filepath.Join(dir, "env"))); got != test.env {
+			t.Fatalf("%v Linkspan inherited %q", test.modes, got)
 		}
 	}
-	command := exec.Command("bash")
-	command.Stdin = strings.NewReader(script)
-	const tunnelID, tunnelCluster, linkURL = "s-012345abcdef-g-0123456789abcdef", "usw3", "wss://plane.example.edu/api/v1/sessions/s-012345abcdef/link"
-	ports := ports(session.ID, session.Seq)
-	command.Env = append(os.Environ(), "HOME="+dir, "ARGS_LOG="+argsLog, "ENV_LOG="+filepath.Join(dir, "env"),
-		"JUPYTER_TOKEN="+jupyterToken, "CS_TUNNEL_HOST_TOKEN="+hostToken, "LINKSPAN_LINK_TOKEN="+linkToken, "CS_LINK_URL="+linkURL,
-		fmt.Sprintf("CS_CONTROL_PORT=%d", ports.Control),
-		"CS_TUNNEL_ID="+tunnelID, "CS_TUNNEL_CLUSTER="+tunnelCluster)
-	err := command.Run()
-	if exitErr, ok := errors.AsType[*exec.ExitError](err); !ok || exitErr.ExitCode() != 7 {
-		t.Fatalf("script did not exec Linkspan or preserve status 7: %v", err)
+}
+
+func TestTunnelModesAreValidatedAndCanonical(t *testing.T) {
+	request := newTestCreateRequest()
+	request.TunnelModes = nil
+	testutil.Check(t, validateCreate(&request))
+	if !slices.Equal(request.TunnelModes, []string{modeWebsocket}) {
+		t.Fatalf("omitted modes default to %v", request.TunnelModes)
 	}
-	for _, required := range []string{hostToken, tunnelID, tunnelCluster, "--link-url\n" + linkURL, strconv.Itoa(int(ports.Control)), sessionWorkflowPath(session)} {
-		if got := string(mustRead(t, argsLog)); !strings.Contains(got, required) {
-			t.Fatalf("Linkspan argv missing %q: %q", required, got)
+	request.TunnelModes = []string{modeWebsocket, modeDevtunnel}
+	if testutil.Check(t, validateCreate(&request)); !slices.Equal(request.TunnelModes, []string{modeDevtunnel, modeWebsocket}) {
+		t.Fatalf("modes stored as %v", request.TunnelModes)
+	}
+	for _, modes := range [][]string{{}, {"ssh"}, {modeWebsocket, modeWebsocket}, {"Websocket"}} {
+		request.TunnelModes = modes
+		if err := validateCreate(&request); security.For(err).Code != "invalid_tunnel_modes" {
+			t.Fatalf("modes %q answered %v", modes, err)
 		}
-	}
-	if got := string(mustRead(t, filepath.Join(dir, "env"))); got != jupyterToken+"\n"+linkToken+"\n" {
-		t.Fatalf("Linkspan did not inherit the Jupyter and link tokens: %q", got)
-	}
-	rerun := exec.Command("bash")
-	rerun.Stdin, rerun.Env = strings.NewReader(script), command.Env
-	rerun.Env = append(rerun.Env, "CS_TUNNEL_ID=")
-	_ = rerun.Run()
-	if got := string(mustRead(t, argsLog)); strings.Contains(got, "--tunnel") || !strings.Contains(got, "--link-url\n"+linkURL) {
-		t.Fatalf("Linkspan argv without a delegated tunnel: %q", got)
 	}
 }
 

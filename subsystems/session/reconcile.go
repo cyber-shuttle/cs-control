@@ -3,13 +3,15 @@
 // Silence is not evidence, so a session with no observation stays put until its propagation window expires.
 // Foreground and background refreshes share one serialized, rate-limited service runtime.
 // A run is READY once its link connects; a running job's log tail is the READY signal only without a link.
-// Client-launched sessions are never observed or accounted; a stop retires them locally.
+// Client-launched sessions are never observed or accounted; a stop retires them locally, and one with a Dev Tunnel
+// is READY once Linkspan answers its health route.
 package session
 
 import (
 	"cmp"
 	"context"
 	"log"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -183,10 +185,13 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Session) ([
 	results := slices.Clone(snapshots)
 	narration := make([][]string, len(results))
 	var indexes []int
+	var wg sync.WaitGroup
 	for i := range results {
 		switch {
 		case results[i].Launcher == launcherClient && results[i].State == "STOPPING":
 			results[i].State, results[i].Error = "STOPPED", ""
+		case results[i].Launcher == launcherClient && results[i].State == "QUEUED" && results[i].Tunnel.ID != "":
+			wg.Go(func() { narration[i] = s.probeTunnel(ctx, &results[i]) })
 		case results[i].Launcher != launcherClient && reconcilable(results[i].State):
 			indexes = append(indexes, i)
 		}
@@ -194,7 +199,6 @@ func (s Service) reconcileSnapshots(ctx context.Context, snapshots []Session) ([
 	byScope := groupByScope(indexes, func(i int) schedulerScope {
 		return schedulerScope{owner: results[i].Owner, host: results[i].SSHHost}
 	})
-	var wg sync.WaitGroup
 	for scope, indexes := range byScope {
 		wg.Add(1)
 		go func() {
@@ -286,6 +290,14 @@ func (s Service) schedulerObservations(ctx context.Context, host string, session
 		}
 	}
 	return observations, cancelErrors, nil
+}
+
+func (s Service) probeTunnel(ctx context.Context, session *Session) []string {
+	if _, status, err := s.linkspan(ctx, *session, http.MethodGet, "/api/v1/health", nil, 1<<10); err != nil || status != http.StatusOK {
+		return nil
+	}
+	session.State, session.StartedAt = "READY", cmp.Or(session.StartedAt, s.utcNow())
+	return []string{stateNarration["READY"]}
 }
 
 func (s Service) narrateReconciled(current, snapshot *Session, lines []string) {

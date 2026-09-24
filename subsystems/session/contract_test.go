@@ -193,7 +193,7 @@ func TestSessionPublicJSONContractIsNarrow(t *testing.T) {
 	value := sessionResponse{
 		ID: "s-012345abcdef", Seq: 1,
 		State: "READY", Launcher: launcherPlane, SSHHost: "delta", Account: "project-a", Partition: "cpu",
-		RootFolder: "$HOME/project", Resources: resources{Cores: 2, MemoryMB: 4096, WallMinutes: 60},
+		RootFolder: "$HOME/project", Resources: resources{Cores: 2, MemoryMB: 4096, WallMinutes: 60}, TunnelModes: []string{modeWebsocket},
 		CreatedAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), StartedAt: time.Date(2030, 1, 1, 0, 0, 30, 0, time.UTC), UpdatedAt: time.Date(2030, 1, 1, 0, 1, 0, 0, time.UTC),
 	}
 	encoded, err := json.MarshalIndent(value, "", "  ")
@@ -204,7 +204,7 @@ func TestSessionPublicJSONContractIsNarrow(t *testing.T) {
 	if !bytes.Equal(encoded, fixture) {
 		t.Fatalf("contract fixture differs from actual JSON\nactual:\n%s\nfixture:\n%s", encoded, fixture)
 	}
-	for _, forbidden := range []string{"owner", "tunnel", "token", "privateRoot", "workspaceRoot", "jupyter", "jobId", "jobName", "node"} {
+	for _, forbidden := range []string{"owner", `"tunnel"`, "token", "privateRoot", "workspaceRoot", "jupyter", "jobId", "jobName", "node"} {
 		if strings.Contains(strings.ToLower(string(fixture)), strings.ToLower(forbidden)) {
 			t.Fatalf("public session fixture contains private field %q: %s", forbidden, fixture)
 		}

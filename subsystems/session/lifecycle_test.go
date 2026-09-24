@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -214,7 +215,7 @@ func testService(t *testing.T) Service {
 }
 
 func newTestCreateRequest() createRequest {
-	return createRequest{ID: "s-012345abcdef", IdempotencyKey: "request-one", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}}
+	return createRequest{ID: "s-012345abcdef", IdempotencyKey: "request-one", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}, TunnelModes: []string{modeDevtunnel, modeWebsocket}}
 }
 
 func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
@@ -282,15 +283,16 @@ func TestConcurrentStartsLaunchOneRun(t *testing.T) {
 	}
 }
 
-func TestStartWithoutADevTunnelsLinkRunsOverTheLinkAlone(t *testing.T) {
+func TestOnlyTheDevtunnelModeMakesATunnelAndItNeedsALinkedAccount(t *testing.T) {
 	sshBin, _, commandLog := fakeSSH(t)
 	service := fakeSSHService(t, sshBin)
 	manager := configureTestTunnel(t, &service)
-	service.TunnelCredentials = &testLinkBroker{}
-	session, err := defineAndStart(context.Background(), service, newTestCreateRequest())
+	request := newTestCreateRequest()
+	request.TunnelModes = []string{modeWebsocket}
+	session, err := defineAndStart(context.Background(), service, request)
 	testutil.Check(t, err)
 	if session.State != "QUEUED" || session.Tunnel.ID != "" || len(manager.creates) != 0 {
-		t.Fatalf("a session with no delegated account made a tunnel: %#v, %d creates", session, len(manager.creates))
+		t.Fatalf("a websocket session made a tunnel: %#v, %d creates", session, len(manager.creates))
 	}
 	commands := string(mustRead(t, commandLog))
 	for _, want := range []string{"CS_LINK_URL=wss://plane.example.edu/api/v1/sessions/" + session.ID + "/link", "LINKSPAN_LINK_TOKEN="} {
@@ -300,6 +302,20 @@ func TestStartWithoutADevTunnelsLinkRunsOverTheLinkAlone(t *testing.T) {
 	}
 	if strings.Contains(commands, "CS_TUNNEL_ID=") {
 		t.Fatalf("submission named a tunnel it does not have:\n%s", commands)
+	}
+
+	service.TunnelCredentials = &testLinkBroker{}
+	handler := serviceHandler(t, &service)
+	request.IdempotencyKey, request.TunnelModes = "request-two", []string{modeDevtunnel}
+	body, err := json.Marshal(request)
+	testutil.Check(t, err)
+	defined := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/sessions", body))
+	var created sessionResponse
+	_ = json.Unmarshal(defined.Body.Bytes(), &created)
+	for path, body := range map[string][]byte{"/api/v1/sessions/validate": body, "/api/v1/sessions/" + created.ID + "/start": nil} {
+		if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, path, body)); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"tunnel_link_required"`) {
+			t.Fatalf("%s without a linked account = %d %s", path, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -814,10 +830,10 @@ func TestAttachAdmitsAClientLaunchedRunThatNeverReachesTheScheduler(t *testing.T
 	manager := configureTestTunnel(t, &service)
 	session, _, err := service.Define(testPrincipal, newTestCreateRequest())
 	testutil.Check(t, err)
-	response := testutil.Serve(serviceHandler(t, &service), requestAs(testPrincipal, http.MethodPost, "/api/v1/sessions/"+session.ID+"/attach", nil))
+	response := testutil.Serve(serviceHandler(t, &service), requestAs(testPrincipal, http.MethodPost, "/api/v1/sessions/"+session.ID+"/attach", []byte(`{"tunnelModes":["websocket"]}`)))
 	var attached attachResponse
 	_ = json.Unmarshal(response.Body.Bytes(), &attached)
-	if response.Code != http.StatusOK || attached.Session.State != "QUEUED" || attached.Session.Launcher != launcherClient || attached.Session.Seq != 1 {
+	if response.Code != http.StatusOK || attached.Session.State != "QUEUED" || attached.Session.Launcher != launcherClient || attached.Session.Seq != 1 || attached.Link == nil || attached.Devtunnel != nil || !slices.Equal(attached.Session.TunnelModes, []string{modeWebsocket}) {
 		t.Fatalf("attach = %d %#v", response.Code, attached.Session)
 	}
 	capability, err := getCapability(service.CapabilityDir, session.ID, 1)
@@ -827,7 +843,7 @@ func TestAttachAdmitsAClientLaunchedRunThatNeverReachesTheScheduler(t *testing.T
 	if len(manager.creates) != 0 || capability.ConnectToken != "" {
 		t.Fatalf("attach made a Dev Tunnel: %d creates", len(manager.creates))
 	}
-	if _, err := service.Attach(context.Background(), testPrincipal, session.ID); !errors.Is(err, errSessionRunning) {
+	if _, err := service.Attach(context.Background(), testPrincipal, session.ID, nil); !errors.Is(err, errSessionRunning) {
 		t.Fatalf("attach on a running session = %v", err)
 	}
 	service.now = func() time.Time { return time.Now().Add(time.Hour) }
@@ -840,7 +856,7 @@ func TestAttachAdmitsAClientLaunchedRunThatNeverReachesTheScheduler(t *testing.T
 		t.Fatalf("stop = %#v %v", stopped, err)
 	}
 	runs, err := service.Runs(testPrincipal)
-	if err != nil || len(runs) != 1 || runs[0].Seq != 1 || runs[0].FinalState != "STOPPED" {
+	if err != nil || len(runs) != 1 || runs[0].Seq != 1 || runs[0].FinalState != "STOPPED" || !slices.Equal(runs[0].TunnelModes, []string{modeWebsocket}) {
 		t.Fatalf("stop did not freeze the run: %#v %v", runs, err)
 	}
 	if _, err := os.Stat(commandLog); !errors.Is(err, os.ErrNotExist) {

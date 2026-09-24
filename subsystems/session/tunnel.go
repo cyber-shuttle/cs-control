@@ -3,7 +3,7 @@
 // Dev Tunnels manager supplies vendor operations and TunnelCredentials supplies the owner's linked account; no
 // transport subsystem owns or persists session lifecycle state. A defined session that never ran has seq 0 and no
 // capability.
-// The capability holds the Jupyter and link tokens and, only when the owner linked Dev Tunnels, the connect token.
+// The capability holds the Jupyter and link tokens and, only in the devtunnel mode, the connect token.
 package session
 
 import (
