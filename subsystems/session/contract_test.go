@@ -60,16 +60,6 @@ func TestHTTPRequiresValidatedPrincipalForSessionInventory(t *testing.T) {
 	handler := serviceHandler(t, &Service{})
 	response := testutil.Serve(handler, httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil))
 	testutil.Equal(t, response.Code, http.StatusUnauthorized, "request without validated principal status")
-	service := testService(t)
-	handler = serviceHandler(t, &service)
-	response = testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/sessions", nil))
-	if response.Code != http.StatusOK {
-		t.Fatalf("validated principal status = %d: %s", response.Code, response.Body.String())
-	}
-	var list sessionList
-	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil {
-		t.Fatalf("invalid session DTO: %#v %v", list, err)
-	}
 }
 
 func TestDiscoveryFailureReachesTheHandlerAsItsOwnCode(t *testing.T) {

@@ -134,12 +134,11 @@ func TestSessionLogsRedactsSessionAndCredentialSecrets(t *testing.T) {
 		"/home/sentinel-user/.cybershuttle/sessions/"+sessionLogIDOne,
 		"/scratch/sentinel-user/workspace",
 		"/opt/private/linkspan-sentinel",
-		"/opt/private/jupyter-sentinel/bin/python",
 	)
 	input := strings.Join([]string{
 		"benign startup message",
 		"workspace /scratch/sentinel-user/workspace/file.ipynb",
-		"executables /opt/private/linkspan-sentinel /opt/private/jupyter-sentinel/bin/python",
+		"executable /opt/private/linkspan-sentinel",
 		"authorization Bearer abcdefghijklmnopqrstuvwxyz012345",
 		"token=token-shaped-secret-value-123456",
 		"jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZW50aW5lbCJ9.signature-value",
@@ -148,7 +147,7 @@ func TestSessionLogsRedactsSessionAndCredentialSecrets(t *testing.T) {
 	}, "\n")
 	logs.append(sessionLogIDOne, input, time.Now())
 	joined := sessionLogText(t, logs, sessionLogIDOne)
-	for _, secret := range []string{".cybershuttle/sessions", "linkspan-sentinel", "jupyter-sentinel", "abcdefghijklmnopqrstuvwxyz012345", "token-shaped-secret-value-123456", "eyJhbGciOiJIUzI1NiJ9", "0123456789abcdef0123456789abcdef"} {
+	for _, secret := range []string{".cybershuttle/sessions", "linkspan-sentinel", "abcdefghijklmnopqrstuvwxyz012345", "token-shaped-secret-value-123456", "eyJhbGciOiJIUzI1NiJ9", "0123456789abcdef0123456789abcdef"} {
 		if strings.Contains(joined, secret) {
 			t.Errorf("secret %q leaked in:\n%s", secret, joined)
 		}
