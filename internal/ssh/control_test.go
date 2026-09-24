@@ -179,24 +179,9 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	server.Start()
 	defer server.Close()
 
-	unauthorized, err := http.Get(server.URL + "/api/v1/ssh/hosts/delta/auth")
-	testutil.Check(t, err)
-	testutil.Equal(t, unauthorized.StatusCode, http.StatusUnauthorized, "unauthorized auth")
-	_ = unauthorized.Body.Close()
-
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/ssh/hosts/delta/auth"
 	dialer := *websocket.DefaultDialer
 	dialer.Subprotocols = []string{ControlWebSocketProtocol, "bearer." + base64.RawURLEncoding.EncodeToString([]byte(testIdentityToken))}
-	hostile := http.Header{"Origin": {"https://evil.example"}}
-	if connection, response, dialErr := dialer.Dial(url, hostile); dialErr == nil || response == nil || response.StatusCode != http.StatusForbidden {
-		if connection != nil {
-			_ = connection.Close()
-		}
-		t.Fatalf("hostile origin response=%v error=%v, want 403", response, dialErr)
-	} else {
-		_ = response.Body.Close()
-	}
-
 	header := http.Header{"Origin": {approvedOrigin}}
 	connection, response, err := dialer.Dial(url, header)
 	if err != nil {

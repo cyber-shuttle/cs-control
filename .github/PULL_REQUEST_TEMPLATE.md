@@ -1,18 +1,16 @@
 ## What and why
 
-<!-- What changed, and the problem it solves. -->
+<!-- What changed and the problem it solves. -->
 
 Closes #
 
 ## Test plan
 
-<!-- The commands you ran and what they reported. `go build ./...`, `go vet ./...` and `go test -race ./...`
-are what CI checks; name anything else you ran, including a live host if you used one. -->
+<!-- Commands you ran and their result. CI runs go build, go vet, golangci-lint and go test -race. -->
 
 ## Contract changes
 
-<!-- Delete if none. A route, request or response field, error code, CLI flag or environment variable that
-changed is a change to a published contract: say which, and update docs/API.md or the README in this PR. -->
+<!-- Delete if none: routes, bodies, error codes, flags or environment variables that changed. -->
 
-- [ ] Docs updated for any route, flag or error-code change
+- [ ] docs/API.md or README updated for any contract change
 - [ ] New behaviour is covered by a test

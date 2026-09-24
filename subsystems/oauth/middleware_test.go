@@ -80,8 +80,6 @@ func TestOAuthBoundaryExactOriginsBearerAndNative(t *testing.T) {
 
 	native := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 	native.Header.Set("Authorization", "Bearer "+token)
-	native.AddCookie(&http.Cookie{Name: "cs_session", Value: "ignored"})
-	native.Header.Set("X-XSRFToken", "ignored")
 	rr := testutil.Serve(handler, native)
 	if rr.Code != http.StatusNoContent || rr.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("native code=%d headers=%v", rr.Code, rr.Header())
@@ -97,7 +95,7 @@ func TestOAuthBoundaryWebSocketSubprotocolBearer(t *testing.T) {
 	validatorCalls := 0
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "" {
-			t.Fatal("subprotocol bearer was copied into Authorization")
+			t.Fatal("Authorization reached the inner handler of a subprotocol-authenticated WebSocket")
 		}
 		if got := r.Header.Get("Sec-WebSocket-Protocol"); got != ssh.ControlWebSocketProtocol {
 			t.Fatalf("inner protocols = %q", got)
@@ -117,6 +115,7 @@ func TestOAuthBoundaryWebSocketSubprotocolBearer(t *testing.T) {
 		return testPrincipal, nil
 	}), []string{"https://workspace.example.edu"})
 	request := browserUpgradeRequest(token)
+	request.Header.Set("Authorization", "Bearer header-websocket-token")
 	response := testutil.Serve(handler, request)
 	if response.Code != http.StatusNoContent || validatorCalls != 1 {
 		t.Fatalf("websocket OAuth response = %d calls=%d body=%q", response.Code, validatorCalls, response.Body.String())
@@ -125,26 +124,6 @@ func TestOAuthBoundaryWebSocketSubprotocolBearer(t *testing.T) {
 		if strings.Contains(response.Body.String(), secret) || strings.Contains(response.Header().Get("Sec-WebSocket-Protocol"), secret) || strings.Contains(logs.String(), secret) {
 			t.Fatalf("boundary exposed %q: headers=%v body=%q logs=%q", secret, response.Header(), response.Body.String(), logs.String())
 		}
-	}
-}
-
-func TestOAuthBoundaryWebSocketRejectsHeaderCredentialChannels(t *testing.T) {
-	const token = "native-websocket-token"
-	calls := 0
-	handler := testOAuthBoundary(t, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.Header.Get("Authorization") != "" || request.Header.Get("Sec-WebSocket-Protocol") != ssh.ControlWebSocketProtocol {
-			t.Fatalf("secret WebSocket protocols were not stripped: %v", request.Header)
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}), (func(context.Context, string) (security.Principal, error) {
-		calls++
-		return testPrincipal, nil
-	}), []string{"https://workspace.example.edu"})
-	request := browserUpgradeRequest(token)
-	request.Header.Set("Authorization", "Bearer "+token)
-	response := testutil.Serve(handler, request)
-	if response.Code != http.StatusNoContent || calls != 1 {
-		t.Fatalf("protocol-authenticated WebSocket response = %d calls=%d %q", response.Code, calls, response.Body.String())
 	}
 }
 
@@ -187,9 +166,9 @@ func TestOAuthBoundaryRejectsMalformedCredentials(t *testing.T) {
 
 	for name, request := range map[string]*http.Request{
 		"no credential": httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil),
-		"github scheme gone": func() *http.Request {
+		"non-bearer scheme": func() *http.Request {
 			r := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
-			r.Header.Set("Authorization", "github some-token")
+			r.Header.Set("Authorization", "Basic some-token")
 			return r
 		}(),
 		"two authorizations": func() *http.Request {
@@ -198,14 +177,14 @@ func TestOAuthBoundaryRejectsMalformedCredentials(t *testing.T) {
 			r.Header.Add("Authorization", "Bearer b")
 			return r
 		}(),
-		"websocket github": func() *http.Request {
+		"websocket without bearer": func() *http.Request {
 			r := browserUpgradeRequest("t")
-			r.Header.Set("Sec-WebSocket-Protocol", ssh.ControlWebSocketProtocol+", github."+base64.RawURLEncoding.EncodeToString([]byte("t")))
+			r.Header.Set("Sec-WebSocket-Protocol", ssh.ControlWebSocketProtocol+", other."+base64.RawURLEncoding.EncodeToString([]byte("t")))
 			return r
 		}(),
-		"websocket identity": func() *http.Request {
+		"websocket extra protocol": func() *http.Request {
 			r := browserUpgradeRequest("t")
-			r.Header.Set("Sec-WebSocket-Protocol", browserWebSocketProtocols("t")+", identity."+base64.RawURLEncoding.EncodeToString([]byte("t")))
+			r.Header.Set("Sec-WebSocket-Protocol", browserWebSocketProtocols("t")+", other."+base64.RawURLEncoding.EncodeToString([]byte("t")))
 			return r
 		}(),
 	} {
