@@ -92,12 +92,12 @@ detail logged, not returned.
 
 | Code | Status |
 | --- | --- |
-| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_id`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider`, `invalid_runs` | 400 |
+| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_id`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `invalid_tunnel_modes`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider`, `invalid_runs` | 400 |
 | `unauthorized`, `identity_not_linked` | 401 |
 | `session_owner_mismatch`, `origin_required`, `origin_not_allowed`, `preflight_not_allowed`, `authorization_denied` | 403 |
 | `not_found`, `session_not_found`, `ssh_host_not_found`, `ssh_key_not_found` | 404 |
 | `method_not_allowed` | 405 |
-| `session_running`, `session_not_stopped`, `session_has_history`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_key_exists`, `ssh_authentication_required`, `ssh_authentication_in_progress` | 409 |
+| `session_running`, `session_not_stopped`, `session_has_history`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_key_exists`, `ssh_authentication_required`, `ssh_authentication_in_progress`, `tunnel_link_required` | 409 |
 | `authorization_expired` | 410 |
 | `upgrade_required` | 426 |
 | `rate_limited` | 429 |
@@ -306,6 +306,7 @@ An unknown `{id}` is `404 session_not_found`; another principal's is `403 sessio
   "partition": "cpu",
   "rootFolder": "$HOME/project",
   "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60 },
+  "tunnelModes": ["websocket"],
   "createdAt": "2030-01-01T00:00:00Z",
   "startedAt": "2030-01-01T00:00:30Z",
   "updatedAt": "2030-01-01T00:01:00Z"
@@ -317,11 +318,12 @@ An unknown `{id}` is `404 session_not_found`; another principal's is `403 sessio
 | `seq` | 0 until the first `start`, then the run currently serving the session; each `start` or `attach` increments it |
 | `state` | `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED` or `FAILED` |
 | `launcher` | `cs-plane` when `start` launched the run; `client` when `attach` admitted a job the client submitted |
+| `tunnelModes` | how the run's Linkspan carries traffic off the node, sorted: `websocket` (the link), `devtunnel` (a delegated Dev Tunnel) or both |
 | `startedAt` | when Slurm first reported the job running, or its link connected if earlier; absent before that. With `wallMinutes` it gives the deadline |
 | `account`, `error` | omitted when empty |
 
 `READY` means reachable: the job's Linkspan linked for this seq, or, without a link, the job is running and has
-written to its log.
+written to its log, or, for a client-launched `devtunnel` run, Linkspan answers through its tunnel.
 
 ### `POST /api/v1/sessions/validate` → 200
 
@@ -332,7 +334,8 @@ written to its log.
   "account": "project-a",
   "partition": "cpu",
   "rootFolder": "$HOME/project",
-  "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60, "gpuType": "a100", "gpuCount": 1 }
+  "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60, "gpuType": "a100", "gpuCount": 1 },
+  "tunnelModes": ["websocket", "devtunnel"]
 }
 ```
 
@@ -345,6 +348,7 @@ written to its log.
 | `wallMinutes` | 1 to 525600 |
 | `gpuType`, `gpuCount` | together or not at all |
 | `rootFolder` | absolute, home-relative (`x`, `.`, `~/x`, `$HOME/x`) or `$VAR/x`, resolved on the host |
+| `tunnelModes` | optional, default `["websocket"]`; distinct values from `websocket` and `devtunnel`, else `400 invalid_tunnel_modes`; `devtunnel` needs a linked Dev Tunnels account, else `409 tunnel_link_required` |
 
 The request must fit a discovered partition.
 
@@ -396,13 +400,14 @@ The session record.
 ### `POST /api/v1/sessions/{id}/start` → 200
 
 Launches through Slurm. Validates the session against the host as `validate` does, then takes the next seq, a new
-capability, a new job and, when the owner linked Dev Tunnels, a new tunnel. Answers the session record with
-`launcher: "cs-plane"`.
+capability, a new job and, when `tunnelModes` holds `devtunnel`, a new tunnel; Linkspan runs with exactly the
+session's modes. Answers the session record with `launcher: "cs-plane"`.
 
 | Refusal | Code |
 | --- | --- |
 | Session not terminal, including one another `start` is launching | `409 session_running` |
 | Slurm rejects the script | `400 slurm_validation_failed` |
+| `devtunnel` selected without a linked Dev Tunnels account | `409 tunnel_link_required` |
 | Another launch is preparing the same host for this caller | `409 session_provisioning_in_progress` |
 | Login-node preparation fails | `502` or `504 session_provisioning_failed` |
 
@@ -413,14 +418,21 @@ A conclusive submission failure leaves the session `FAILED` at the new seq.
 ```json
 {
   "session": { "id": "s-012345abcdef", "seq": 2, "state": "QUEUED", "launcher": "client", "...": "..." },
-  "link": { "url": "wss://api.example.edu/api/v1/sessions/s-012345abcdef/link", "token": "<43-character token>" }
+  "link": { "url": "wss://api.example.edu/api/v1/sessions/s-012345abcdef/link", "token": "<43-character token>" },
+  "devtunnel": { "id": "s-012345abcdef-2", "cluster": "usw3", "hostToken": "<host token>" }
 }
 ```
 
-Admits a job the client submits itself. Takes no body. Freezes the previous run as `start` does, then takes the next
-seq and a new capability without a Dev Tunnel, and persists the session `QUEUED` with `launcher: "client"`. The
-client runs Linkspan with `--link-url <url>` and `LINKSPAN_LINK_TOKEN=<token>`; the link moves the session to
-`READY`. A session that is not terminal is `409 session_running`.
+Admits a job the client submits itself. Takes an optional body `{ "tunnelModes": [...] }`, validated as for
+`validate` and defaulting to the session's modes, which it replaces. Freezes the previous run as `start` does, then
+takes the next seq and a new capability, creates a Dev Tunnel with the owner's account only for `devtunnel`, and
+persists the session `QUEUED` with `launcher: "client"`. `link` is present only with `websocket`, `devtunnel` only
+with `devtunnel`; attach is the only route that returns the host token. The client runs Linkspan with
+`--tunnel-enable --tunnel-mode <modes>`, plus `--tunnel-websocket-args "--url <url>"` and
+`LINKSPAN_LINK_TOKEN=<token>` for `websocket`, and `--tunnel-devtunnel-args "--id <id> --cluster <cluster>"` and
+`LINKSPAN_TUNNEL_HOST_TOKEN=<hostToken>` for `devtunnel`. The link, or Linkspan answering through the tunnel, moves
+the session to `READY`. A session that is not terminal is `409 session_running`; `devtunnel` without a linked
+account is `409 tunnel_link_required`.
 
 ### `POST /api/v1/sessions/{id}/stop` → 200
 
@@ -549,6 +561,7 @@ Starts an SSH server in the owner's `READY` session authorizing `publicKey`, and
       "partition": "cpu",
       "rootFolder": "$HOME/project",
       "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60 },
+      "tunnelModes": ["websocket"],
       "finalState": "STOPPED",
       "startedAt": "2030-01-01T00:00:30Z",
       "endedAt": "2030-01-01T01:00:30Z",
@@ -576,9 +589,8 @@ empty.
 
 ## Dev Tunnels link
 
-An optional Microsoft or GitHub account that gives each session the caller starts a delegated Dev Tunnel as fallback
-to its link. The credential is stored sealed under the caller's principal and never returned. These routes need the
-bearer.
+An optional Microsoft or GitHub account that gives each run with the `devtunnel` mode a delegated Dev Tunnel. The
+credential is stored sealed under the caller's principal and never returned. These routes need the bearer.
 
 ### `GET /api/v1/tunnel` → 200
 

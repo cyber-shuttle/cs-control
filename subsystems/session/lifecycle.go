@@ -38,7 +38,18 @@ func assignSessionID(request createRequest, principal security.Principal) (creat
 }
 
 func sameCreateRequest(session *Session, request createRequest) bool {
-	return session.SSHHost == request.SSHHost && session.Account == request.Account && session.Partition == request.Partition && session.RootFolder == request.RootFolder && session.Resources == request.Resources
+	return session.SSHHost == request.SSHHost && session.Account == request.Account && session.Partition == request.Partition && session.RootFolder == request.RootFolder && session.Resources == request.Resources && slices.Equal(session.TunnelModes, request.TunnelModes)
+}
+
+func (s Service) tunnelCredential(ctx context.Context, principal security.Principal, modes []string) (devtunnel.Credential, error) {
+	if !slices.Contains(modes, modeDevtunnel) {
+		return devtunnel.Credential{}, nil
+	}
+	credential, err := s.TunnelCredentials.Credential(ctx, principal)
+	if err == nil && credential.Token == "" {
+		err = errTunnelLinkRequired
+	}
+	return credential, err
 }
 
 func (s Service) launch(ctx context.Context, principal security.Principal, request createRequest) (_ *Session, resultErr error) {
@@ -65,7 +76,7 @@ func (s Service) serialized(id string, fn func() error) error {
 }
 
 func (s Service) launchSerialized(ctx context.Context, request createRequest, principal security.Principal) (*Session, error) {
-	credential, err := s.TunnelCredentials.Credential(ctx, principal)
+	credential, err := s.tunnelCredential(ctx, principal, request.TunnelModes)
 	if err != nil {
 		return nil, err
 	}
@@ -271,12 +282,22 @@ func (s Service) Start(ctx context.Context, principal security.Principal, id str
 	}
 	return s.launch(ctx, principal, createRequest{
 		ID: id, SSHHost: session.SSHHost, Account: session.Account,
-		Partition: session.Partition, RootFolder: session.RootFolder, Resources: session.Resources,
+		Partition: session.Partition, RootFolder: session.RootFolder, Resources: session.Resources, TunnelModes: session.TunnelModes,
 	})
 }
 
-func (s Service) Attach(ctx context.Context, principal security.Principal, id string) (*attachResponse, error) {
+func (s Service) Attach(ctx context.Context, principal security.Principal, id string, modes []string) (*attachResponse, error) {
 	previous, err := s.retireFinished(ctx, principal, id)
+	if err != nil {
+		return nil, err
+	}
+	intent := *previous
+	if modes != nil {
+		if intent.TunnelModes, err = canonicalTunnelModes(modes); err != nil {
+			return nil, err
+		}
+	}
+	credential, err := s.tunnelCredential(ctx, principal, intent.TunnelModes)
 	if err != nil {
 		return nil, err
 	}
@@ -285,16 +306,24 @@ func (s Service) Attach(ctx context.Context, principal security.Principal, id st
 		return nil, err
 	}
 	defer done()
-	intent, capability := *previous, sessionCapability{}
+	var hostToken string
+	var capability sessionCapability
 	intent.State, intent.Launcher, intent.Error, intent.JobID, intent.Node, intent.StartedAt = "QUEUED", launcherClient, "", "", "", time.Time{}
 	if err := s.serialized(id, func() (err error) {
-		intent, _, capability, err = s.claimRun(operationCtx, principal, devtunnel.Credential{}, intent)
+		intent, hostToken, capability, err = s.claimRun(operationCtx, principal, credential, intent)
 		return err
 	}); err != nil {
 		return nil, err
 	}
 	s.sessionStatus(id, "Waiting for the client's Linkspan to connect")
-	return &attachResponse{Session: intent.sessionResponse, Link: linkAccess{URL: s.linkURL(id), Token: capability.LinkToken}}, nil
+	response := &attachResponse{Session: intent.sessionResponse}
+	if slices.Contains(intent.TunnelModes, modeWebsocket) {
+		response.Link = &linkAccess{URL: s.linkURL(id), Token: capability.LinkToken}
+	}
+	if slices.Contains(intent.TunnelModes, modeDevtunnel) {
+		response.Devtunnel = &devtunnelAccess{ID: intent.Tunnel.ID, Cluster: intent.Tunnel.ClusterID, HostToken: hostToken}
+	}
+	return response, nil
 }
 
 func (s Service) Stop(principal security.Principal, id string) (*Session, error) {
@@ -460,7 +489,7 @@ func (s Service) Define(principal security.Principal, request createRequest) (*S
 	}
 	session := &Session{sessionResponse: sessionResponse{
 		ID: request.ID, State: "STOPPED", Launcher: launcherPlane, SSHHost: request.SSHHost, Account: request.Account,
-		Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources,
+		Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources, TunnelModes: request.TunnelModes,
 		CreatedAt: s.utcNow(), UpdatedAt: s.utcNow(),
 	}, Owner: principal}
 	created := false
@@ -506,7 +535,7 @@ func (s Service) AdoptRuns(principal security.Principal, id string, history sess
 		for index, run := range history.Runs {
 			recordRun(current, runRecord{Run: Run{
 				SessionID: session.ID, Seq: index + 1, SSHHost: session.SSHHost, Account: session.Account,
-				Partition: session.Partition, RootFolder: session.RootFolder, Resources: session.Resources,
+				Partition: session.Partition, RootFolder: session.RootFolder, Resources: session.Resources, TunnelModes: session.TunnelModes,
 				FinalState: run.FinalState, Error: security.TruncateUTF8(run.Error, maxSessionError),
 				StartedAt: run.StartedAt.UTC(), EndedAt: run.EndedAt.UTC(), Stats: run.Stats, Samples: run.Samples,
 			}, Owner: principal})

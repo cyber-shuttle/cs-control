@@ -43,7 +43,7 @@ accounting skip it and `stop` retires it locally.
 A launch runs in this order:
 
 1. Discovery (`id`, `sacctmgr`, `sinfo`, `printenv HOME`) and `sbatch --test-only` against the candidate script.
-2. A creator-owned Dev Tunnel for the seq, when the owner linked a Dev Tunnels account; then the seq capability
+2. A creator-owned Dev Tunnel for the seq, when the session's `tunnelModes` holds `devtunnel`; then the seq capability
    written to disk and the record persisted as `SUBMITTING`.
 3. Login-node preparation: Linkspan and the workflow document, in one constant script.
 4. `sbatch` with the job name and the session environment on the command line.
@@ -56,23 +56,26 @@ submission that returns after the session was stopped cancels its job. A seq is 
 ### Preparation
 
 Preparation installs Linkspan into the account, not the session: one `$HOME/.cybershuttle` per account. It refuses
-a Linkspan older than 0.20.0, the first release that reads the `tasks` document and dials `--link-url`. It runs on
+a Linkspan older than 0.21.0, the first release that reads the `tasks` document and takes `--tunnel-mode`. It runs on
 the service's context, so an abandoned request leaves no half-built state. Preparation is keyed on the caller's
 config file plus alias; a concurrent launch on the same key is refused `session_provisioning_in_progress`, while
 another caller's preparation of the same host proceeds.
 
 The batch script execs Linkspan and names no application. The workflow, one `on: start` task with a
 `jupyter.sessions.start` step, carries only validated paths and the Jupyter port. Secrets never enter script text:
-`JUPYTER_TOKEN`, `LINKSPAN_LINK_TOKEN`, `CS_LINK_URL`, `CS_CONTROL_PORT` and, with a tunnel, `CS_TUNNEL_ID`,
-`CS_TUNNEL_CLUSTER` and `CS_TUNNEL_HOST_TOKEN` travel in `sbatch --export`. The control and Jupyter ports are derived
-from session ID and seq, so a tunnel can declare the control port before the job starts.
+`JUPYTER_TOKEN` and `CS_CONTROL_PORT`, with `websocket` `CS_LINK_URL` and `LINKSPAN_LINK_TOKEN`, and with `devtunnel`
+`CS_TUNNEL_ID`, `CS_TUNNEL_CLUSTER` and `LINKSPAN_TUNNEL_HOST_TOKEN` travel in `sbatch --export`. Linkspan runs with
+`--tunnel-enable --tunnel-mode <modes>` and, per selected mode, `--tunnel-websocket-args "--url $CS_LINK_URL"` or
+`--tunnel-devtunnel-args "--id $CS_TUNNEL_ID --cluster $CS_TUNNEL_CLUSTER"`. The control and Jupyter ports are
+derived from session ID and seq, so a tunnel can declare the control port before the job starts.
 
 ### States and reconciliation
 
 States: `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, `FAILED`. A Slurm state outside this
 vocabulary is treated as no observation. A link for the current seq moves `QUEUED` or `STARTING` to `READY`, and
 reconciliation never demotes a linked `READY` session. Without a link, `STARTING` becomes `READY` once the job runs
-and its log has output. Slurm is otherwise authoritative, including for the end of a run.
+and its log has output, and a client-launched `QUEUED` run with a tunnel once Linkspan's `/api/v1/health` answers
+through it. Slurm is otherwise authoritative, including for the end of a run.
 
 Reconciliation runs in the background every 30 seconds, one pass at a time, so no read waits on SSH. A session
 unknown to the scheduler past a two-minute propagation window becomes `STOPPED`, as does one whose scheduler is
@@ -98,8 +101,9 @@ then seals the resulting credential with `nacl/secretbox` under `tunnel-link.key
 it has a refresh token, refreshed within two minutes of expiry on use; the request's own bearer is never used for
 Dev Tunnels.
 
-With a linked account, each session seq gets one creator-owned tunnel declaring only the control port, with no
-anonymous access and traffic inspection disabled. `customExpiration` is walltime plus 15 minutes, clamped to one hour
+Only the `devtunnel` mode needs a linked account (`409 tunnel_link_required` otherwise), and each seq in that mode
+gets one creator-owned tunnel declaring only the control port, with no anonymous access and traffic inspection
+disabled. `customExpiration` is walltime plus 15 minutes, clamped to one hour
 through 30 days; expiry is the cleanup backstop. Any create error deletes the deterministic tunnel ID before
 returning. `stop` releases best-effort, skipping the Dev Tunnels call without a usable credential. The
 fallback dial reads the tunnel with `Authorization: tunnel <connect token>`, then opens Linkspan's

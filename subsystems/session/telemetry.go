@@ -470,20 +470,21 @@ func (s Service) sampleSession(ctx context.Context, session Session) (metricSamp
 const maxRunRecords = 200
 
 type Run struct {
-	SessionID  string           `json:"sessionId"`
-	Seq        int              `json:"seq"`
-	SSHHost    string           `json:"sshHost"`
-	Account    string           `json:"account,omitempty"`
-	Partition  string           `json:"partition"`
-	RootFolder string           `json:"rootFolder"`
-	Resources  resources        `json:"resources"`
-	FinalState string           `json:"finalState"`
-	Error      string           `json:"error,omitempty"`
-	StartedAt  time.Time        `json:"startedAt,omitzero"`
-	EndedAt    time.Time        `json:"endedAt"`
-	Stats      *runStats        `json:"stats,omitempty"`
-	Samples    []metricSample   `json:"samples,omitempty"`
-	Logs       []sessionLogLine `json:"logs,omitempty"`
+	SessionID   string           `json:"sessionId"`
+	Seq         int              `json:"seq"`
+	SSHHost     string           `json:"sshHost"`
+	Account     string           `json:"account,omitempty"`
+	Partition   string           `json:"partition"`
+	RootFolder  string           `json:"rootFolder"`
+	Resources   resources        `json:"resources"`
+	TunnelModes []string         `json:"tunnelModes"`
+	FinalState  string           `json:"finalState"`
+	Error       string           `json:"error,omitempty"`
+	StartedAt   time.Time        `json:"startedAt,omitzero"`
+	EndedAt     time.Time        `json:"endedAt"`
+	Stats       *runStats        `json:"stats,omitempty"`
+	Samples     []metricSample   `json:"samples,omitempty"`
+	Logs        []sessionLogLine `json:"logs,omitempty"`
 }
 
 type runRecord struct {
@@ -524,7 +525,7 @@ func (s Service) runOf(session *Session) runRecord {
 		Run: Run{
 			SessionID: session.ID, Seq: session.Seq, SSHHost: session.SSHHost,
 			Account: session.Account, Partition: session.Partition, RootFolder: session.RootFolder,
-			Resources:  session.Resources,
+			Resources: session.Resources, TunnelModes: session.TunnelModes,
 			FinalState: session.State, Error: session.Error, StartedAt: session.StartedAt,
 			EndedAt: session.UpdatedAt, Samples: s.metrics.samples(session.ID),
 			Logs: logTail.Lines,

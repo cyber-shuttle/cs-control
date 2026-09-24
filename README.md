@@ -40,12 +40,13 @@ The `/api/v1` surface is not yet stable. [CHANGELOG.md](CHANGELOG.md) records wh
   principal.
 - **Optionally, a Microsoft or GitHub account entitled to
   [Dev Tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview),** linked once through
-  `POST /api/v1/tunnel/authorizations` and kept sealed under the caller's principal, for a delegated tunnel per run.
+  `POST /api/v1/tunnel/authorizations` and kept sealed under the caller's principal, for a delegated tunnel per run
+  in the `devtunnel` mode.
 - **An SSH-reachable Linux Slurm cluster** whose login node provides `sacctmgr`, `sinfo`, `sbatch`, `squeue`,
   `sacct`, `scancel`, `curl`, `tar`, `base64`, `od`, `install`, `printenv`, `sed` and `sort -V`, and whose
   nodes run Linux `x86_64` or `arm64` with `curl`.
-- **[Linkspan](https://github.com/cyber-shuttle/linkspan) 0.20.0 or newer**, the release that reads the `tasks`
-  workflow document and dials `--link-url`; cs-plane installs the latest release on a host that has none.
+- **[Linkspan](https://github.com/cyber-shuttle/linkspan) 0.21.0 or newer**, the release that reads the `tasks`
+  workflow document and takes `--tunnel-mode`; cs-plane installs the latest release on a host that has none.
 - **Outbound internet.** From the login node to `github.com`; from the compute node to `--public-url`, which
   Linkspan links to, and to `astral.sh`, `github.com` and `pypi.org`, which Linkspan installs `uv`, its Python and
   packages from, and, with a delegated tunnel, to `tunnelsassetsprod.blob.core.windows.net`, which Linkspan fetches
@@ -120,7 +121,7 @@ account, it:
 
 - downloads a [Linkspan](https://github.com/cyber-shuttle/linkspan) release tarball from GitHub into
   `$HOME/.cybershuttle/bin`, unless the installed one is current, and refuses the host if that Linkspan is
-  older than 0.20.0;
+  older than 0.21.0;
 - writes the workflow document the job will run, under `$HOME/.cybershuttle/sessions/<session id>`.
 
 Linkspan is the CyberShuttle agent that runs as the batch job's main process: it links to cs-plane, hosts any delegated tunnel, installs

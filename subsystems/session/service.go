@@ -9,6 +9,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -68,6 +70,7 @@ type createRequest struct {
 	Partition      string    `json:"partition"`
 	RootFolder     string    `json:"rootFolder"`
 	Resources      resources `json:"resources"`
+	TunnelModes    []string  `json:"tunnelModes,omitempty"`
 }
 
 type tunnelMetadata struct {
@@ -77,19 +80,20 @@ type tunnelMetadata struct {
 }
 
 type sessionResponse struct {
-	ID         string    `json:"id"`
-	Seq        int       `json:"seq"`
-	State      string    `json:"state"`
-	Launcher   string    `json:"launcher"`
-	SSHHost    string    `json:"sshHost"`
-	Account    string    `json:"account,omitempty"`
-	Partition  string    `json:"partition"`
-	RootFolder string    `json:"rootFolder"`
-	Resources  resources `json:"resources"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	StartedAt  time.Time `json:"startedAt,omitzero"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID          string    `json:"id"`
+	Seq         int       `json:"seq"`
+	State       string    `json:"state"`
+	Launcher    string    `json:"launcher"`
+	SSHHost     string    `json:"sshHost"`
+	Account     string    `json:"account,omitempty"`
+	Partition   string    `json:"partition"`
+	RootFolder  string    `json:"rootFolder"`
+	Resources   resources `json:"resources"`
+	TunnelModes []string  `json:"tunnelModes"`
+	Error       string    `json:"error,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	StartedAt   time.Time `json:"startedAt,omitzero"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type Session struct {
@@ -113,9 +117,16 @@ type linkAccess struct {
 	Token string `json:"token"`
 }
 
+type devtunnelAccess struct {
+	ID        string `json:"id"`
+	Cluster   string `json:"cluster"`
+	HostToken string `json:"hostToken"`
+}
+
 type attachResponse struct {
-	Session sessionResponse `json:"session"`
-	Link    linkAccess      `json:"link"`
+	Session   sessionResponse  `json:"session"`
+	Link      *linkAccess      `json:"link,omitempty"`
+	Devtunnel *devtunnelAccess `json:"devtunnel,omitempty"`
 }
 
 type sessionAccessResponse struct {
@@ -312,6 +323,7 @@ var (
 	errIdempotencyConflict = security.New("idempotency_conflict", "idempotency key was already used for another request", http.StatusConflict)
 	errServiceStopping     = security.New("service_stopping", "The session service is stopping.", http.StatusServiceUnavailable)
 	errSessionHasHistory   = security.New("session_has_history", "session already has a run history", http.StatusConflict)
+	errTunnelLinkRequired  = security.New("tunnel_link_required", "the devtunnel mode requires a linked Dev Tunnels account", http.StatusConflict)
 )
 
 func (s Service) utcNow() time.Time { return s.now().UTC() }
@@ -458,7 +470,13 @@ func (s Service) Routes() router.Routes {
 			return view(s.Start(request.Context(), principal, id(request)))
 		})},
 		"/api/v1/sessions/{id}/attach": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*attachResponse, error) {
-			return s.Attach(request.Context(), principal, id(request))
+			var body struct {
+				TunnelModes []string `json:"tunnelModes"`
+			}
+			if err := security.DecodeStrict(io.LimitReader(request.Body, 1<<10), &body); err != nil && !errors.Is(err, io.EOF) {
+				return nil, security.New("invalid_json", "request body is invalid", http.StatusBadRequest)
+			}
+			return s.Attach(request.Context(), principal, id(request), body.TunnelModes)
 		})},
 		"/api/v1/sessions/{id}/stop": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
 			return view(s.Stop(principal, id(request)))
