@@ -1,5 +1,7 @@
 // Host values parse from a pasted ssh command restricted to connection options and allowlisted directives, and
-// render to one OpenSSH stanza. The parsed value is both the wire shape and the stored payload.
+// render to one OpenSSH stanza. The parsed value is both the wire shape and the stored payload. A host's only
+// credential is the stored key its keyId names, so the command takes no -i and no identity option; the key's path is
+// supplied at render time and never stored or returned.
 package ssh
 
 import (
@@ -21,7 +23,6 @@ type hostEntry struct {
 	Hostname        string   `json:"hostname,omitempty"`
 	User            string   `json:"user,omitempty"`
 	Port            int      `json:"port,omitempty"`
-	IdentityFile    string   `json:"identityFile,omitempty"`
 	Key             string   `json:"keyId,omitempty"`
 	ExtraDirectives []string `json:"extraDirectives"`
 	Managed         bool     `json:"managed"`
@@ -31,7 +32,7 @@ type hostList struct {
 	Hosts []hostEntry `json:"hosts"`
 }
 
-func (h hostEntry) stanza() []string {
+func (h hostEntry) stanza(identityFile string) []string {
 	config := map[string][]string{}
 	add := func(key, value string) { config[key] = append(config[key], value) }
 	if h.Hostname != "" {
@@ -43,13 +44,13 @@ func (h hostEntry) stanza() []string {
 	if h.Port != 0 && h.Port != 22 {
 		add("port", strconv.Itoa(h.Port))
 	}
-	if h.IdentityFile != "" {
-		add("identityfile", h.IdentityFile)
-	}
 	for _, directive := range h.ExtraDirectives {
 		if key, value, found := strings.Cut(strings.TrimSpace(directive), " "); found {
 			add(strings.ToLower(key), strings.TrimSpace(value))
 		}
+	}
+	if h.Key != "" {
+		config["identityfile"], config["identitiesonly"] = []string{identityFile}, []string{"yes"}
 	}
 	lines := []string{"Host " + h.Name}
 	for _, key := range slices.Sorted(maps.Keys(config)) {
@@ -67,7 +68,6 @@ var allowedOptions = map[string]string{
 	"stricthostkeychecking":    "StrictHostKeyChecking",
 	"userknownhostsfile":       "UserKnownHostsFile",
 	"identitiesonly":           "IdentitiesOnly",
-	"identityagent":            "IdentityAgent",
 	"forwardagent":             "ForwardAgent",
 	"serveraliveinterval":      "ServerAliveInterval",
 	"serveralivecountmax":      "ServerAliveCountMax",
@@ -124,8 +124,8 @@ func parseCommand(name, command string) (hostEntry, error) {
 			target = field
 			continue
 		}
-		if len(field) < 2 || !strings.ContainsRune("pilJo", rune(field[1])) {
-			return hostEntry{}, invalid(fmt.Sprintf("%s is not supported here. Keep the command to the host, user, port, identity, jump host, and -o options.", field))
+		if len(field) < 2 || !strings.ContainsRune("plJo", rune(field[1])) {
+			return hostEntry{}, invalid(fmt.Sprintf("%s is not supported here. Keep the command to the host, user, port, jump host, and -o options; keys are added under /keys/ssh and chosen by keyId.", field))
 		}
 		value := field[2:]
 		if value == "" {
@@ -142,8 +142,6 @@ func parseCommand(name, command string) (hostEntry, error) {
 			if err != nil || host.Port < 1 || host.Port > 65535 {
 				return hostEntry{}, invalid(fmt.Sprintf("%q is not a port.", value))
 			}
-		case 'i':
-			host.IdentityFile, err = validText("identity file path", value)
 		case 'l':
 			host.User, err = validText("user name", value)
 		case 'J':

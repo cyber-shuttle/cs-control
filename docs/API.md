@@ -6,7 +6,7 @@
 | --- | --- |
 | `/api/v1/hosts` | `GET`, `POST` |
 | `/api/v1/hosts/{alias}` | `PUT`, `DELETE` |
-| `/api/v1/hosts/{alias}/test` | `POST` |
+| `/api/v1/hosts/{alias}/health` | `GET` |
 | `/api/v1/hosts/{alias}/slurm` | `GET` |
 | `/api/v1/hosts/{alias}/ssh` (WebSocket) | `GET` |
 | `/api/v1/keys/ssh` | `GET`, `POST` |
@@ -114,18 +114,16 @@ Hosts are per caller: one caller's aliases are invisible to another, and two cal
       "hostname": "login.delta.example.edu",
       "user": "alice",
       "port": 22,
-      "identityFile": "<state>/hosts/<principal>/keys/delta-key",
       "keyId": "delta-key",
-      "extraDirectives": ["ProxyJump bastion", "IdentitiesOnly yes"],
+      "extraDirectives": ["ProxyJump bastion"],
       "managed": true
     }
   ]
 }
 ```
 
-`hostname`, `user`, `port`, `identityFile` and `keyId` are omitted when unset. `managed` is always `true`. A host with
-`keyId` signs in with that key only: `identityFile` is the key's path and `extraDirectives` carries
-`IdentitiesOnly yes`.
+`user` and `keyId` are omitted when unset. `managed` is always `true`. A host with `keyId` signs in with that key
+only (`IdentitiesOnly yes`); the key's path is never returned.
 
 ### `POST /api/v1/hosts` → 201
 
@@ -134,8 +132,8 @@ Hosts are per caller: one caller's aliases are invisible to another, and two cal
 ```
 
 `name` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`. `command` is an `ssh` command line the server parses:
-`-p`, `-i`, `-l`, `-J`, allowlisted `-o` options and one `[user@]host`. Anything else, including a remote command, is
-`invalid_ssh_command`. `keyId` is optional, must name a stored key (`ssh_key_not_found`) and replaces any `-i`. An
+`-p`, `-l`, `-J`, allowlisted `-o` options and one `[user@]host`. Anything else, including `-i`, identity options and
+a remote command, is `invalid_ssh_command`. `keyId` is optional and must name a stored key (`ssh_key_not_found`). An
 existing alias is `ssh_host_exists`. The answer is the host.
 
 ### `PUT /api/v1/hosts/{alias}` → 200
@@ -151,14 +149,15 @@ host. An unknown alias is `ssh_host_not_found`.
 
 An unknown alias is `ssh_host_not_found`.
 
-### `POST /api/v1/hosts/{alias}/test` → 200
+### `GET /api/v1/hosts/{alias}/health` → 200
 
 ```json
-{ "host": "delta", "ok": true, "message": "Connected." }
+{ "host": "delta", "ok": true, "message": "Listening at login.delta.example.edu:22." }
 ```
 
-Runs one bounded remote command. A host that answers but wants an interactive login is `ok: false` with `200`.
-Messages are fixed; SSH output is never returned. An unknown alias is `404 ssh_host_not_found`.
+Opens a TCP connection, without signing in, to the first hop: the alias's host and port, or its first `ProxyJump`
+host, followed through further jumps. Only public addresses are dialed; a closed port or a loopback, private or
+link-local address is `ok: false` with `200`. An unknown alias is `404 ssh_host_not_found`.
 
 ### `GET /api/v1/hosts/{alias}/slurm` → 200
 

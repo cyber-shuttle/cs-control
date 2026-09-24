@@ -1,16 +1,19 @@
 // Package ssh owns principal-scoped SSH hosts, keys, rendered configuration, live probes, and authentication. The
 // database stores host and key metadata while private keys and generated configs remain protected files. Host/key
 // mutations coordinate database, config, and file effects as compensated flows; OpenSSH execution and
-// control-master mechanics remain in internal/ssh.
+// control-master mechanics remain in internal/ssh. Health only opens a TCP connection to the first hop, and only to
+// public addresses, so it cannot probe cs-plane's own network.
 package ssh
 
 import (
 	"context"
 	"errors"
 	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 
 	"github.com/cyber-shuttle/cs-plane/internal/db"
 	"github.com/cyber-shuttle/cs-plane/internal/router"
@@ -36,7 +39,7 @@ type updateHostRequest struct {
 	Key     string `json:"keyId"`
 }
 
-type hostTest struct {
+type hostHealth struct {
 	Host    string `json:"host"`
 	OK      bool   `json:"ok"`
 	Message string `json:"message"`
@@ -95,20 +98,28 @@ func (s Service) removeHost(principal security.Principal, alias string) error {
 	return s.Store.deleteHost(security.PrincipalDirName(principal), s.Configs.ConfigPath(principal), alias)
 }
 
-func (s Service) testHost(ctx context.Context, principal security.Principal, alias string) (hostTest, error) {
+var dialHealth = (&net.Dialer{Control: func(_, address string, _ syscall.RawConn) error {
+	host, _, _ := net.SplitHostPort(address)
+	if ip := net.ParseIP(host); ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return errors.New("not a public address")
+	}
+	return nil
+}}).DialContext
+
+func (s Service) hostHealth(ctx context.Context, principal security.Principal, alias string) (hostHealth, error) {
 	runner := s.Configs.Runner(principal)
 	ctx, cancel := context.WithTimeout(ctx, runner.EffectiveTimeout())
 	defer cancel()
-	if _, err := runner.Run(ctx, alias, nil, "true"); err != nil {
-		if security.For(err).Code == "ssh_authentication_required" {
-			return hostTest{Host: alias, Message: "The host answered but wants an interactive login. Authenticate it first."}, nil
-		}
-		if ctx.Err() != nil {
-			return hostTest{Host: alias, Message: "The host did not answer in time."}, nil
-		}
-		return hostTest{Host: alias, Message: "The SSH connection failed."}, nil
+	address, err := runner.FirstHop(ctx, alias)
+	if err != nil {
+		return hostHealth{}, err
 	}
-	return hostTest{Host: alias, OK: true, Message: "Connected."}, nil
+	conn, err := dialHealth(ctx, "tcp", address)
+	if err != nil {
+		return hostHealth{Host: alias, Message: "Nothing accepted a connection at " + address + "."}, nil
+	}
+	_ = conn.Close()
+	return hostHealth{Host: alias, OK: true, Message: "Listening at " + address + "."}, nil
 }
 
 func (s Service) sshRoutes() router.Routes {
@@ -138,9 +149,9 @@ func (s Service) sshRoutes() router.Routes {
 				return s.removeHost(principal, request.PathValue("alias"))
 			}),
 		},
-		"/api/v1/hosts/{alias}/test": {
-			http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (hostTest, error) {
-				return s.testHost(request.Context(), principal, request.PathValue("alias"))
+		"/api/v1/hosts/{alias}/health": {
+			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (hostHealth, error) {
+				return s.hostHealth(request.Context(), principal, request.PathValue("alias"))
 			}),
 		},
 		"/api/v1/hosts/{alias}/ssh": {

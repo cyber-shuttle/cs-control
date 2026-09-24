@@ -1,7 +1,8 @@
 // Package ssh runs bounded remote commands and foreground OpenSSH control masters against per-principal configs.
 // Every operation resolves the alias first; that output also identifies its control socket. Interactive masters
 // disable ControlPersist because persistence backgrounds authentication. Exit status 255 belongs to ssh itself and
-// cannot establish whether a remote command ran; aliases trust literal Host lines in process-owned configs.
+// cannot establish whether a remote command ran; aliases trust literal Host lines in process-owned configs. FirstHop
+// follows each ProxyJump entry as the ssh:// URI it is, so `ssh -G` resolves its user, host and port.
 package ssh
 
 import (
@@ -13,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -237,11 +239,14 @@ func (r Runner) identity(ctx context.Context, alias string) (string, error) {
 			return "", security.New("ssh_host_not_found", "SSH host alias is not configured", http.StatusNotFound)
 		}
 	}
+	return r.resolve(ctx, alias)
+}
 
+func (r Runner) resolve(ctx context.Context, destination string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.EffectiveTimeout())
 	defer cancel()
 	args := r.configArgs([]string{"-G"})
-	cmd := r.command(append(args, alias)...)
+	cmd := r.command(append(args, destination)...)
 	captured := newCapture()
 	cmd.Stdout, cmd.Stderr = &captured.stdout, &captured.stderr
 	if err := runCommand(ctx, cmd); err != nil {
@@ -256,6 +261,26 @@ func (r Runner) identity(ctx context.Context, alias string) (string, error) {
 		return "", errors.New("effective SSH configuration is empty")
 	}
 	return identity, nil
+}
+
+func (r Runner) FirstHop(ctx context.Context, alias string) (string, error) {
+	identity, err := r.identity(ctx, alias)
+	for range 8 {
+		if err != nil {
+			return "", err
+		}
+		option := map[string]string{}
+		for line := range strings.SplitSeq(identity, "\n") {
+			key, value, _ := strings.Cut(line, " ")
+			option[key] = value
+		}
+		jump, _, _ := strings.Cut(option["proxyjump"], ",")
+		if jump == "" || jump == "none" {
+			return net.JoinHostPort(option["hostname"], option["port"]), nil
+		}
+		identity, err = r.resolve(ctx, "ssh://"+strings.TrimPrefix(jump, "ssh://"))
+	}
+	return "", errors.New("the ProxyJump chain is too long")
 }
 
 func (r Runner) privateControlPath(baseName string) (string, error) {
