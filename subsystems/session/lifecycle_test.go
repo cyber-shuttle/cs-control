@@ -1,5 +1,5 @@
-// Session lifecycle tests cover durable transitions, compensation, idempotency, and concurrency.
-// One fake SSH boundary drives complete create, stop, delete, and relaunch flows.
+// Session lifecycle tests cover durable transitions, compensation, and concurrency.
+// One fake SSH boundary drives complete define, start, stop and delete flows.
 // Races assert that persisted intent wins over delayed remote work.
 // Detached work survives request cancellation and stops with the service.
 package session
@@ -187,8 +187,11 @@ esac
 func newTestService(t *testing.T, runner ssh.Runner, store Store) Service {
 	t.Helper()
 	service := Service{
-		runner: runner, runners: testRunnerProvider{runner: runner}, store: store, linkspanExecutable: "/opt/cybershuttle/linkspan",
-		logs: newSessionLogs(), metrics: newSessionMetrics(), tunnelTimeout: runner.EffectiveTimeout(),
+		Config: Config{
+			Runners: testRunnerProvider{runner: runner}, Store: store, LinkspanPath: "/opt/cybershuttle/linkspan",
+			TunnelTimeout: runner.EffectiveTimeout(),
+		},
+		runner: runner, logs: newSessionLogs(), metrics: newSessionMetrics(),
 		hostPreparations: &sync.Map{}, now: time.Now, runtime: newSessionRuntime(),
 	}
 	t.Cleanup(service.Close)
@@ -219,7 +222,7 @@ func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 	t.Setenv("FAKE_SCANCEL_LOG", cancellations)
 	service := fakeSSHService(t, sshBin)
 	configureTestTunnel(t, &service)
-	session, err := service.create(testTunnelContext(), newTestCreateRequest())
+	session, err := defineAndStart(context.Background(), service, newTestCreateRequest())
 	testutil.Check(t, err)
 	if session.State != "QUEUED" || session.PrivateRoot != "/home/tester/.cybershuttle/sessions/s-012345abcdef" || session.WorkspaceRoot != "/home/tester/projects/example" {
 		t.Fatalf("unexpected session: %#v", session)
@@ -230,7 +233,7 @@ func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 	if len(listed) != 1 || listed[0].State != "READY" || listed[0].Node != "cn001" {
 		t.Fatalf("unexpected list: %#v", listed)
 	}
-	stopped, err := service.stop(testTunnelContext(), session.ID)
+	stopped, err := service.Stop(testPrincipal, session.ID)
 	if err != nil || stopped.State != "STOPPED" {
 		t.Fatalf("unexpected stop: %#v %v", stopped, err)
 	}
@@ -238,7 +241,7 @@ func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 	if err != nil || !strings.Contains(string(data), "scancel 12345") {
 		t.Fatalf("known job was not cancelled: %q %v", data, err)
 	}
-	runs, err := service.ListRuns(testPrincipal)
+	runs, err := service.Runs(testPrincipal)
 	if err != nil || len(runs) != 1 || runs[0].SessionID != session.ID {
 		t.Fatalf("stop did not freeze a run: %#v %v", runs, err)
 	}
@@ -247,32 +250,7 @@ func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
 	}
 }
 
-func TestCreateIdempotencyIsPrincipalScoped(t *testing.T) {
-	request := createRequest{IdempotencyKey: "same", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/a", Resources: resources{Cores: 2, MemoryMB: 4096, WallMinutes: 10}}
-	service := testService(t)
-	first, err := service.create(testTunnelContext(), request)
-	testutil.Check(t, err)
-
-	broker := service.tunnelCredentials.(*testLinkBroker)
-	broker.mu.Lock()
-	delete(broker.links, testPrincipal)
-	broker.mu.Unlock()
-	replayed, err := service.create(testTunnelContext(), request)
-	if err != nil || first.ID != replayed.ID || first.JobID != replayed.JobID {
-		t.Fatalf("same-principal replay = %#v, want %#v: %v", replayed, first, err)
-	}
-
-	broker.mu.Lock()
-	broker.links[otherTestPrincipal] = devtunnel.Credential{Scheme: "Bearer", Token: "other-tunnel-link-token"}
-	broker.mu.Unlock()
-	otherContext := security.WithPrincipal(context.Background(), otherTestPrincipal)
-	other, err := service.create(otherContext, request)
-	if err != nil || other.ID == first.ID || other.Owner != otherTestPrincipal {
-		t.Fatalf("cross-principal create = %#v, first = %#v: %v", other, first, err)
-	}
-}
-
-func TestConcurrentMismatchedCreateInTheIdempotencyWindowAnswersConflict(t *testing.T) {
+func TestConcurrentStartsLaunchOneRun(t *testing.T) {
 	sshBin, _, _ := fakeSSH(t)
 	started := filepath.Join(t.TempDir(), "discovery-started")
 	release := filepath.Join(t.TempDir(), "discovery-release")
@@ -282,33 +260,30 @@ func TestConcurrentMismatchedCreateInTheIdempotencyWindowAnswersConflict(t *test
 	service := fakeSSHService(t, sshBin)
 	configureTestTunnel(t, &service)
 
-	requestA := createRequest{IdempotencyKey: "shared-key", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}}
-	requestB := requestA
-	requestB.SSHHost = "beta"
-
-	first := make(chan error, 1)
-	go func() {
-		_, err := service.create(testTunnelContext(), requestA)
-		first <- err
-	}()
+	session, _, err := service.Define(testPrincipal, newTestCreateRequest())
+	testutil.Check(t, err)
+	start := func() chan error {
+		result := make(chan error, 1)
+		go func() {
+			_, err := service.Start(context.Background(), testPrincipal, session.ID)
+			result <- err
+		}()
+		return result
+	}
+	first := start()
 	testutil.WaitForFile(t, started)
-
-	second := make(chan error, 1)
-	go func() {
-		_, err := service.create(testTunnelContext(), requestB)
-		second <- err
-	}()
-	testutil.RemainsBlocked(t, second, "a competing create bypassed the in-flight request")
+	second := start()
+	testutil.RemainsBlocked(t, second, "a competing start bypassed the in-flight launch")
 	testutil.Check(t, os.WriteFile(release, nil, 0o600))
 	testutil.Check(t, <-first)
-	if err := <-second; security.For(err).Code != "idempotency_conflict" {
-		t.Fatalf("a mismatched create that landed in the idempotency window answered %v, not idempotency_conflict", err)
+	if err := <-second; security.For(err).Code != "session_running" {
+		t.Fatalf("a start racing an in-flight launch answered %v, not session_running", err)
 	}
 }
 
-func TestStopOutlivesRequestAndStopsWithService(t *testing.T) {
+func TestServiceCloseWaitsForAStop(t *testing.T) {
 	service := testService(t)
-	manager := service.tunnelManager.(*testTunnelManager)
+	manager := service.TunnelManager.(*testTunnelManager)
 	manager.operationStarted, manager.operationBlock = make(chan struct{}), make(chan struct{})
 	session := pendingSession(sessionLogIDOne, "delta", "12345")
 	session.State = "READY"
@@ -318,13 +293,11 @@ func TestStopOutlivesRequestAndStopsWithService(t *testing.T) {
 	session.PrivateRoot = "/home/tester/.cybershuttle/sessions/" + session.ID
 	putSessions(t, service, session)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	var stopped *Session
 	var stopErr error
 	done := make(chan error, 1)
 	go func() {
-		stopped, stopErr = service.stop(security.WithPrincipal(ctx, testPrincipal), session.ID)
+		stopped, stopErr = service.Stop(testPrincipal, session.ID)
 		done <- stopErr
 	}()
 	<-manager.operationStarted
@@ -334,8 +307,8 @@ func TestStopOutlivesRequestAndStopsWithService(t *testing.T) {
 	close(manager.operationBlock)
 	testutil.Within(t, closed, time.Second, "service did not close after stop completed")
 	testutil.Within(t, done, time.Second, "stop did not complete")
-	if stopped.State != "STOPPING" || strings.Contains(stopped.Error, "context canceled") {
-		t.Fatalf("canceled request interrupted durable stop: %#v", stopped)
+	if stopped.State != "STOPPING" {
+		t.Fatalf("stop = %#v", stopped)
 	}
 }
 
@@ -345,10 +318,10 @@ func TestDeleteRemovesATerminalSessionAndItsCredential(t *testing.T) {
 	setTestSessionMetadata(&session)
 	session.State = "FAILED"
 	putSessions(t, service, session)
-	testutil.Check(t, putCapability(service.capabilityDir, session.ID, session.Seq, defaultSessionCapability()))
+	testutil.Check(t, putCapability(service.CapabilityDir, session.ID, session.Seq, defaultSessionCapability()))
 	service.logs.append(session.ID, "starting", service.utcNow())
 
-	deleted, err := service.delete(testTunnelContext(), session.ID)
+	deleted, err := service.Delete(testPrincipal, session.ID)
 	if err != nil || deleted.ID != session.ID {
 		t.Fatalf("delete failed: %#v %v", deleted, err)
 	}
@@ -359,13 +332,13 @@ func TestDeleteRemovesATerminalSessionAndItsCredential(t *testing.T) {
 			t.Fatalf("deleted session is still listed: %#v", remaining)
 		}
 	}
-	if _, err := getCapability(service.capabilityDir, session.ID, session.Seq); err == nil {
+	if _, err := getCapability(service.CapabilityDir, session.ID, session.Seq); err == nil {
 		t.Fatal("delete left the seq capability on disk")
 	}
 	if _, ok := service.logs.tail(session.ID); ok {
 		t.Fatal("delete left the session log tail in memory")
 	}
-	if _, err := service.delete(testTunnelContext(), session.ID); err == nil {
+	if _, err := service.Delete(testPrincipal, session.ID); err == nil {
 		t.Fatal("deleting an absent session should not succeed")
 	}
 }
@@ -374,11 +347,11 @@ func TestStopAndDeleteSurviveADevTunnelsReleaseFailure(t *testing.T) {
 	sshBin, _, _ := fakeSSH(t)
 	service := fakeSSHService(t, sshBin)
 	manager := configureTestTunnel(t, &service)
-	created, err := service.create(testTunnelContext(), newTestCreateRequest())
+	created, err := defineAndStart(context.Background(), service, newTestCreateRequest())
 	testutil.Check(t, err)
 	manager.deleteErr = errors.New("Dev Tunnels outage")
 
-	stopped, err := service.stop(testTunnelContext(), created.ID)
+	stopped, err := service.Stop(testPrincipal, created.ID)
 	testutil.Check(t, err)
 	if stopped.State != "STOPPED" {
 		t.Fatalf("unexpected state after stop: %#v", stopped)
@@ -387,21 +360,21 @@ func TestStopAndDeleteSurviveADevTunnelsReleaseFailure(t *testing.T) {
 		t.Fatalf("the release failure was not recorded on the session: %#v", stopped)
 	}
 
-	deleted, err := service.delete(testTunnelContext(), created.ID)
+	deleted, err := service.Delete(testPrincipal, created.ID)
 	testutil.Check(t, err)
 	if deleted.ID != created.ID {
 		t.Fatalf("unexpected deleted session: %#v", deleted)
 	}
 }
 
-func TestCreateSerializesAcrossProcessesWithoutHoldingStoreLockDuringTunnelCreate(t *testing.T) {
+func TestStartSerializesAcrossProcessesWithoutHoldingStoreLockDuringTunnelCreate(t *testing.T) {
 	service := testService(t)
-	manager := service.tunnelManager.(*testTunnelManager)
+	manager := service.TunnelManager.(*testTunnelManager)
 	manager.operationStarted = make(chan struct{})
 	manager.operationBlock = make(chan struct{})
 	request := newTestCreateRequest()
 	sum := sha256.Sum256([]byte(request.ID))
-	lockPath := filepath.Join(service.store.Dir, fmt.Sprintf(".session-create-%02x.lock", int(sum[0])%len(createLocks)))
+	lockPath := filepath.Join(service.Store.Dir, fmt.Sprintf(".session-create-%02x.lock", int(sum[0])%len(createLocks)))
 	processLock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	testutil.Check(t, err)
 	defer func() { _ = processLock.Close() }()
@@ -409,7 +382,7 @@ func TestCreateSerializesAcrossProcessesWithoutHoldingStoreLockDuringTunnelCreat
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := service.create(testTunnelContext(), request)
+		_, err := defineAndStart(context.Background(), service, request)
 		done <- err
 	}()
 	testutil.RemainsBlocked(t, manager.operationStarted, "create bypassed the cross-process session lock")
@@ -421,7 +394,7 @@ func TestCreateSerializesAcrossProcessesWithoutHoldingStoreLockDuringTunnelCreat
 		t.Fatal("tunnel create was never reached")
 	}
 	lockAvailable := make(chan error, 1)
-	go func() { lockAvailable <- service.store.locked(func(*state) error { return nil }) }()
+	go func() { lockAvailable <- service.Store.locked(func(*state) error { return nil }) }()
 	testutil.Within(t, lockAvailable, 300*time.Millisecond, "state lock was held during blocked tunnel create")
 
 	close(manager.operationBlock)
@@ -517,21 +490,17 @@ func (m *testTunnelManager) Delete(_ context.Context, request devtunnel.DeleteRe
 	return m.deleteErr
 }
 
-func testTunnelContext() context.Context {
-	return security.WithPrincipal(context.Background(), testPrincipal)
-}
-
 type testRunnerProvider struct{ runner ssh.Runner }
 
 func (h testRunnerProvider) Runner(security.Principal) ssh.Runner { return h.runner }
 
 func configureTestTunnel(t *testing.T, service *Service) *testTunnelManager {
 	t.Helper()
-	testutil.Check(t, security.EnsurePrivateDir(service.store.Dir))
+	testutil.Check(t, security.EnsurePrivateDir(service.Store.Dir))
 	manager := &testTunnelManager{}
-	service.tunnelManager = manager
-	service.tunnelCredentials = newTestLinkBroker()
-	service.capabilityDir = t.TempDir() + "/session-capabilities"
+	service.TunnelManager = manager
+	service.TunnelCredentials = newTestLinkBroker()
+	service.CapabilityDir = t.TempDir() + "/session-capabilities"
 	return manager
 }
 
@@ -545,13 +514,13 @@ func setTestSessionMetadata(session *Session) {
 
 func putSessions(t *testing.T, service Service, sessions ...Session) {
 	t.Helper()
-	testutil.Check(t, service.store.locked(func(current *state) error {
+	testutil.Check(t, service.Store.locked(func(current *state) error {
 		for i := range sessions {
 			copy := sessions[i]
 			setTestSessionMetadata(&copy)
 			current.Sessions[copy.ID] = &copy
 		}
-		return service.store.save(current)
+		return service.Store.save(current)
 	}))
 }
 
@@ -590,18 +559,18 @@ func waitFor(t *testing.T, errs <-chan error, what, path string) {
 	})
 }
 
-func TestCreateCancelsJobWhenStopWinsBeforeSbatchReturns(t *testing.T) {
+func TestStartCancelsJobWhenStopWinsBeforeSbatchReturns(t *testing.T) {
 	service, started, release, cancellations := createStopRaceService(t)
 	result := make(chan *Session, 1)
 	errs := make(chan error, 1)
 	go func() {
-		session, err := service.create(testTunnelContext(), newTestCreateRequest())
+		session, err := defineAndStart(context.Background(), service, newTestCreateRequest())
 		result <- session
 		errs <- err
 	}()
 	waitFor(t, errs, "sbatch started", started)
 
-	stopped, err := service.stop(testTunnelContext(), newTestCreateRequest().ID)
+	stopped, err := service.Stop(testPrincipal, newTestCreateRequest().ID)
 	if err != nil || stopped.State != "STOPPING" || stopped.JobID != "" {
 		t.Fatalf("stop did not persist intent while sbatch was blocked: %#v %v", stopped, err)
 	}
@@ -622,18 +591,18 @@ func TestCreateCancelsJobWhenStopWinsBeforeSbatchReturns(t *testing.T) {
 	}
 }
 
-func TestCreatePersistsCancelFailureAndLaterBatchRetries(t *testing.T) {
+func TestStartPersistsCancelFailureAndLaterBatchRetries(t *testing.T) {
 	service, started, release, cancellations := createStopRaceService(t)
 	t.Setenv("FAKE_SCANCEL_FAIL", "1")
 	result := make(chan *Session, 1)
 	errs := make(chan error, 1)
 	go func() {
-		session, err := service.create(testTunnelContext(), newTestCreateRequest())
+		session, err := defineAndStart(context.Background(), service, newTestCreateRequest())
 		result <- session
 		errs <- err
 	}()
 	waitFor(t, errs, "sbatch started", started)
-	_, err := service.stop(testTunnelContext(), newTestCreateRequest().ID)
+	_, err := service.Stop(testPrincipal, newTestCreateRequest().ID)
 	testutil.Check(t, err)
 	testutil.Check(t, os.WriteFile(release, nil, 0o600))
 	testutil.Check(t, <-errs)
@@ -654,21 +623,21 @@ func TestCreatePersistsCancelFailureAndLaterBatchRetries(t *testing.T) {
 	}
 }
 
-func TestCreateCancelsUnsavedJobEvenWithACancelledRequestContext(t *testing.T) {
+func TestStartCancelsUnsavedJobEvenWithACancelledRequestContext(t *testing.T) {
 	service, started, release, cancellations := createStopRaceService(t)
 	cancelStarted := filepath.Join(t.TempDir(), "scancel-started")
 	cancelRelease := filepath.Join(t.TempDir(), "scancel-release")
 	t.Setenv("FAKE_SCANCEL_STARTED", cancelStarted)
 	t.Setenv("FAKE_SCANCEL_RELEASE", cancelRelease)
-	ctx, cancel := context.WithCancel(testTunnelContext())
+	ctx, cancel := context.WithCancel(context.Background())
 	request := newTestCreateRequest()
 	errs := make(chan error, 1)
 	go func() {
-		_, err := service.create(ctx, request)
+		_, err := defineAndStart(ctx, service, request)
 		errs <- err
 	}()
 	waitFor(t, errs, "sbatch started", started)
-	testutil.Check(t, service.store.Database.Close())
+	testutil.Check(t, service.Store.Database.Close())
 	testutil.Check(t, os.WriteFile(release, nil, 0o600))
 	waitFor(t, errs, "compensation scancel started", cancelStarted)
 	cancel()
@@ -687,12 +656,12 @@ func TestCreateCancelsUnsavedJobEvenWithACancelledRequestContext(t *testing.T) {
 func retire(t *testing.T, service Service, id string) Session {
 	t.Helper()
 	var terminal Session
-	testutil.Check(t, service.store.locked(func(current *state) error {
+	testutil.Check(t, service.Store.locked(func(current *state) error {
 		session := current.Sessions[id]
 		session.State, session.Node = "STOPPED", "cn001"
 		session.CreatedAt, session.UpdatedAt = time.Unix(0, 0).UTC(), time.Unix(0, 0).UTC()
 		terminal = *session
-		return service.store.save(current)
+		return service.Store.save(current)
 	}))
 	return terminal
 }
@@ -700,11 +669,11 @@ func retire(t *testing.T, service Service, id string) Session {
 func TestStartRunsTheFinishedSessionOnTheSameSession(t *testing.T) {
 	service := testService(t)
 	tunnels := configureTestTunnel(t, &service)
-	created, err := service.create(testTunnelContext(), newTestCreateRequest())
+	created, err := defineAndStart(context.Background(), service, newTestCreateRequest())
 	testutil.Check(t, err)
 	terminal := retire(t, service, created.ID)
 
-	started, err := service.start(testTunnelContext(), created.ID)
+	started, err := service.Start(context.Background(), testPrincipal, created.ID)
 	testutil.Check(t, err)
 	if started.State != "QUEUED" || started.Seq == terminal.Seq || started.Node != "" {
 		t.Fatalf("unexpected relaunched session: %#v", started)
@@ -719,24 +688,23 @@ func TestStartRunsTheFinishedSessionOnTheSameSession(t *testing.T) {
 
 func TestStartRefusesSessionsItMayNotRun(t *testing.T) {
 	service := testService(t)
-	created, err := service.create(testTunnelContext(), newTestCreateRequest())
+	created, err := defineAndStart(context.Background(), service, newTestCreateRequest())
 	testutil.Check(t, err)
-	if _, err := service.start(testTunnelContext(), created.ID); err == nil || security.For(err).Code != "session_running" {
+	if _, err := service.Start(context.Background(), testPrincipal, created.ID); err == nil || security.For(err).Code != "session_running" {
 		t.Fatalf("a live session was run again: %v", err)
 	}
 	retire(t, service, created.ID)
 
 	stranger := security.Principal{Subject: "other-owner", Tenant: "test-tenant"}
-	ctx := security.WithPrincipal(context.Background(), stranger)
-	if _, err := service.start(ctx, created.ID); err == nil || security.For(err).Code != "session_owner_mismatch" {
+	if _, err := service.Start(context.Background(), stranger, created.ID); err == nil || security.For(err).Code != "session_owner_mismatch" {
 		t.Fatalf("another principal ran this session: %v", err)
 	}
-	if _, err := service.start(testTunnelContext(), "s-999999999999"); err == nil || security.For(err).Code != "session_not_found" {
+	if _, err := service.Start(context.Background(), testPrincipal, "s-999999999999"); err == nil || security.For(err).Code != "session_not_found" {
 		t.Fatalf("an unknown session was run: %v", err)
 	}
 }
 
-func relaunchRaceService(t *testing.T) (Service, *atomic.Int64, string, string) {
+func restartRaceService(t *testing.T) (Service, *atomic.Int64, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	started := filepath.Join(dir, "provision-started")
@@ -760,9 +728,9 @@ func TestPostIntentWorkOutlivesRequestAndStopsWithService(t *testing.T) {
 	t.Setenv("FAKE_SUBMIT_RELEASE", filepath.Join(dir, "never-released"))
 	service := fakeSSHService(t, sshBin)
 	configureTestTunnel(t, &service)
-	ctx, cancel := context.WithCancel(testTunnelContext())
+	ctx, cancel := context.WithCancel(context.Background())
 	created := make(chan error, 1)
-	go func() { _, err := service.create(ctx, newTestCreateRequest()); created <- err }()
+	go func() { _, err := defineAndStart(ctx, service, newTestCreateRequest()); created <- err }()
 	waitFor(t, created, "provisioning started", provisionStarted)
 	cancel()
 	testutil.Check(t, os.WriteFile(provisionRelease, nil, 0o600))
@@ -780,9 +748,9 @@ func TestPostIntentWorkOutlivesRequestAndStopsWithService(t *testing.T) {
 }
 
 func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
-	service, clock, started, release := relaunchRaceService(t)
-	ctx := testTunnelContext()
-	created, err := service.create(ctx, newTestCreateRequest())
+	service, clock, started, release := restartRaceService(t)
+	ctx := context.Background()
+	created, err := defineAndStart(ctx, service, newTestCreateRequest())
 	testutil.Check(t, err)
 	testutil.Check(t, os.WriteFile(os.Getenv("FAKE_STATUS"), []byte("TIMEOUT\n"), 0o600))
 	finished := retire(t, service, created.ID)
@@ -796,7 +764,7 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		session, err := service.start(ctx, created.ID)
+		session, err := service.Start(ctx, testPrincipal, created.ID)
 		result <- session
 		errs <- err
 	}()
@@ -822,4 +790,12 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	if relaunched.State != "QUEUED" || relaunched.JobID != "67890" {
 		t.Fatalf("the submitted relaunch was not queued: %#v (job %q)", relaunched.sessionResponse, relaunched.JobID)
 	}
+}
+
+func defineAndStart(ctx context.Context, service Service, request createRequest) (*Session, error) {
+	session, _, err := service.Define(testPrincipal, request)
+	if err != nil {
+		return nil, err
+	}
+	return service.Start(ctx, testPrincipal, session.ID)
 }

@@ -1,106 +1,110 @@
 # API
 
-`cs serve` exposes one JSON HTTP API and one WebSocket route on an explicit loopback address,
-`127.0.0.1:8045` by default. Every path below is relative to that address. There is no other interface: the CLI
-has no commands for keys, hosts, or sessions.
+`cs serve` answers on its loopback address (default `127.0.0.1:8045`). Paths are relative to that address.
 
-| Method | Route |
+| Route | Methods |
 | --- | --- |
-| `GET` | `/api/v1/oauth/config` |
-| `POST` | `/api/v1/oauth/exchange`, `/api/v1/oauth/refresh`, `/api/v1/oauth/device` |
-| `GET`, `POST` | `/api/v1/ssh/hosts`, `/api/v1/ssh/keys` |
-| `PUT`, `DELETE` | `/api/v1/ssh/hosts/{alias}` |
-| `DELETE` | `/api/v1/ssh/keys/{name}` |
-| `POST` | `/api/v1/ssh/hosts/{alias}/test` |
-| `GET` | `/api/v1/ssh/hosts/{alias}/auth` (WebSocket), `/api/v1/ssh/hosts/{alias}/slurm` |
-| `GET`, `DELETE` | `/api/v1/tunnel` |
-| `POST` | `/api/v1/tunnel/authorizations`, `/api/v1/tunnel/authorizations/{handle}/poll` |
-| `GET`, `POST` | `/api/v1/sessions` |
-| `POST` | `/api/v1/sessions/validate` |
-| `GET` | `/api/v1/sessions/{id}`, `/api/v1/sessions/{id}/access`, `/api/v1/sessions/{id}/metrics` |
-| `POST` | `/api/v1/sessions/{id}/start`, `/api/v1/sessions/{id}/stop` |
-| `DELETE` | `/api/v1/sessions/{id}` |
-| `GET` | `/api/v1/telemetry` |
+| `/api/v1/hosts` | `GET`, `POST` |
+| `/api/v1/hosts/{alias}` | `PUT`, `DELETE` |
+| `/api/v1/hosts/{alias}/test` | `POST` |
+| `/api/v1/hosts/{alias}/slurm` | `GET` |
+| `/api/v1/hosts/{alias}/ssh` (WebSocket) | `GET` |
+| `/api/v1/keys/ssh` | `GET`, `POST` |
+| `/api/v1/keys/ssh/{id}` | `DELETE` |
+| `/api/v1/oauth/config` | `GET` |
+| `/api/v1/oauth/device` | `POST` |
+| `/api/v1/oauth/device/poll` | `POST` |
+| `/api/v1/oauth/exchange` | `POST` |
+| `/api/v1/oauth/refresh` | `POST` |
+| `/api/v1/sessions` | `GET`, `POST` |
+| `/api/v1/sessions/validate` | `POST` |
+| `/api/v1/sessions/{id}` | `GET`, `DELETE` |
+| `/api/v1/sessions/{id}/access` | `GET` |
+| `/api/v1/sessions/{id}/metrics` | `GET` |
+| `/api/v1/sessions/{id}/runs` | `POST` |
+| `/api/v1/sessions/{id}/start` | `POST` |
+| `/api/v1/sessions/{id}/stop` | `POST` |
+| `/api/v1/telemetry` | `GET` |
+| `/api/v1/tunnel` | `GET`, `DELETE` |
+| `/api/v1/tunnel/authorizations` | `POST` |
+| `/api/v1/tunnel/authorizations/{handle}/poll` | `POST` |
 
-Every `OPTIONS` preflight is answered from this table: an unknown path is `404`, a method the path lacks is
-`405` with `Allow`, and a disallowed origin or request header is `403`. A successful `DELETE` is `204` with no
-body. A created host, key or session is `201` with a `Location` header naming it.
+| Convention | Answer |
+| --- | --- |
+| Created host, key or session | `201` with `Location` |
+| Successful `DELETE` | `204`, no body |
+| Unknown path | `404 not_found` |
+| Method the path lacks | `405 method_not_allowed` with `Allow` |
+| Request body | JSON, at most 64 KiB; unknown fields or trailing data are `400 invalid_json` |
+| JSON response | `Cache-Control: no-store` |
 
 ## Authentication
 
-Every request except the sign-in routes carries one credential:
+Every route except the sign-in routes requires:
 
-| Header | Value |
-| --- | --- |
-| `Authorization` | `Bearer <CILogon ID token>` |
+```
+Authorization: Bearer <OIDC ID token>
+```
 
-The token is validated cryptographically against the configured issuer's discovery document and JWKS. The
-discovered issuer must match exactly, and the audience is pinned to the configured client id. The caller's
-identity is then the Custos user the token resolves to: cs-plane calls `GET <custos>/me` with the same bearer and takes the
-returned user id as the principal, under the tenant `custos`. The result is held five minutes per token. A
-token Custos does not recognise is refused with `401 identity_not_linked`; any other failure is `401`.
+The token is validated against the issuer's discovery document and JWKS, with exact issuer and the audience pinned to
+the client ID. The principal is the user id Custos returns for `GET {custos-url}/me` with the same bearer, under
+tenant `custos`, cached five minutes per token. A token Custos answers `401` for is `401 identity_not_linked`; any
+other failure is `401 unauthorized` with `WWW-Authenticate: Bearer`.
 
-The SSH authentication WebSocket cannot send headers from a browser, so it carries the same credential as a
-subprotocol. A client offers exactly two, in any order:
+The SSH authentication WebSocket carries the credential as exactly two subprotocols, in any order, and negotiates
+`cybershuttle.v1`:
 
 ```
 cybershuttle.v1
-bearer.<base64url of the ID token, unpadded>
+bearer.<unpadded base64url of the ID token>
 ```
 
-The server negotiates `cybershuttle.v1`. Any other set — a missing version, a third protocol, a padded or
-non-canonical encoding — is refused. No other route accepts subprotocol authentication, and an Upgrade-shaped
-request to any other route is not treated as a WebSocket.
+Any other protocol set is `400 invalid_websocket_auth`; a missing, oversized or non-canonical token is `401`. No
+other bearer route accepts subprotocol authentication.
 
 ## Origins
 
-`serve` requires at least one exact `--allowed-origin`. HTTPS origins and loopback HTTP origins are accepted;
-wildcards are not. A request whose `Origin` is not in the list is refused with `403`. A request with no
-`Origin` at all — a native client — passes the origin check but still needs its bearer credential.
+`--allowed-origin` lists exact HTTPS or loopback HTTP origins. On every route, including the SSH authentication WebSocket, a
+present `Origin` outside the list is `403 origin_not_allowed`; a request without `Origin` is a native
+client. `oauth/config` and `oauth/exchange` refuse a missing `Origin` with `403 origin_required`.
 
-When an `Origin` is present the response carries `Access-Control-Allow-Origin`, `Vary: Origin` and
-`Access-Control-Expose-Headers: ETag, Location`. Preflight is answered for `GET`, `POST`, `PUT`, `DELETE` and `OPTIONS`
-with the request headers `Authorization`, `Content-Type` and `If-None-Match`; a
-preflight asking for anything else is refused with `403`.
+An allowed `Origin` gets `Access-Control-Allow-Origin`, `Vary: Origin` and `Access-Control-Expose-Headers: ETag,
+Location`. A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) is answered `204` with the path's
+methods from the route table. It may request `Authorization`, `Content-Type` and
+`If-None-Match`, or only `Content-Type` on sign-in routes; anything else is `403 preflight_not_allowed`.
 
 ## Errors
 
-Every refusal, including those of the authentication boundary, is this envelope with `Cache-Control: no-store`:
+Every refusal is this envelope:
 
 ```json
 { "error": { "code": "session_not_found", "message": "session not found" } }
 ```
 
-Missing or invalid credentials are `401 unauthorized` with `WWW-Authenticate: Bearer`; a malformed or
-incomplete `Sec-WebSocket-Protocol` negotiation is `400 invalid_websocket_auth`.
-
-An error the API did not classify becomes `500 internal_error`.
+An unclassified failure is `500 internal_error`, its
+detail logged, not returned.
 
 | Code | Status |
 | --- | --- |
-| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_name`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `authorization_pending`, `unknown_provider` | 400 |
+| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_id`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider`, `invalid_runs` | 400 |
 | `unauthorized`, `identity_not_linked` | 401 |
 | `session_owner_mismatch`, `origin_required`, `origin_not_allowed`, `preflight_not_allowed`, `authorization_denied` | 403 |
 | `not_found`, `session_not_found`, `ssh_host_not_found`, `ssh_key_not_found` | 404 |
 | `method_not_allowed` | 405 |
-| `session_exists`, `session_running`, `session_not_stopped`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_key_exists`, `ssh_authentication_required`, `ssh_authentication_in_progress`, `tunnel_link_required` | 409 |
+| `session_running`, `session_not_stopped`, `session_has_history`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_key_exists`, `ssh_authentication_required`, `ssh_authentication_in_progress`, `tunnel_link_required` | 409 |
 | `authorization_expired` | 410 |
 | `upgrade_required` | 426 |
 | `rate_limited` | 429 |
 | `internal_error` | 500 |
-| `session_provisioning_failed` | 502 or 504 |
+| `session_provisioning_failed` | 502, or 504 on timeout |
 | `slurm_discovery_failed`, `upstream_unavailable`, `upstream_invalid`, `upstream_failure` | 502 |
 | `service_stopping`, `broker_capacity` | 503 |
 
-Request bodies are JSON, at most 64 KiB. Unknown fields and trailing data are refused with `invalid_json`.
+## Hosts
 
-## SSH hosts
+Hosts are per caller: one caller's aliases are invisible to another, and two callers may reuse an alias.
 
-### `GET /api/v1/ssh/hosts` → 200
-
-The caller's own hosts, and only those. Each principal has a private configuration this API writes; the
-account cs-plane runs as has none of its own standing here, and one caller's aliases are invisible to
-another. `managed` marks the entries this API wrote, which are the only ones it may change.
+### `GET /api/v1/hosts` → 200
 
 ```json
 {
@@ -110,66 +114,53 @@ another. `managed` marks the entries this API wrote, which are the only ones it 
       "hostname": "login.delta.example.edu",
       "user": "alice",
       "port": 22,
-      "identityFile": "~/.ssh/id_ed25519",
-      "extraDirectives": ["ProxyJump bastion"],
+      "identityFile": "<state>/hosts/<principal>/keys/delta-key",
+      "keyId": "delta-key",
+      "extraDirectives": ["ProxyJump bastion", "IdentitiesOnly yes"],
       "managed": true
     }
   ]
 }
 ```
 
-`hostname`, `user`, `port`, `identityFile` and `key` are omitted when unset. `key` names a stored login key
-(below) the host is assigned; its `identityFile` is then that key's path and `extraDirectives` carries
+`hostname`, `user`, `port`, `identityFile` and `keyId` are omitted when unset. `managed` is always `true`. A host with
+`keyId` signs in with that key only: `identityFile` is the key's path and `extraDirectives` carries
 `IdentitiesOnly yes`.
 
-### `POST /api/v1/ssh/hosts` → 201
-
-The body is the `ssh` command the user already knows works; the server parses it, so the client never composes
-configuration text. `name` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`.
+### `POST /api/v1/hosts` → 201
 
 ```json
-{ "name": "delta", "command": "ssh -J bastion alice@login.delta.example.edu", "key": "delta-key" }
+{ "name": "delta", "command": "ssh -J bastion alice@login.delta.example.edu", "keyId": "delta-key" }
 ```
 
-`key` is optional: the name of a stored login key to use for this host, which replaces any `-i` in the
-command. A name that is not stored is `ssh_key_not_found`.
+`name` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`. `command` is an `ssh` command line the server parses:
+`-p`, `-i`, `-l`, `-J`, allowlisted `-o` options and one `[user@]host`. Anything else, including a remote command, is
+`invalid_ssh_command`. `keyId` is optional, must name a stored key (`ssh_key_not_found`) and replaces any `-i`. An
+existing alias is `ssh_host_exists`. The answer is the host.
 
-The alias is the caller's own, so a name another principal already uses is free. `-p`, `-i`, `-l`, `-J`, `-o`
-and one `[user@]host` target are understood. `-o` is limited to an allowlist
-covering how a connection authenticates or keeps itself alive; every other option, every other flag, and a
-trailing remote command are refused with `invalid_ssh_command`. The response is the resulting host, and an
-alias that already exists is `ssh_host_exists`.
-
-### `PUT /api/v1/ssh/hosts/{alias}` → 200
-
-Replaces a managed entry with what the command now says, so a login whose host, port, user or jump
-changed is corrected without losing its alias. The body is the same pasted command `POST` takes, and it
-is parsed by the same rules; the alias comes from the path, so an edit cannot rename what it edits.
+### `PUT /api/v1/hosts/{alias}` → 200
 
 ```json
-{ "command": "ssh -p 2222 -J bastion alice@login2.delta.example.edu", "key": "delta-key" }
+{ "command": "ssh -p 2222 -J bastion alice@login2.delta.example.edu", "keyId": "delta-key" }
 ```
 
-`key` is as on `POST`; an empty or absent `key` unassigns the one the host had. The response is the resulting
-host. An alias that is not configured is `ssh_host_not_found`.
+Replaces the host under the same alias, parsed as `POST`; an absent `keyId` unassigns the key. The answer is the
+host. An unknown alias is `ssh_host_not_found`.
 
-### `DELETE /api/v1/ssh/hosts/{alias}` → 204
+### `DELETE /api/v1/hosts/{alias}` → 204
 
-Removes an entry. An alias that is not configured is `ssh_host_not_found`.
+An unknown alias is `ssh_host_not_found`.
 
-### `POST /api/v1/ssh/hosts/{alias}/test` → 200
-
-Runs one bounded remote command. A host that answers but wants an interactive login is a reportable state, not a
-failed call, so `ok` is `false` with a `200`. Failure messages are fixed; SSH output is never returned.
+### `POST /api/v1/hosts/{alias}/test` → 200
 
 ```json
 { "host": "delta", "ok": true, "message": "Connected." }
 ```
 
-### `GET /api/v1/ssh/hosts/{alias}/slurm` → 200
+Runs one bounded remote command. A host that answers but wants an interactive login is `ok: false` with `200`.
+Messages are fixed; SSH output is never returned. An unknown alias is `404 ssh_host_not_found`.
 
-Slurm discovery: the accounts the remote user is associated with, the partitions `sinfo` reports, and the
-remote home directory. Abandoning the request cancels the remote process group.
+### `GET /api/v1/hosts/{alias}/slurm` → 200
 
 ```json
 {
@@ -182,115 +173,122 @@ remote home directory. Abandoning the request cancels the remote process group.
 }
 ```
 
-A partition appears once per node configuration, so the same name can repeat with different capacities; a
-request has to fit at least one of them.
+The remote user's Slurm accounts, `sinfo` partitions and home directory. A partition appears once per node
+configuration, so a name can repeat; a session must fit one entry. Abandoning the request cancels the remote process
+group.
+
+### `GET /api/v1/hosts/{alias}/ssh` (WebSocket)
+
+Interactive SSH authentication that establishes the control master later operations reuse. A request without
+`Upgrade` is `426 upgrade_required`; a second authentication in flight for the host is
+`ssh_authentication_in_progress`.
+
+| Direction | Binary frames | Text frames |
+| --- | --- | --- |
+| Server to client | raw PTY output, including password and second-factor prompts | `{ "type": "ready" }` then `exit` code 0 on success; `{ "type": "exit", "code": 1, "message": "..." }` on failure |
+| Client to server | keystrokes, at most 32 KiB each | `{ "type": "resize", "cols": 100, "rows": 30 }` |
+
+`exit` carries a fixed message, never remote diagnostics. Resize honours `cols` 20 to 500 and `rows` 5 to 200 and
+ignores other values. Frames are capped at 64 KiB; the server pings every 20 seconds.
 
 ## SSH keys
 
-A stored key is held under the caller's hosts directory at mode `0600` and assigned to hosts by name. Reads
-return type and fingerprint but never private bytes. Passphrase-protected keys are accepted; the passphrase is
-asked for during SSH authentication.
+Keys are per caller, stored at mode `0600` and never returned. Passphrase-protected keys are accepted; the
+passphrase is asked for during SSH authentication.
 
-### `GET /api/v1/ssh/keys` → 200
-
-```json
-{ "keys": [{ "name": "delta-key", "type": "ssh-ed25519", "fingerprint": "SHA256:..." }] }
-```
-
-### `POST /api/v1/ssh/keys` → 201
+### `GET /api/v1/keys/ssh` → 200
 
 ```json
-{ "name": "delta-key", "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\n..." }
+{ "keys": [{ "id": "delta-key", "type": "ssh-ed25519", "fingerprint": "SHA256:..." }] }
 ```
 
-Creates a key and returns its metadata without `privateKey`. An existing name is `409 ssh_key_exists`. The
-private file is staged before its metadata is committed; startup promotes only a stage matching that metadata.
-Names match `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`, do not end in `.pub`, and invalid key bytes are
-`invalid_ssh_key`.
-
-### `DELETE /api/v1/ssh/keys/{name}` → 204
-
-Removes the key and unassigns it from every host that referenced it. The
-file deletion, metadata deletion, host-reference changes, and rendered config replacement are one compensated
-flow. A name that is not stored is `ssh_key_not_found`.
-
-### `GET /api/v1/ssh/hosts/{alias}/auth` (WebSocket)
-
-Interactive SSH authentication establishes the multiplexed control master every later operation reuses. A request
-without an `Upgrade` header is refused with `426 upgrade_required`.
-
-Server to client: binary frames are raw PTY output — untyped bytes, including password and second-factor
-prompts. Text frames are JSON:
+### `POST /api/v1/keys/ssh` → 201
 
 ```json
-{ "type": "ready" }
-{ "type": "exit", "code": 1, "message": "SSH authentication failed" }
+{ "id": "delta-key", "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\n..." }
 ```
 
-`ready` is followed by `exit` with code `0`. Diagnostics from the remote host are never forwarded; `exit`
-carries a fixed message.
+Answers the key's metadata. `id` matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$` and does not end in `.pub`
+(`invalid_ssh_key_id`). Bytes that are not a private key are `invalid_ssh_key`; an existing id is `ssh_key_exists`.
 
-Client to server: binary frames are keystrokes, at most 32 KiB each. Text frames resize the PTY:
+### `DELETE /api/v1/keys/ssh/{id}` → 204
+
+Removes the key and unassigns it from every host. An unknown id is `ssh_key_not_found`.
+
+## Sign-in
+
+These routes finish CILogon's authorization-code flow with PKCE for browsers and the device grant for other clients,
+adding the client secret only cs-plane holds. They need no bearer. `config` and `exchange` require an allowed
+`Origin`. Upstream failures are `502 upstream_unavailable` or `502 upstream_invalid`.
+
+### `GET /api/v1/oauth/config` → 200
 
 ```json
-{ "type": "resize", "cols": 100, "rows": 30 }
+{
+  "issuer": "https://cilogon.org",
+  "authorizationEndpoint": "https://cilogon.org/authorize",
+  "clientId": "cilogon:/client_id/...",
+  "scope": "openid email profile offline_access"
+}
 ```
 
-`cols` is honoured between 20 and 500, `rows` between 5 and 200; other values are ignored. Frames are capped at
-64 KiB and the server pings every 20 seconds. A second authentication for the same host while one is in flight
-is refused with `ssh_authentication_in_progress`.
+The browser sends the user to `authorizationEndpoint` with `response_type=code`, `clientId`, `scope`, a
+`redirect_uri` on an allowed origin, a `state` and an S256 `code_challenge`.
+
+### `POST /api/v1/oauth/exchange` → 200
+
+```json
+{ "code": "...", "codeVerifier": "...", "redirectUri": "https://jupyter.cybershuttle.org/lab/index.html" }
+```
+
+```json
+{ "idToken": "...", "refreshToken": "...", "expiresInSeconds": 900 }
+```
+
+`refreshToken` is present when the issuer granted `offline_access`. A missing field, a `redirectUri` off the allowed
+origins, or a rejected code is `400 invalid_grant`.
+
+### `POST /api/v1/oauth/refresh` → 200
+
+```json
+{ "refreshToken": "..." }
+```
+
+Answers `exchange`'s shape, with a rotated `refreshToken` when the issuer rotates it. An empty token is
+`invalid_json`; a refused one is `400 invalid_grant`.
+
+### `POST /api/v1/oauth/device` → 200
+
+No body. Answers `{ "deviceCode", "userCode", "verificationUriComplete", "intervalSeconds" }`; the client opens
+`verificationUriComplete` and polls `device/poll` every `intervalSeconds`.
+
+### `POST /api/v1/oauth/device/poll` → 200
+
+```json
+{ "deviceCode": "..." }
+```
+
+| Outcome | Answer |
+| --- | --- |
+| Not yet approved | `{ "status": "pending", "intervalSeconds": 5 }` |
+| Approved | `{ "status": "complete", "idToken": "...", "refreshToken": "...", "expiresInSeconds": 900 }` |
+
+A missing `deviceCode` is `invalid_json`; a denied or expired grant is `400 invalid_grant`.
 
 ## Sessions
 
-`{id}` matches `^s-[a-f0-9]{12}$`; a path that does not is `404 not_found`.
+An unknown `{id}` is `404 session_not_found`; another principal's is `403 session_owner_mismatch`.
 
-### `POST /api/v1/sessions/validate` → 200
+| Step | Route |
+| --- | --- |
+| Check a request | `POST /api/v1/sessions/validate` |
+| Record a session | `POST /api/v1/sessions` |
+| Run it | `POST /api/v1/sessions/{id}/start` |
+| Reach it | `GET /api/v1/sessions/{id}/access`, then Jupyter over the session's Dev Tunnel |
+| End the run | `POST /api/v1/sessions/{id}/stop` |
+| Drop the record | `DELETE /api/v1/sessions/{id}` |
 
-Builds the candidate batch script and runs `sbatch --test-only` with it. This is the review step: the script it
-returns is identical to the one create submits, except for the log redirect. No seq exists yet at
-validation time, so the returned script's log path carries a placeholder seq of `0`; create rebuilds the script
-with the real seq once one is assigned, before submitting it.
-
-Request:
-
-```json
-{
-  "idempotencyKey": "5f2b0d0a-3f14-4a9c-9a1e-6c2b0f7d51ab",
-  "sshHost": "delta",
-  "account": "project-a",
-  "partition": "cpu",
-  "rootFolder": "$HOME/project",
-  "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60, "gpuType": "a100", "gpuCount": 1 }
-}
-```
-
-`account` is optional and `gpuType`/`gpuCount` are supplied together or not at all. `cores` is 2–4096,
-`memoryMb` is 4096–100000000, `wallMinutes` is 1–525600, and the request must fit a discovered partition.
-`rootFolder` is a safe POSIX path: absolute, relative to the home (`x`, `.`, `~/x`, `$HOME/x`) or under
-another variable (`$VAR/x`), resolved on the host.
-
-Response:
-
-```json
-{
-  "sessionId": "s-012345abcdef",
-  "script": "#!/bin/bash\n#SBATCH --nodes=1\n...",
-  "status": "PASSED",
-  "message": "Slurm accepted the job script."
-}
-```
-
-`status` is `PASSED` or `FAILED`. A Slurm rejection is a `FAILED` result with a `200`, not an error; a failed
-SSH call is an error. `stdout` and `stderr` are omitted when empty.
-
-### `POST /api/v1/sessions` → 201
-
-Same request body as validate. Creates the tunnel and its capability, persists the record, prepares the login node,
-and submits. A new session is `201` with `Location: /api/v1/sessions/{id}`. A repeated request with the same
-`idempotencyKey` and the same fields returns the existing session as `200`; the same key with different fields
-is `idempotency_conflict`.
-
-The response is one session record, which is also the item shape everywhere else:
+### Session record
 
 ```json
 {
@@ -308,22 +306,60 @@ The response is one session record, which is also the item shape everywhere else
 }
 ```
 
-`id` names the session, the durable record; `seq` names the Slurm job currently serving it. A session
-outlives its jobs -- `start` takes the next seq under the same `id` -- so `seq` is what ties this
-record to one particular run.
+| Field | Meaning |
+| --- | --- |
+| `seq` | 0 until the first `start`, then the run currently serving the session; each `start` increments it |
+| `state` | `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED` or `FAILED` |
+| `startedAt` | when Slurm first reported the job running; absent before that. With `wallMinutes` it gives the deadline |
+| `account`, `error` | omitted when empty |
 
-`state` is one of `SUBMITTING`, `QUEUED`, `STARTING`, `READY`, `STOPPING`, `STOPPED`, `FAILED`; `READY` means
-the job is running and its Linkspan has started writing its log. `account` and
-`error` are omitted when empty. `startedAt` is when Slurm was first seen running the session, taken from
-the scheduler's own elapsed figure rather than from a poll, and is absent until it starts: with
-`resources.wallMinutes` it is the deadline a client counts down to, so a queue wait is never mistaken for one. Owner, tunnel, job ID, job name, node and remote paths are held but never
-returned.
+`READY` means the job is running and its Linkspan has written to its log.
+
+### `POST /api/v1/sessions/validate` → 200
+
+```json
+{
+  "idempotencyKey": "5f2b0d0a-3f14-4a9c-9a1e-6c2b0f7d51ab",
+  "sshHost": "delta",
+  "account": "project-a",
+  "partition": "cpu",
+  "rootFolder": "$HOME/project",
+  "resources": { "cores": 2, "memoryMb": 4096, "wallMinutes": 60, "gpuType": "a100", "gpuCount": 1 }
+}
+```
+
+| Field | Rule |
+| --- | --- |
+| `idempotencyKey` | required, at most 128 bytes, no NUL, CR or LF |
+| `account` | optional; must be one discovery reports |
+| `cores` | 2 to 4096 |
+| `memoryMb` | 4096 to 100000000 |
+| `wallMinutes` | 1 to 525600 |
+| `gpuType`, `gpuCount` | together or not at all |
+| `rootFolder` | absolute, home-relative (`x`, `.`, `~/x`, `$HOME/x`) or `$VAR/x`, resolved on the host |
+
+The request must fit a discovered partition.
+
+```json
+{
+  "sessionId": "s-012345abcdef",
+  "script": "#!/bin/bash\n#SBATCH --nodes=1\n...",
+  "status": "PASSED",
+  "message": "Slurm accepted the job script."
+}
+```
+
+Runs `sbatch --test-only` on the script `start` would submit, which differs only in its log path (seq `0` here).
+A Slurm rejection is `status: "FAILED"` with `200`; a failed SSH call is an error. `stdout` and `stderr` are omitted
+when empty.
+
+### `POST /api/v1/sessions` → 201 or 200
+
+Takes `validate`'s body, checked for shape only, and records a `STOPPED` session at seq 0 without launching it. The
+ID derives from the caller and `idempotencyKey`: a new session is `201` with `Location`, a replay with the same
+fields is `200`, and the same key with different fields is `idempotency_conflict`. Answers the session record.
 
 ### `GET /api/v1/sessions` → 200 or 304
-
-The one read a client polls. It answers from persisted state, which a background reconciler keeps current, so it
-never waits on SSH. Sessions and log tails are both filtered to the caller. `If-None-Match` accepts `*`, a list,
-and weak validators; a match is `304` with no body.
 
 ```json
 {
@@ -340,58 +376,82 @@ and weak validators; a match is `304` with no body.
 }
 ```
 
-`sessions` holds session records in the shape above.
-`stream` is `status` (cs-plane's own narration), `stdout` or `stderr` (the session's startup output,
-replaced by whatever the last read returned). Lines are bounded and redacted. `at` is when the line was first
-observed here; an unchanged remote line keeps the time it was first seen.
-
-The response carries a strong `ETag` over the filtered body, so it cannot match across principals. A poll whose
-`If-None-Match` matches is answered `304 Not Modified` with no body.
+The caller's session records and log tails, from persisted state; it never waits on SSH. `stream` is `status`
+(cs-plane's narration), `stdout` or `stderr` (the job's startup output). Lines are bounded and redacted; `at` is when
+cs-plane first saw the line. A tail moves to telemetry when its run ends. The response carries a strong `ETag`;
+`If-None-Match` accepts `*`, lists and weak validators, and a match is `304` with no body.
 
 ### `GET /api/v1/sessions/{id}` → 200
 
-One session record. A session owned by another principal is `session_owner_mismatch`.
+The session record.
 
 ### `POST /api/v1/sessions/{id}/start` → 200
 
-Runs a terminal session again under the same identity: the next seq, a new tunnel, a new job. A session
-that is not terminal is `session_running`.
+Launches through Slurm. Validates the session against the host as `validate` does, then takes the next seq, a new
+Dev Tunnel, a new capability and a new job. Answers the session record.
+
+| Refusal | Code |
+| --- | --- |
+| Session not terminal, including one another `start` is launching | `409 session_running` |
+| No Dev Tunnels account linked | `409 tunnel_link_required` |
+| Slurm rejects the script | `400 slurm_validation_failed` |
+| Another launch is preparing the same host for this caller | `409 session_provisioning_in_progress` |
+| Login-node preparation fails | `502` or `504 session_provisioning_failed` |
+
+A conclusive submission failure leaves the session `FAILED` at the new seq.
 
 ### `POST /api/v1/sessions/{id}/stop` → 200
 
-Marks the session `STOPPING`, releases the session's tunnel and capability, and asks the scheduler to cancel
-the job. The response is the session record.
+Marks the session `STOPPING`, releases its tunnel and capability, and asks Slurm to cancel the job. Answers the
+session record; stopping a terminal session answers it unchanged.
 
 ### `DELETE /api/v1/sessions/{id}` → 204
 
-Removes a terminal session's record and its stored capability. A session that is not terminal is
-`409 session_not_stopped`: stop it, then delete it once the scheduler has released the job. Runs the session
-accumulated stay in telemetry.
+Removes a terminal session's record and capability; its runs stay in telemetry. A session that is not terminal is
+`409 session_not_stopped`.
+
+### `POST /api/v1/sessions/{id}/runs` → 200
+
+```json
+{
+  "createdAt": "2026-09-10T04:22:00Z",
+  "runs": [
+    { "finalState": "STOPPED", "startedAt": "2026-09-10T04:23:00Z", "endedAt": "2026-09-10T04:26:06Z",
+      "stats": { "cpuEfficiencyPct": 9.76, "memoryEfficiencyPct": 47.34 },
+      "samples": [{ "at": "2026-09-10T04:24:24Z", "memBytes": 84418560, "cpuUsageUsec": 4669597 }] }
+  ]
+}
+```
+
+Adopts runs another client finished, oldest first, into a session at seq 0 with no runs. Each run joins telemetry
+under seq 1, 2, and so on. Answers the session record with `seq` equal to the run count, the last run's state,
+`error` and `startedAt`, and `createdAt` from the body when given.
+
+| Refusal | Code |
+| --- | --- |
+| No runs, more than 50, a `finalState` other than `STOPPED` or `FAILED`, no `endedAt`, or more than 20 samples | `400 invalid_runs` |
+| Session has run or already adopted a history | `409 session_has_history` |
 
 ### `GET /api/v1/sessions/{id}/access` → 200
-
-The only route that returns a secret, and only to the owner of a `READY` session. `uri` is the session's
-direct Jupyter URI over the tunnel and `token` is Jupyter Server's own identity token; `expiresAt` is the live
-tunnel expiration, not the value recorded at creation.
 
 ```json
 {
   "sessionId": "s-012345abcdef",
   "seq": 1,
   "expiresAt": "2030-01-01T01:00:00Z",
-  "jupyter": { "uri": "https://31001.use.devtunnels.ms", "token": "<43-character token>" }
+  "jupyter": {
+    "uri": "https://31001.use.devtunnels.ms",
+    "token": "<43-character token>"
+  }
 }
 ```
 
-A session that is not `READY`, has no stored capability, or whose tunnel cannot be reached or has expired is
-`session_access_unavailable` with the reason in the message.
+The only session route that returns a secret. `uri` is the session's Jupyter URI over its Dev Tunnel, `token` is
+Jupyter Server's token, and `expiresAt` is the live tunnel expiration. A session that is not `READY`, has no stored
+capability, or whose tunnel cannot be reached or has expired is `409 session_access_unavailable`, with the reason in
+the message.
 
 ### `GET /api/v1/sessions/{id}/metrics` → 200
-
-What the session is using now, as Linkspan on the compute node reports it over the control port of the
-session's own tunnel. Samples are bounded, process-local and five seconds apart; the window holds the last
-twenty. They are deliberately not part of the poll above: they change every tick, and folding them in would
-defeat its `ETag` for exactly the sessions that have any.
 
 ```json
 {
@@ -407,18 +467,14 @@ defeat its `ETag` for exactly the sessions that have any.
 }
 ```
 
-Every figure is optional: a host with no GPUs reports none, and a cgroup file that cannot be read is absent
-rather than zero, which for a cumulative counter is a different claim. `at` is when the sample was observed
-here, so consecutive samples differentiate `cpuUsageUsec` into a rate. A session that is not running answers
-with an empty window rather than an error.
+Up to the last 20 samples, taken from Linkspan over the session's Dev Tunnel every five seconds while the session is
+`READY`; possibly empty.
+Every figure is optional: an unreadable counter is absent, not zero. `at` is when cs-plane took the sample, so
+consecutive `cpuUsageUsec` values give a rate.
 
 ## Telemetry
 
 ### `GET /api/v1/telemetry` → 200
-
-What this caller's finished sessions did, newest first and bounded. A run is named by the seq that
-ran it, so relaunching a session leaves the previous run behind rather than overwriting it, and deleting the
-session record does not remove the runs it accumulated.
 
 ```json
 {
@@ -449,73 +505,16 @@ session record does not remove the runs it accumulated.
 }
 ```
 
-The record is frozen when the session ends, carrying its final sample window and its narration with it.
-Both are process-local and dropped at that moment, so the run is the only place either survives: a session
-carries no log tail in `GET /api/v1/sessions` once its run is frozen, because what it said belongs to the
-run that said it. `logs` has the same shape as the tails on that route and is absent when it said nothing. `stats` comes from
-Slurm's own accounting and is absent until it lands: `slurmdbd` flushes step usage a beat after a job ends, so
-it is read again on the sampling tick for ten minutes and then left as it is. `samples` carries the run's last
-resource samples the same way `logs` carries its narration, and `error` names why the run ended if it did not
-end cleanly; both are absent rather than empty when there is nothing to report.
-
-## Sign-in
-
-The only routes in front of the authentication boundary. The browser runs CILogon's authorization-code flow
-with PKCE itself; these routes finish it, because CILogon's token endpoint requires the client secret, which
-only cs-plane holds. All three require an allowed `Origin` header and accept no query string. `GET` answers
-the client's configuration; the two `POST` routes take JSON and answer with `Cache-Control: no-store`.
-
-### `GET /api/v1/oauth/config` → 200
-
-```json
-{
-  "issuer": "https://cilogon.org",
-  "authorizationEndpoint": "https://cilogon.org/authorize",
-  "clientId": "cilogon:/client_id/...",
-  "scope": "openid email profile offline_access"
-}
-```
-
-The browser sends the user to `authorizationEndpoint` with `response_type=code`, this `clientId` and `scope`,
-its own `redirect_uri` on an allowed origin, a `state`, and an S256 `code_challenge`.
-
-### `POST /api/v1/oauth/exchange` → 200
-
-```json
-{ "code": "...", "codeVerifier": "...", "redirectUri": "https://jupyter.cybershuttle.org/lab/index.html" }
-```
-
-`redirectUri` must sit on an allowed origin; cs-plane adds the client secret and redeems the code at the
-issuer. The answer is the credential every other route needs:
-
-```json
-{ "idToken": "...", "refreshToken": "...", "expiresInSeconds": 900 }
-```
-
-`refreshToken` is present when the issuer granted `offline_access`. A rejected code is `400 invalid_grant`;
-an unreachable issuer is `502 upstream_unavailable`.
-
-### `POST /api/v1/oauth/refresh` → 200
-
-```json
-{ "refreshToken": "..." }
-```
-
-Answers the same shape as `exchange`, with a rotated `refreshToken` when the issuer rotates it. A refused
-refresh is `400 invalid_grant`.
-
-### `POST /api/v1/oauth/device` → 200
-
-Starts the issuer's device grant for a client that cannot receive a redirect, and answers
-`{ "deviceCode", "userCode", "verificationUriComplete", "intervalSeconds" }`. The client opens
-`verificationUriComplete` and every `intervalSeconds` posts `{ "deviceCode": "..." }` to `exchange`, which answers
-`400 authorization_pending` until the user approves and then the usual credential.
+The caller's finished runs, newest first, one per `(sessionId, seq)`; they survive relaunch and delete of the
+session. cs-plane keeps the newest 200 runs across all callers. Each run is frozen when it ends with its log tail
+(`logs`) and last metric samples (`samples`). `stats` is Slurm accounting, absent until it lands; cs-plane retries
+for ten minutes after the run ends. `account`, `error`, `startedAt`, `stats`, `samples` and `logs` are omitted when
+empty.
 
 ## Dev Tunnels link
 
-Sessions run over the caller's own Dev Tunnels account, which is a Microsoft or GitHub identity linked once
-and kept by cs-plane under the caller's principal, sealed with a key cs-plane holds. Nothing here returns
-the linked token. These routes sit behind the authentication boundary.
+A Microsoft or GitHub account, required before a session starts, that gives each run its own Dev Tunnel. The credential is stored sealed under the caller's principal and never returned. These routes need the
+bearer.
 
 ### `GET /api/v1/tunnel` → 200
 
@@ -523,18 +522,18 @@ the linked token. These routes sit behind the authentication boundary.
 { "linked": true, "provider": "github", "account": "octocat", "linkedAt": "2026-09-17T10:00:00Z" }
 ```
 
-`{ "linked": false }` when nothing is linked. `provider` is `microsoft` or `github`; `account` is the
-Microsoft username or the GitHub login when known.
+`{ "linked": false }` when nothing is linked. `provider` is `microsoft` or `github`; `account` is the Microsoft
+username or GitHub login when known.
+
+### `DELETE /api/v1/tunnel` → 204
+
+Forgets the linked credential; idempotent.
 
 ### `POST /api/v1/tunnel/authorizations` → 200
 
 ```json
 { "provider": "github" }
 ```
-
-Starts a device-code authorization with that provider's Dev Tunnels client: `microsoft` through the common
-Microsoft authority, or `github`. Any other name is `400 unknown_provider`. The answer is the device
-authorization the browser shows:
 
 ```json
 {
@@ -546,35 +545,27 @@ authorization the browser shows:
 }
 ```
 
-`handle` is cs-plane's own reference to the authorization; the device code itself never reaches the client.
-More than one start per second per caller is `429 rate_limited`.
+Starts a device-code authorization with the provider's Dev Tunnels client (`microsoft` through the common Microsoft
+authority, or `github`). `handle` is cs-plane's reference; the device code never reaches the client.
+
+| Refusal | Code |
+| --- | --- |
+| Other provider | `400 unknown_provider` |
+| More than one start per second per caller | `429 rate_limited` |
+| Too many pending authorizations | `503 broker_capacity` |
 
 ### `POST /api/v1/tunnel/authorizations/{handle}/poll` → 200
 
-Still waiting:
+| Outcome | Answer |
+| --- | --- |
+| Pending | `{ "status": "pending", "intervalSeconds": 5, "linked": false }` |
+| Linked | `{ "status": "linked", "linked": true, "provider": "microsoft", "account": "someone@outlook.com", "linkedAt": "..." }` |
 
-```json
-{ "status": "pending", "intervalSeconds": 5 }
-```
+| Refusal | Code |
+| --- | --- |
+| Unknown handle, or another caller's | `404 not_found` |
+| Poll sooner than `intervalSeconds` | `429 rate_limited` |
+| Denied | `403 authorization_denied` |
+| Expired | `410 authorization_expired` |
 
-Complete: cs-plane has stored the credential and answers what `GET /api/v1/tunnel` would.
-
-```json
-{ "linked": true, "provider": "microsoft", "account": "someone@outlook.com", "linkedAt": "..." }
-```
-
-A link keeps its refresh token and is renewed silently on use before it expires; GitHub tokens last eight
-hours and Microsoft tokens one, so neither ever surfaces as an expired credential.
-Polling faster than `intervalSeconds` is `429 rate_limited`. A denied authorization is
-`403 authorization_denied`; an expired one is `410 authorization_expired`. The handle is bound to the caller
-that started it and is discarded on any terminal outcome.
-
-### `DELETE /api/v1/tunnel` → 204
-
-Forgets the linked credential; deleting when nothing is linked is the same.
-
-### Sessions without a link
-
-`POST /api/v1/sessions` and `POST /api/v1/sessions/{id}/start` refuse with `409 tunnel_link_required` when
-the caller has no linked credential, before anything is provisioned. `POST /api/v1/sessions/validate` does
-not need one.
+The handle is discarded on any terminal outcome; a failed credential refresh is `502 upstream_unavailable`.

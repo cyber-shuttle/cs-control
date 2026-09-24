@@ -82,54 +82,54 @@ func TestSSHResourcesArePrincipalScopedAndNeverReturnPrivateKeys(t *testing.T) {
 	private := testKey(t, "secret")
 	keyBody, err := json.Marshal(sshKeyRequest{Name: "delta-key", PrivateKey: string(private)})
 	testutil.Check(t, err)
-	createdKey := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/ssh/keys", keyBody))
+	createdKey := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/keys/ssh", keyBody))
 	if createdKey.Code != http.StatusCreated || strings.Contains(createdKey.Body.String(), "PRIVATE KEY") || !strings.Contains(createdKey.Body.String(), `"fingerprint":"SHA256:`) {
 		t.Fatalf("key create = %d %s", createdKey.Code, createdKey.Body.String())
 	}
 	replacement, err := json.Marshal(sshKeyRequest{Name: "delta-key", PrivateKey: string(testKey(t, ""))})
 	testutil.Check(t, err)
-	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/ssh/keys", replacement)); response.Code != http.StatusConflict {
+	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/keys/ssh", replacement)); response.Code != http.StatusConflict {
 		t.Fatalf("key replacement = %d %s", response.Code, response.Body.String())
 	}
-	if response := testutil.Serve(handler, requestAs(otherTestPrincipal, http.MethodGet, "/api/v1/ssh/keys", nil)); strings.Contains(response.Body.String(), "delta-key") {
+	if response := testutil.Serve(handler, requestAs(otherTestPrincipal, http.MethodGet, "/api/v1/keys/ssh", nil)); strings.Contains(response.Body.String(), "delta-key") {
 		t.Fatalf("another principal saw the key: %s", response.Body.String())
 	}
-	if response := testutil.Serve(handler, requestAs(otherTestPrincipal, http.MethodPost, "/api/v1/ssh/hosts", []byte(`{"name":"delta","command":"ssh me@login.example.edu","key":"delta-key"}`))); response.Code != http.StatusNotFound {
+	if response := testutil.Serve(handler, requestAs(otherTestPrincipal, http.MethodPost, "/api/v1/hosts", []byte(`{"name":"delta","command":"ssh me@login.example.edu","keyId":"delta-key"}`))); response.Code != http.StatusNotFound {
 		t.Fatalf("another principal assigned the key: %d %s", response.Code, response.Body.String())
 	}
 
-	createdHost := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/ssh/hosts", []byte(`{"name":"delta","command":"ssh me@login.example.edu","key":"delta-key"}`)))
+	createdHost := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/hosts", []byte(`{"name":"delta","command":"ssh me@login.example.edu","keyId":"delta-key"}`)))
 	if createdHost.Code != http.StatusCreated || !strings.Contains(createdHost.Body.String(), `"managed":true`) {
 		t.Fatalf("host create = %d %s", createdHost.Code, createdHost.Body.String())
 	}
-	if response := testutil.Serve(handler, requestAs(otherTestPrincipal, http.MethodGet, "/api/v1/ssh/hosts", nil)); strings.Contains(response.Body.String(), "delta") {
+	if response := testutil.Serve(handler, requestAs(otherTestPrincipal, http.MethodGet, "/api/v1/hosts", nil)); strings.Contains(response.Body.String(), "delta") {
 		t.Fatalf("another principal saw the host: %s", response.Body.String())
 	}
-	updated := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPut, "/api/v1/ssh/hosts/delta", []byte(`{"command":"ssh -p 2222 me@login2.example.edu","key":"delta-key"}`)))
+	updated := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPut, "/api/v1/hosts/delta", []byte(`{"command":"ssh -p 2222 me@login2.example.edu","keyId":"delta-key"}`)))
 	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"hostname":"login2.example.edu"`) || !strings.Contains(updated.Body.String(), `"port":2222`) {
 		t.Fatalf("host update = %d %s", updated.Code, updated.Body.String())
 	}
-	deleted := testutil.Serve(handler, requestAs(testPrincipal, http.MethodDelete, "/api/v1/ssh/keys/delta-key", nil))
+	deleted := testutil.Serve(handler, requestAs(testPrincipal, http.MethodDelete, "/api/v1/keys/ssh/delta-key", nil))
 	if deleted.Code != http.StatusNoContent || deleted.Body.Len() != 0 {
 		t.Fatalf("key delete = %d %s", deleted.Code, deleted.Body.String())
 	}
-	listed := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/ssh/hosts", nil))
+	listed := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/hosts", nil))
 	if strings.Contains(listed.Body.String(), "delta-key") || strings.Contains(listed.Body.String(), "identityFile") {
 		t.Fatalf("key deletion left a host reference: %s", listed.Body.String())
 	}
 	if _, err := os.Stat(service.Store.sshPath(security.PrincipalDirName(testPrincipal), "delta-key")); !os.IsNotExist(err) {
 		t.Fatalf("key file survived deletion: %v", err)
 	}
-	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodDelete, "/api/v1/ssh/hosts/delta", nil)); response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodDelete, "/api/v1/hosts/delta", nil)); response.Code != http.StatusNoContent || response.Body.Len() != 0 {
 		t.Fatalf("host delete = %d %s", response.Code, response.Body.String())
 	}
-	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/ssh/hosts", nil)); strings.Contains(response.Body.String(), `"name":"delta"`) {
+	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/hosts", nil)); strings.Contains(response.Body.String(), `"name":"delta"`) {
 		t.Fatalf("deleted host remains: %s", response.Body.String())
 	}
 
 	const identity = "~/.ssh/id_ed25519"
-	createdHost = testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/ssh/hosts", []byte(`{"name":"raw","command":"ssh -i ~/.ssh/id_ed25519 me@raw.example.edu"}`)))
-	listed = testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/ssh/hosts", nil))
+	createdHost = testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/hosts", []byte(`{"name":"raw","command":"ssh -i ~/.ssh/id_ed25519 me@raw.example.edu"}`)))
+	listed = testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/hosts", nil))
 	hosts, err := service.Store.loadHosts(security.PrincipalDirName(testPrincipal))
 	testutil.Check(t, err)
 	config, err := os.ReadFile(service.Configs.ConfigPath(testPrincipal))
@@ -183,10 +183,10 @@ func TestConcurrentHostAssignmentAndKeyDeletionLeaveNoReference(t *testing.T) {
 func TestSSHAuthAndProbeExposeOnlyCanonicalSanitizedResponses(t *testing.T) {
 	service := isolatedService(t)
 	handler := serviceHandler(t, service)
-	if response := testutil.Serve(handler, httptest.NewRequest(http.MethodGet, "/api/v1/ssh/hosts/delta/auth", nil)); response.Code != http.StatusUnauthorized {
+	if response := testutil.Serve(handler, httptest.NewRequest(http.MethodGet, "/api/v1/hosts/delta/ssh", nil)); response.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated auth = %d", response.Code)
 	}
-	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/ssh/hosts/delta/auth", nil)); response.Code != http.StatusUpgradeRequired {
+	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/hosts/delta/ssh", nil)); response.Code != http.StatusUpgradeRequired {
 		t.Fatalf("non-WebSocket auth = %d", response.Code)
 	}
 	dir := t.TempDir()
@@ -210,11 +210,11 @@ exit 255
 `)
 	service.Configs.Template = internalssh.Runner{SSHBin: sshBin, Timeout: time.Second}
 	handler = serviceHandler(t, service)
-	interactive := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/ssh/hosts/delta/test", nil))
+	interactive := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/hosts/delta/test", nil))
 	if interactive.Code != http.StatusOK || !strings.Contains(interactive.Body.String(), "interactive login") {
 		t.Fatalf("interactive probe = %d %s", interactive.Code, interactive.Body.String())
 	}
-	failed := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/ssh/hosts/broken/test", nil))
+	failed := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/hosts/broken/test", nil))
 	if failed.Code != http.StatusOK || !strings.Contains(failed.Body.String(), "The SSH connection failed.") || strings.Contains(failed.Body.String(), "secret remote diagnostic") {
 		t.Fatalf("failed probe leaked output: %d %s", failed.Code, failed.Body.String())
 	}

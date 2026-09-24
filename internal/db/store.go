@@ -1,8 +1,9 @@
 // Package db owns cs-plane's Postgres connection and complete state-operation boundary. The DSN's search_path names
 // the one schema cs-plane owns, so it can share a server and database with other services. A cached handle plus a
 // state-directory file lock serialize read-modify-write cycles across processes; callers may nest a transaction
-// inside that cycle when database changes must coordinate with protected files. Feature packages own every table
-// and query. Schema DDL runs only in an empty schema; an existing one is accepted by its format marker or rejected.
+// inside that cycle when database changes must coordinate with protected files, and read single statements
+// unlocked. Feature packages own every table and query. Schema DDL runs only in an empty schema; an existing one is
+// accepted by its format marker or rejected.
 package db
 
 //go:generate sqlc generate -f ../../sqlc.yaml
@@ -131,6 +132,8 @@ func (d *DB) Locked(fn func(*sql.DB) error) error {
 	defer d.mu.Unlock()
 	return security.WithFileLock(d.lockPath, func() error { return fn(d.sql) })
 }
+
+func (d *DB) Reader() *sql.DB { return d.sql }
 
 func (d *DB) Tx(fn func(*sql.Tx) error) (err error) {
 	tx, err := d.sql.Begin()

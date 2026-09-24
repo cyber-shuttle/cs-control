@@ -18,12 +18,12 @@ import (
 
 	"github.com/cyber-shuttle/cs-plane/internal/db"
 	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
 	"github.com/cyber-shuttle/cs-plane/internal/ssh"
 	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 	"github.com/cyber-shuttle/cs-plane/subsystems/oauth"
 	"github.com/cyber-shuttle/cs-plane/subsystems/session"
 	sshapi "github.com/cyber-shuttle/cs-plane/subsystems/ssh"
-	"github.com/cyber-shuttle/cs-plane/subsystems/telemetry"
 	"github.com/cyber-shuttle/cs-plane/subsystems/tunnel"
 )
 
@@ -91,14 +91,16 @@ func TestServeComponentsAlwaysApplyOAuthBoundary(t *testing.T) {
 	const allowedOrigin = "https://workspace.example.edu"
 	svcs := testServices(t, t.TempDir())
 	svcs.DatabaseURL = testutil.Database(t)
-	authentication, err := oauth.NewService("https://custos.example.edu", defaultOIDCIssuer, "the-client-id", "the-client-secret", []string{allowedOrigin}, nil)
+	origins, err := security.NewOrigins([]string{allowedOrigin})
+	testutil.Check(t, err)
+	authentication, err := oauth.NewService("https://custos.example.edu", defaultOIDCIssuer, "the-client-id", "the-client-secret", origins, nil)
 	testutil.Check(t, err)
 	components, err := newServeComponents(svcs, authentication)
 	testutil.Check(t, err)
 	defer components.close()
 
 	upgrade := func(origin, protocols string) int {
-		request := httptest.NewRequest(http.MethodGet, "/api/v1/ssh/hosts/delta/auth", nil)
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/hosts/delta/ssh", nil)
 		for name, value := range map[string]string{"Origin": origin, "Connection": "Upgrade", "Upgrade": "websocket", "Sec-WebSocket-Protocol": protocols} {
 			request.Header.Set(name, value)
 		}
@@ -115,7 +117,6 @@ func TestCanonicalRouteManifest(t *testing.T) {
 		(&oauth.Service{}).Routes(),
 		(sshapi.Service{}).Routes(),
 		(session.Service{}).Routes(),
-		(telemetry.Service{}).Routes(),
 		(&tunnel.Service{}).Routes(),
 	}
 	if _, err := router.New(groups...); err != nil {
@@ -132,13 +133,14 @@ func TestCanonicalRouteManifest(t *testing.T) {
 		"/api/v1/oauth/exchange":                      "POST",
 		"/api/v1/oauth/refresh":                       "POST",
 		"/api/v1/oauth/device":                        "POST",
-		"/api/v1/ssh/hosts":                           "GET POST",
-		"/api/v1/ssh/hosts/{alias}":                   "DELETE PUT",
-		"/api/v1/ssh/hosts/{alias}/test":              "POST",
-		"/api/v1/ssh/hosts/{alias}/slurm":             "GET",
-		"/api/v1/ssh/hosts/{alias}/auth":              "GET",
-		"/api/v1/ssh/keys":                            "GET POST",
-		"/api/v1/ssh/keys/{name}":                     "DELETE",
+		"/api/v1/oauth/device/poll":                   "POST",
+		"/api/v1/hosts":                               "GET POST",
+		"/api/v1/hosts/{alias}":                       "DELETE PUT",
+		"/api/v1/hosts/{alias}/test":                  "POST",
+		"/api/v1/hosts/{alias}/slurm":                 "GET",
+		"/api/v1/hosts/{alias}/ssh":                   "GET",
+		"/api/v1/keys/ssh":                            "GET POST",
+		"/api/v1/keys/ssh/{id}":                       "DELETE",
 		"/api/v1/tunnel":                              "DELETE GET",
 		"/api/v1/tunnel/authorizations":               "POST",
 		"/api/v1/tunnel/authorizations/{handle}/poll": "POST",
@@ -147,6 +149,7 @@ func TestCanonicalRouteManifest(t *testing.T) {
 		"/api/v1/sessions/{id}":                       "DELETE GET",
 		"/api/v1/sessions/{id}/start":                 "POST",
 		"/api/v1/sessions/{id}/stop":                  "POST",
+		"/api/v1/sessions/{id}/runs":                  "POST",
 		"/api/v1/sessions/{id}/access":                "GET",
 		"/api/v1/sessions/{id}/metrics":               "GET",
 		"/api/v1/telemetry":                           "GET",

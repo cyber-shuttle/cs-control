@@ -19,7 +19,7 @@ func reconciliationService(t *testing.T) (Service, string, string) {
 	t.Helper()
 	service := testService(t)
 	service.now = time.Now
-	return service, os.Getenv("FAKE_COMMAND_LOG"), filepath.Join(service.store.Dir, "release")
+	return service, os.Getenv("FAKE_COMMAND_LOG"), filepath.Join(service.Store.Dir, "release")
 }
 
 func stoppingSession(id, host, jobID string) Session {
@@ -122,9 +122,9 @@ func TestReconcileDoesNotHoldStoreLockDuringSSHAndDoesNotOverwriteStop(t *testin
 	testutil.WaitForFile(t, log)
 
 	lockAvailable := make(chan error, 1)
-	go func() { lockAvailable <- service.store.locked(func(*state) error { return nil }) }()
+	go func() { lockAvailable <- service.Store.locked(func(*state) error { return nil }) }()
 	testutil.Within(t, lockAvailable, 300*time.Millisecond, "state lock was held during blocked SSH")
-	_, err := service.stop(testTunnelContext(), session.ID)
+	_, err := service.Stop(testPrincipal, session.ID)
 	testutil.Check(t, err)
 	testutil.Check(t, os.WriteFile(release, []byte("ok"), 0o600))
 	testutil.Check(t, <-done)
@@ -172,11 +172,11 @@ func TestWalltimeExpiryWithNoObservationDeletesTheCredential(t *testing.T) {
 	service, _, _ := reconciliationService(t)
 	session := runningSession(time.Now().Add(-4 * time.Hour))
 	setTestSessionMetadata(&session)
-	testutil.Check(t, putCapability(service.capabilityDir, session.ID, session.Seq, defaultSessionCapability()))
+	testutil.Check(t, putCapability(service.CapabilityDir, session.ID, session.Seq, defaultSessionCapability()))
 	putSessions(t, service, session)
 	t.Setenv("FAKE_STATUS_FAIL", "1")
 	testutil.Check(t, service.reconcileAll(context.Background()))
-	if _, err := getCapability(service.capabilityDir, session.ID, session.Seq); err == nil {
+	if _, err := getCapability(service.CapabilityDir, session.ID, session.Seq); err == nil {
 		t.Fatal("a session retired past its walltime with no observation kept its seq capability")
 	}
 }
@@ -227,7 +227,7 @@ func TestRunningSessionStaysStartingUntilItsTailHasContent(t *testing.T) {
 	}
 }
 
-func TestStaleReconciliationRoundDoesNotNarrateARelaunchedSession(t *testing.T) {
+func TestStaleReconciliationRoundDoesNotNarrateARestartedSession(t *testing.T) {
 	service, commandLog, release := reconciliationService(t)
 	t.Setenv("FAKE_STATUS_RELEASE", release)
 	session := pendingSession("s-111111111111", "alpha", "101")

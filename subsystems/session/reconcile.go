@@ -239,7 +239,7 @@ func (s Service) reconcileAll(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.store.locked(func(current *state) error {
+	return s.Store.locked(func(current *state) error {
 		changed := false
 		for i := range snapshots {
 			session := current.Sessions[snapshots[i].ID]
@@ -251,7 +251,7 @@ func (s Service) reconcileAll(ctx context.Context) error {
 			_, _ = s.freezeIfTerminal(current, session)
 		}
 		if changed {
-			return s.store.save(current)
+			return s.Store.save(current)
 		}
 		return nil
 	})

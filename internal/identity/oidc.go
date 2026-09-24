@@ -31,6 +31,8 @@ const (
 	oidcUnknownKIDCooldown = 30 * time.Second
 )
 
+const MinDeviceInterval = 5
+
 var (
 	ErrAuthorizationPending = errors.New("OIDC device authorization is pending")
 	ErrGrantRejected        = errors.New("OIDC grant was rejected")
@@ -341,7 +343,7 @@ func (v *OIDC) DeviceAuthorize(ctx context.Context, clientSecret, scope string) 
 	if err != nil || status != http.StatusOK || json.Unmarshal(body, &authorization) != nil || authorization.DeviceCode == "" {
 		return authorization, ErrTokenUnavailable
 	}
-	authorization.Interval = max(authorization.Interval, 5)
+	authorization.Interval = max(authorization.Interval, MinDeviceInterval)
 	return authorization, nil
 }
 

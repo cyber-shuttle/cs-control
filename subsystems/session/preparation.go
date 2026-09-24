@@ -1,5 +1,6 @@
 // Session preparation validates public requests against discovered Slurm resources and resolves the workspace.
 // It builds the Linkspan workflow and batch script, then performs bounded provisioning and submission operations.
+// Validate narrates into a throwaway log so a dry run never writes into a session's visible log tail.
 // Slurm framing and parsing live in internal/slurm; session policy and API error mapping remain here.
 // Secrets are composed only at the final submission boundary.
 package session
@@ -29,16 +30,13 @@ type preparedSession struct {
 	linkspan string
 }
 
-func (s Service) validate(ctx context.Context, request createRequest) (*validationResult, error) {
-	principal, err := security.PrincipalFromContext(ctx)
+func (s Service) Validate(ctx context.Context, principal security.Principal, request createRequest) (*validationResult, error) {
+	s = s.forPrincipal(principal)
+	s.logs = newSessionLogs()
+	request, err := assignSessionID(request, principal)
 	if err != nil {
 		return nil, err
 	}
-	request, err = assignSessionID(request, principal)
-	if err != nil {
-		return nil, err
-	}
-	defer s.forgetUnpersistedBuffers(request.ID)
 	prepared, err := s.prepareSession(ctx, request)
 	if err != nil {
 		return nil, err
@@ -499,7 +497,7 @@ func (s Service) prepareSession(ctx context.Context, request createRequest) (_ *
 		PrivateRoot:     privateRoot, WorkspaceRoot: workspaceRoot,
 	}
 	s.sessionStatus(request.ID, "Session preparation complete")
-	linkspan := resolveRemoteExecutable(s.linkspanExecutable, resource.HomeDir)
+	linkspan := resolveRemoteExecutable(s.LinkspanPath, resource.HomeDir)
 	return &preparedSession{session: session, script: buildScript(session, linkspan), home: resource.HomeDir, linkspan: linkspan}, nil
 }
 

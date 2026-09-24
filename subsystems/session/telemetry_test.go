@@ -273,7 +273,7 @@ const sacctRows = `12345|4|8192000K|3600|14400|||
 
 func runsIn(t *testing.T, service Service) []Run {
 	t.Helper()
-	runs, err := service.ListRuns(testPrincipal)
+	runs, err := service.Runs(testPrincipal)
 	testutil.Check(t, err)
 	return runs
 }
@@ -368,9 +368,9 @@ func TestCompleteRunStatsGivesEachPendingRunItsOwnTimeout(t *testing.T) {
 	service := newTestService(t, ssh.Runner{SSHBin: sshBin, Timeout: time.Second}, testSessionStore(t))
 	slow := runRecord{Run: Run{SessionID: "s-111111111111", Seq: 1, SSHHost: "delta", EndedAt: service.utcNow()}, Owner: testPrincipal}
 	fast := runRecord{Run: Run{SessionID: "s-222222222222", Seq: 2, SSHHost: "delta", EndedAt: service.utcNow()}, Owner: testPrincipal}
-	testutil.Check(t, service.store.locked(func(current *state) error {
+	testutil.Check(t, service.Store.locked(func(current *state) error {
 		current.Runs = []runRecord{slow, fast}
-		return service.store.save(current)
+		return service.Store.save(current)
 	}))
 
 	service.completeRunStats(context.Background())

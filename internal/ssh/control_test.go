@@ -62,7 +62,7 @@ func readAuthServerFrame(t *testing.T, connection *websocket.Conn) authTestFrame
 func dialAuth(t *testing.T, serverURL string) *websocket.Conn {
 	t.Helper()
 	header := http.Header{"Origin": {serverURL}}
-	endpoint := "ws" + strings.TrimPrefix(serverURL, "http") + "/api/v1/ssh/hosts/delta/auth"
+	endpoint := "ws" + strings.TrimPrefix(serverURL, "http") + "/api/v1/hosts/delta/ssh"
 	connection, response, err := websocket.DefaultDialer.Dial(endpoint, header)
 	if err != nil {
 		t.Fatalf("open auth websocket: %v (%v)", err, response)
@@ -102,7 +102,7 @@ func testWebSocketBoundary(next http.Handler, validate func(string) (security.Pr
 func serveSSHRoute(t *testing.T, manager *ControlManager, runner Runner) http.Handler {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/ssh/hosts/{alias}/auth", func(writer http.ResponseWriter, request *http.Request) {
+	mux.HandleFunc("GET /api/v1/hosts/{alias}/ssh", func(writer http.ResponseWriter, request *http.Request) {
 		manager.ServeWebSocket(writer, request, request.PathValue("alias"), runner)
 	})
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -179,7 +179,7 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	server.Start()
 	defer server.Close()
 
-	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/ssh/hosts/delta/auth"
+	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/hosts/delta/ssh"
 	dialer := *websocket.DefaultDialer
 	dialer.Subprotocols = []string{ControlWebSocketProtocol, "bearer." + base64.RawURLEncoding.EncodeToString([]byte(testIdentityToken))}
 	header := http.Header{"Origin": {approvedOrigin}}

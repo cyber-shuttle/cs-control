@@ -1,4 +1,5 @@
-// Tests the sign-in relay: config discovery, code exchange, refresh, and redirect-origin refusal.
+// Tests the sign-in relay: config discovery, code exchange, refresh, the device poll, redirect-origin refusal, and
+// which routes require a browser Origin.
 package oauth
 
 import (
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/cyber-shuttle/cs-plane/internal/router"
+	"github.com/cyber-shuttle/cs-plane/internal/security"
 	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
@@ -38,7 +40,9 @@ func newTestSignInRelay(t *testing.T, tokenRoute http.HandlerFunc) (http.Handler
 		}
 	}))
 	t.Cleanup(server.Close)
-	service, err := NewService(server.URL, server.URL, "the-client-id", "the-client-secret", []string{"https://workspace.example.edu"}, server.Client())
+	origins, err := security.NewOrigins([]string{"https://workspace.example.edu"})
+	testutil.Check(t, err)
+	service, err := NewService(server.URL, server.URL, "the-client-id", "the-client-secret", origins, server.Client())
 	testutil.Check(t, err)
 	routes, err := router.New(service.Routes())
 	testutil.Check(t, err)
@@ -119,7 +123,7 @@ func TestSignInRefreshRotatesTokens(t *testing.T) {
 	testutil.Equal(t, tokens.RefreshToken, "new-refresh-token", "rotated refresh token")
 }
 
-func TestDeviceSignInExchangesTheApprovedCodeWithoutABearer(t *testing.T) {
+func TestDeviceSignInPollsWithoutABearerOrAnOrigin(t *testing.T) {
 	approved := false
 	handler, _ := newTestSignInRelay(t, func(w http.ResponseWriter, r *http.Request) {
 		testutil.Check(t, r.ParseForm())
@@ -127,7 +131,6 @@ func TestDeviceSignInExchangesTheApprovedCodeWithoutABearer(t *testing.T) {
 		case r.URL.Path == "/device":
 			_, _ = w.Write([]byte(`{"device_code":"the-device-code","user_code":"QFP-7N3-VQF","verification_uri_complete":"https://issuer.example.edu/device"}`))
 		case !approved:
-			// CILogon answers a pending authorization with HTTP 400, which must not read as an upstream failure.
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"error":"authorization_pending"}`))
 		default:
@@ -136,13 +139,17 @@ func TestDeviceSignInExchangesTheApprovedCodeWithoutABearer(t *testing.T) {
 		}
 	})
 	post := func(path, body string) *httptest.ResponseRecorder {
-		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-		request.Header.Set("Origin", "https://workspace.example.edu")
-		return testutil.Serve(handler, request)
+		return testutil.Serve(handler, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
 	}
 	testutil.Equal(t, post("/api/v1/oauth/device", "").Body.String(),
 		`{"deviceCode":"the-device-code","userCode":"QFP-7N3-VQF","verificationUriComplete":"https://issuer.example.edu/device","intervalSeconds":5}`, "device")
-	testutil.Equal(t, post("/api/v1/oauth/exchange", `{"deviceCode":"the-device-code"}`).Code, http.StatusBadRequest, "pending")
+	testutil.Equal(t, post("/api/v1/oauth/device/poll", `{"deviceCode":"the-device-code"}`).Body.String(), `{"status":"pending","intervalSeconds":5}`, "pending")
+	testutil.Equal(t, post("/api/v1/oauth/exchange", `{"deviceCode":"the-device-code"}`).Code, http.StatusForbidden, "exchange without an origin")
 	approved = true
-	testutil.Equal(t, post("/api/v1/oauth/exchange", `{"deviceCode":"the-device-code"}`).Code, http.StatusOK, "approved")
+	testutil.Equal(t, post("/api/v1/oauth/device/poll", `{"deviceCode":"the-device-code"}`).Body.String(),
+		`{"status":"complete","idToken":"header.payload.signature","expiresInSeconds":3600}`, "complete")
+
+	foreign := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/device/poll", strings.NewReader(`{"deviceCode":"the-device-code"}`))
+	foreign.Header.Set("Origin", "https://evil.example")
+	testutil.Equal(t, testutil.Serve(handler, foreign).Code, http.StatusForbidden, "poll from a foreign origin")
 }

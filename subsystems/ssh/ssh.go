@@ -28,12 +28,12 @@ type Service struct {
 type addHostRequest struct {
 	Name    string `json:"name"`
 	Command string `json:"command"`
-	Key     string `json:"key"`
+	Key     string `json:"keyId"`
 }
 
 type updateHostRequest struct {
 	Command string `json:"command"`
-	Key     string `json:"key"`
+	Key     string `json:"keyId"`
 }
 
 type hostTest struct {
@@ -113,12 +113,12 @@ func (s Service) testHost(ctx context.Context, principal security.Principal, ali
 
 func (s Service) sshRoutes() router.Routes {
 	return router.Routes{
-		"/api/v1/ssh/hosts": {
+		"/api/v1/hosts": {
 			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (hostList, error) {
 				hosts, err := s.Store.loadHosts(security.PrincipalDirName(principal))
 				return hostList{Hosts: hosts}, err
 			}),
-			http.MethodPost: security.CreatedAsPrincipal(func(host hostEntry) string { return "/api/v1/ssh/hosts/" + url.PathEscape(host.Name) }, func(principal security.Principal, request *http.Request) (hostEntry, error) {
+			http.MethodPost: security.CreatedAsPrincipal(func(host hostEntry) string { return "/api/v1/hosts/" + url.PathEscape(host.Name) }, func(principal security.Principal, request *http.Request) (hostEntry, error) {
 				var body addHostRequest
 				if err := security.DecodeJSON(request, &body); err != nil {
 					return hostEntry{}, err
@@ -126,7 +126,7 @@ func (s Service) sshRoutes() router.Routes {
 				return s.addHost(principal, body)
 			}),
 		},
-		"/api/v1/ssh/hosts/{alias}": {
+		"/api/v1/hosts/{alias}": {
 			http.MethodPut: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (hostEntry, error) {
 				var body updateHostRequest
 				if err := security.DecodeJSON(request, &body); err != nil {
@@ -138,12 +138,12 @@ func (s Service) sshRoutes() router.Routes {
 				return s.removeHost(principal, request.PathValue("alias"))
 			}),
 		},
-		"/api/v1/ssh/hosts/{alias}/test": {
+		"/api/v1/hosts/{alias}/test": {
 			http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (hostTest, error) {
 				return s.testHost(request.Context(), principal, request.PathValue("alias"))
 			}),
 		},
-		"/api/v1/ssh/hosts/{alias}/auth": {
+		"/api/v1/hosts/{alias}/ssh": {
 			http.MethodGet: func(writer http.ResponseWriter, request *http.Request) {
 				principal, err := security.PrincipalFromContext(request.Context())
 				if err != nil {

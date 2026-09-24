@@ -13,7 +13,7 @@ import (
 )
 
 func TestUnclassifiedErrorDoesNotCarryItsOwnText(t *testing.T) {
-	leaky := errors.New("open /home/u/.cybershuttle/state.json: permission denied")
+	leaky := errors.New("open /home/u/.cybershuttle/control/sealing.key: permission denied")
 
 	api := For(leaky)
 

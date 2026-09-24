@@ -27,13 +27,13 @@ const (
 )
 
 var (
-	errInvalidSSHKeyName = security.New("invalid_ssh_key_name", "invalid SSH key name", http.StatusBadRequest)
+	errInvalidSSHKeyName = security.New("invalid_ssh_key_id", "invalid SSH key id", http.StatusBadRequest)
 	errSSHKeyNotFound    = security.New("ssh_key_not_found", "SSH key is not stored", http.StatusNotFound)
 	errSSHKeyExists      = security.New("ssh_key_exists", "SSH key is already stored", http.StatusConflict)
 )
 
 type sshKey struct {
-	Name        string `json:"name"`
+	Name        string `json:"id"`
 	Type        string `json:"type"`
 	Fingerprint string `json:"fingerprint"`
 }
@@ -43,7 +43,7 @@ type sshKeyList struct {
 }
 
 type sshKeyRequest struct {
-	Name       string `json:"name"`
+	Name       string `json:"id"`
 	PrivateKey string `json:"privateKey"`
 }
 
@@ -262,12 +262,12 @@ func (s Service) deleteSSHKey(principal security.Principal, name string) error {
 
 func (s Service) keyRoutes() router.Routes {
 	return router.Routes{
-		"/api/v1/ssh/keys": {
+		"/api/v1/keys/ssh": {
 			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (sshKeyList, error) {
 				keys, err := s.Store.listSSHKeys(security.PrincipalDirName(principal))
 				return sshKeyList{Keys: keys}, err
 			}),
-			http.MethodPost: security.CreatedAsPrincipal(func(key sshKey) string { return "/api/v1/ssh/keys/" + url.PathEscape(key.Name) }, func(principal security.Principal, request *http.Request) (sshKey, error) {
+			http.MethodPost: security.CreatedAsPrincipal(func(key sshKey) string { return "/api/v1/keys/ssh/" + url.PathEscape(key.Name) }, func(principal security.Principal, request *http.Request) (sshKey, error) {
 				var body sshKeyRequest
 				if err := security.DecodeJSON(request, &body); err != nil {
 					return sshKey{}, err
@@ -275,9 +275,9 @@ func (s Service) keyRoutes() router.Routes {
 				return s.writeSSHKey(principal, body.Name, []byte(body.PrivateKey))
 			}),
 		},
-		"/api/v1/ssh/keys/{name}": {
+		"/api/v1/keys/ssh/{id}": {
 			http.MethodDelete: security.NoContentAsPrincipal(func(principal security.Principal, request *http.Request) error {
-				return s.deleteSSHKey(principal, request.PathValue("name"))
+				return s.deleteSSHKey(principal, request.PathValue("id"))
 			}),
 		},
 	}

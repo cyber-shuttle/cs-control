@@ -100,7 +100,7 @@ func readyAccessSession(now time.Time) Session {
 func accessTestService(t *testing.T, manager TunnelManager, now time.Time) Service {
 	t.Helper()
 	service := newTestService(t, ssh.Runner{}, testSessionStore(t))
-	service.tunnelManager, service.capabilityDir, service.now = manager, t.TempDir()+"/credentials", func() time.Time { return now }
+	service.TunnelManager, service.CapabilityDir, service.now = manager, t.TempDir()+"/credentials", func() time.Time { return now }
 	return service
 }
 
@@ -110,7 +110,7 @@ func TestCreateSessionTunnelPersistsCapabilityOnlyInPrivateCredential(t *testing
 	session := pendingSession("s-012345abcdef", "delta", "")
 	record, jupyterToken, err := service.createSessionTunnel(context.Background(), &session, testPrincipal, devtunnel.Credential{Scheme: "Bearer", Token: "oauth-token"}, 1)
 	testutil.Check(t, err)
-	stored, err := getCapability(service.capabilityDir, session.ID, session.Seq)
+	stored, err := getCapability(service.CapabilityDir, session.ID, session.Seq)
 	if err != nil || stored.ConnectToken != record.ConnectToken {
 		t.Fatalf("private capability = %#v, %v", stored, err)
 	}
@@ -157,7 +157,7 @@ func TestSessionAccessFollowsTheLiveTunnelExpiration(t *testing.T) {
 				Ports: []devtunnel.PortRecord{{PortNumber: ports(session.ID, session.Seq).Jupyter, Protocol: "http", PortForwardingURIs: []string{"https://31001.use.devtunnels.ms/"}}},
 			}}
 			service := accessTestService(t, manager, now)
-			testutil.Check(t, putCapability(service.capabilityDir, session.ID, session.Seq, defaultSessionCapability()))
+			testutil.Check(t, putCapability(service.CapabilityDir, session.ID, session.Seq, defaultSessionCapability()))
 			access, err := service.sessionAccess(context.Background(), session)
 			var expiresAt time.Time
 			if err == nil {
@@ -182,7 +182,7 @@ func TestCreateSessionTunnelCompensatesUncertainCreateError(t *testing.T) {
 	credentialDir := t.TempDir()
 	testutil.Check(t, os.Chmod(credentialDir, 0o700))
 	service := accessTestService(t, manager, time.Now())
-	service.capabilityDir = credentialDir
+	service.CapabilityDir = credentialDir
 	_, _, err := service.createSessionTunnel(context.Background(), &session, security.Principal{Subject: "owner", Tenant: "tenant"}, devtunnel.Credential{Scheme: "Bearer", Token: oauth}, 1)
 	if err == nil || strings.Contains(err.Error(), oauth) || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("create/cleanup error = %v", err)
