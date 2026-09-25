@@ -12,8 +12,8 @@ import (
 	"github.com/cyber-shuttle/cs-plane/internal/testutil"
 )
 
-func newHostRecord(name string) hostEntry {
-	return hostEntry{Name: name, Hostname: name + ".example.edu", User: "alice", Port: 22, ExtraDirectives: []string{}, Managed: true}
+func newHostRecord(name string) HostEntry {
+	return HostEntry{Name: name, Hostname: name + ".example.edu", User: "alice", Port: 22, ExtraDirectives: []string{}, Managed: true}
 }
 
 func TestSSHHostsArePrincipalIsolatedAndRenderPrivateConfigs(t *testing.T) {
@@ -49,7 +49,7 @@ func TestSSHHostsArePrincipalIsolatedAndRenderPrivateConfigs(t *testing.T) {
 
 func TestReconcileRestoresStoredConfigsAndEmptiesOrphans(t *testing.T) {
 	service := isolatedService(t)
-	_, err := service.addHost(testPrincipal, addHostRequest{Name: "delta", Command: "ssh alice@login.example.edu"})
+	_, err := service.addHost(testPrincipal, AddHostRequest{Name: "delta", Command: "ssh alice@login.example.edu"})
 	testutil.Check(t, err)
 	path := service.Configs.ConfigPath(testPrincipal)
 	testutil.Check(t, os.WriteFile(path, []byte("stale"), 0o600))
@@ -74,7 +74,7 @@ func TestKeyDeletionRollsBackMetadataReferencesAndFileWhenConfigWriteFails(t *te
 	service := isolatedService(t)
 	_, err := service.writeSSHKey(testPrincipal, "delta-key", testKey(t, ""))
 	testutil.Check(t, err)
-	_, err = service.addHost(testPrincipal, addHostRequest{Name: "delta", Command: "ssh login.example.edu", Key: "delta-key"})
+	_, err = service.addHost(testPrincipal, AddHostRequest{Name: "delta", Command: "ssh login.example.edu", Key: "delta-key"})
 	testutil.Check(t, err)
 
 	target := t.TempDir()

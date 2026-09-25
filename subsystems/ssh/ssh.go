@@ -28,18 +28,18 @@ type Service struct {
 	Control *internalssh.ControlManager
 }
 
-type addHostRequest struct {
+type AddHostRequest struct {
 	Name    string `json:"name"`
 	Command string `json:"command"`
 	Key     string `json:"keyId"`
 }
 
-type updateHostRequest struct {
+type UpdateHostRequest struct {
 	Command string `json:"command"`
 	Key     string `json:"keyId"`
 }
 
-type hostHealth struct {
+type HostHealth struct {
 	Host    string `json:"host"`
 	OK      bool   `json:"ok"`
 	Message string `json:"message"`
@@ -66,7 +66,7 @@ func NewService(database *db.DB, configs internalssh.Configurations, control *in
 	return service, nil
 }
 
-func hostWithCredential(alias, command, key string) (hostEntry, error) {
+func hostWithCredential(alias, command, key string) (HostEntry, error) {
 	host, err := parseCommand(alias, command)
 	if err != nil {
 		return host, err
@@ -75,18 +75,18 @@ func hostWithCredential(alias, command, key string) (hostEntry, error) {
 	return host, nil
 }
 
-func (s Service) addHost(principal security.Principal, request addHostRequest) (hostEntry, error) {
+func (s Service) addHost(principal security.Principal, request AddHostRequest) (HostEntry, error) {
 	host, err := hostWithCredential(strings.TrimSpace(request.Name), request.Command, request.Key)
 	if err != nil {
-		return hostEntry{}, err
+		return HostEntry{}, err
 	}
 	return s.Store.addHost(security.PrincipalDirName(principal), s.Configs.ConfigPath(principal), host)
 }
 
-func (s Service) updateHost(principal security.Principal, alias string, request updateHostRequest) (hostEntry, error) {
+func (s Service) updateHost(principal security.Principal, alias string, request UpdateHostRequest) (HostEntry, error) {
 	host, err := hostWithCredential(alias, request.Command, request.Key)
 	if err != nil {
-		return hostEntry{}, err
+		return HostEntry{}, err
 	}
 	return s.Store.updateHost(security.PrincipalDirName(principal), s.Configs.ConfigPath(principal), host)
 }
@@ -106,42 +106,42 @@ var dialHealth = (&net.Dialer{Control: func(_, address string, _ syscall.RawConn
 	return nil
 }}).DialContext
 
-func (s Service) hostHealth(ctx context.Context, principal security.Principal, alias string) (hostHealth, error) {
+func (s Service) hostHealth(ctx context.Context, principal security.Principal, alias string) (HostHealth, error) {
 	runner := s.Configs.Runner(principal)
 	ctx, cancel := context.WithTimeout(ctx, runner.EffectiveTimeout())
 	defer cancel()
 	address, err := runner.FirstHop(ctx, alias)
 	if err != nil {
-		return hostHealth{}, err
+		return HostHealth{}, err
 	}
 	conn, err := dialHealth(ctx, "tcp", address)
 	if err != nil {
-		return hostHealth{Host: alias, Message: "Nothing accepted a connection at " + address + "."}, nil
+		return HostHealth{Host: alias, Message: "Nothing accepted a connection at " + address + "."}, nil
 	}
 	_ = conn.Close()
-	return hostHealth{Host: alias, OK: true, Message: "Listening at " + address + "."}, nil
+	return HostHealth{Host: alias, OK: true, Message: "Listening at " + address + "."}, nil
 }
 
 func (s Service) sshRoutes() router.Routes {
 	return router.Routes{
 		"/api/v1/hosts": {
-			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (hostList, error) {
+			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (HostList, error) {
 				hosts, err := s.Store.loadHosts(security.PrincipalDirName(principal))
-				return hostList{Hosts: hosts}, err
+				return HostList{Hosts: hosts}, err
 			}),
-			http.MethodPost: security.CreatedAsPrincipal(func(host hostEntry) string { return "/api/v1/hosts/" + url.PathEscape(host.Name) }, func(principal security.Principal, request *http.Request) (hostEntry, error) {
-				var body addHostRequest
+			http.MethodPost: security.CreatedAsPrincipal(func(host HostEntry) string { return "/api/v1/hosts/" + url.PathEscape(host.Name) }, func(principal security.Principal, request *http.Request) (HostEntry, error) {
+				var body AddHostRequest
 				if err := security.DecodeJSON(request, &body); err != nil {
-					return hostEntry{}, err
+					return HostEntry{}, err
 				}
 				return s.addHost(principal, body)
 			}),
 		},
 		"/api/v1/hosts/{alias}": {
-			http.MethodPut: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (hostEntry, error) {
-				var body updateHostRequest
+			http.MethodPut: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (HostEntry, error) {
+				var body UpdateHostRequest
 				if err := security.DecodeJSON(request, &body); err != nil {
-					return hostEntry{}, err
+					return HostEntry{}, err
 				}
 				return s.updateHost(principal, request.PathValue("alias"), body)
 			}),
@@ -150,7 +150,7 @@ func (s Service) sshRoutes() router.Routes {
 			}),
 		},
 		"/api/v1/hosts/{alias}/health": {
-			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (hostHealth, error) {
+			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (HostHealth, error) {
 				return s.hostHealth(request.Context(), principal, request.PathValue("alias"))
 			}),
 		},

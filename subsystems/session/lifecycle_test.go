@@ -214,8 +214,8 @@ func testService(t *testing.T) Service {
 	return service
 }
 
-func newTestCreateRequest() createRequest {
-	return createRequest{ID: "s-012345abcdef", IdempotencyKey: "request-one", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}, TunnelModes: []string{modeDevtunnel, modeWebsocket}}
+func newTestCreateRequest() CreateRequest {
+	return CreateRequest{ID: "s-012345abcdef", IdempotencyKey: "request-one", SSHHost: "delta", Account: "project-a", Partition: "cpu", RootFolder: "projects/example", Resources: Resources{Cores: 4, MemoryMB: 4096, WallMinutes: 60}, TunnelModes: []string{modeDevtunnel, modeWebsocket}}
 }
 
 func TestSessionLifecycleUsesManagedLinkspanAndSeparateRoots(t *testing.T) {
@@ -310,7 +310,7 @@ func TestOnlyTheDevtunnelModeMakesATunnelAndItNeedsALinkedAccount(t *testing.T) 
 	body, err := json.Marshal(request)
 	testutil.Check(t, err)
 	defined := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/sessions", body))
-	var created sessionResponse
+	var created SessionResponse
 	_ = json.Unmarshal(defined.Body.Bytes(), &created)
 	for path, body := range map[string][]byte{"/api/v1/sessions/validate": body, "/api/v1/sessions/" + created.ID + "/start": nil} {
 		if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, path, body)); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"tunnel_link_required"`) {
@@ -551,7 +551,7 @@ func putSessions(t *testing.T, service Service, sessions ...Session) {
 func pendingSession(id, host, jobID string) Session {
 	now := time.Unix(1, 0).UTC()
 	return Session{
-		sessionResponse: sessionResponse{ID: id, State: "QUEUED", SSHHost: host, Partition: "cpu", RootFolder: ".", Resources: resources{Cores: 1, MemoryMB: 1024, WallMinutes: 60}, CreatedAt: now, UpdatedAt: now},
+		SessionResponse: SessionResponse{ID: id, State: "QUEUED", SSHHost: host, Partition: "cpu", RootFolder: ".", Resources: Resources{Cores: 1, MemoryMB: 1024, WallMinutes: 60}, CreatedAt: now, UpdatedAt: now},
 		JobID:           jobID, JobName: jobName(id, 1), PrivateRoot: "/home/test/.cybershuttle/sessions/" + id, WorkspaceRoot: "/home/test", Owner: testPrincipal,
 	}
 }
@@ -703,7 +703,7 @@ func TestStartRunsTheFinishedSessionOnTheSameSession(t *testing.T) {
 		t.Fatalf("unexpected relaunched session: %#v", started)
 	}
 	if !started.CreatedAt.Equal(terminal.CreatedAt) || !started.UpdatedAt.After(terminal.UpdatedAt) {
-		t.Fatalf("relaunch must keep the session's creation time and move it forward: %#v", started.sessionResponse)
+		t.Fatalf("relaunch must keep the session's creation time and move it forward: %#v", started.SessionResponse)
 	}
 	if len(tunnels.deletes) != 1 || tunnels.deletes[0].TunnelID != created.ID+"-"+strconv.Itoa(terminal.Seq) {
 		t.Fatalf("the finished run's tunnel was not released: %#v", tunnels.deletes)
@@ -812,11 +812,11 @@ func TestRunAgainSurvivesAReconciliationAgainstTheFinishedRun(t *testing.T) {
 	testutil.Check(t, <-errs)
 	relaunched := <-result
 	if relaunched.State != "QUEUED" || relaunched.JobID != "67890" {
-		t.Fatalf("the submitted relaunch was not queued: %#v (job %q)", relaunched.sessionResponse, relaunched.JobID)
+		t.Fatalf("the submitted relaunch was not queued: %#v (job %q)", relaunched.SessionResponse, relaunched.JobID)
 	}
 }
 
-func defineAndStart(ctx context.Context, service Service, request createRequest) (*Session, error) {
+func defineAndStart(ctx context.Context, service Service, request CreateRequest) (*Session, error) {
 	session, _, err := service.Define(testPrincipal, request)
 	if err != nil {
 		return nil, err
@@ -831,7 +831,7 @@ func TestAttachAdmitsAClientLaunchedRunThatNeverReachesTheScheduler(t *testing.T
 	session, _, err := service.Define(testPrincipal, newTestCreateRequest())
 	testutil.Check(t, err)
 	response := testutil.Serve(serviceHandler(t, &service), requestAs(testPrincipal, http.MethodPost, "/api/v1/sessions/"+session.ID+"/attach", []byte(`{"tunnelModes":["websocket"]}`)))
-	var attached attachResponse
+	var attached AttachResponse
 	_ = json.Unmarshal(response.Body.Bytes(), &attached)
 	if response.Code != http.StatusOK || attached.Session.State != "QUEUED" || attached.Session.Launcher != launcherClient || attached.Session.Seq != 1 || attached.Link == nil || attached.Devtunnel != nil || !slices.Equal(attached.Session.TunnelModes, []string{modeWebsocket}) {
 		t.Fatalf("attach = %d %#v", response.Code, attached.Session)

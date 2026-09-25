@@ -33,14 +33,14 @@ func hostNotFound(alias string) error {
 	return security.New("ssh_host_not_found", "\""+alias+"\" is not configured", http.StatusNotFound)
 }
 
-func hostsIn(queries *Queries, principal string) ([]hostEntry, error) {
+func hostsIn(queries *Queries, principal string) ([]HostEntry, error) {
 	rows, err := queries.ListHosts(background, principal)
 	if err != nil {
 		return nil, err
 	}
-	hosts := make([]hostEntry, 0, len(rows))
+	hosts := make([]HostEntry, 0, len(rows))
 	for _, row := range rows {
-		host, err := db.DecodePayload(row.Payload, func(h hostEntry) bool { return h.Name == row.Host }, "SSH host "+row.Host)
+		host, err := db.DecodePayload(row.Payload, func(h HostEntry) bool { return h.Name == row.Host }, "SSH host "+row.Host)
 		if err != nil {
 			return nil, err
 		}
@@ -49,7 +49,7 @@ func hostsIn(queries *Queries, principal string) ([]hostEntry, error) {
 	return hosts, nil
 }
 
-func replaceHost(queries *Queries, principal string, host hostEntry) error {
+func replaceHost(queries *Queries, principal string, host HostEntry) error {
 	payload, err := json.Marshal(host)
 	if err != nil {
 		return err
@@ -61,9 +61,9 @@ func replaceHost(queries *Queries, principal string, host hostEntry) error {
 	return err
 }
 
-func (s Store) renderConfig(principal string, hosts []hostEntry) []byte {
+func (s Store) renderConfig(principal string, hosts []HostEntry) []byte {
 	lines := make([]string, 0, len(hosts))
-	for _, host := range slices.SortedFunc(slices.Values(hosts), func(a, b hostEntry) int { return strings.Compare(a.Name, b.Name) }) {
+	for _, host := range slices.SortedFunc(slices.Values(hosts), func(a, b HostEntry) int { return strings.Compare(a.Name, b.Name) }) {
 		lines = append(lines, host.stanza(s.sshPath(principal, host.Key))...)
 	}
 	return []byte(strings.Join(lines, "\n"))
@@ -78,8 +78,8 @@ func (s Store) locked(fn func(*Queries) error) error {
 	return s.Database.Locked(func(database *sql.DB) error { return fn(New(database)) })
 }
 
-func (s Store) loadHosts(principal string) ([]hostEntry, error) {
-	var hosts []hostEntry
+func (s Store) loadHosts(principal string) ([]HostEntry, error) {
+	var hosts []HostEntry
 	return hosts, s.locked(func(queries *Queries) error {
 		var err error
 		hosts, err = hostsIn(queries, principal)
@@ -171,21 +171,21 @@ func (s Store) mutateHosts(principal, path string, mutate func(*Queries) error, 
 	})
 }
 
-func (s Store) resolveSSHCredential(queries *Queries, principal string, host hostEntry) (hostEntry, error) {
+func (s Store) resolveSSHCredential(queries *Queries, principal string, host HostEntry) (HostEntry, error) {
 	if host.Key == "" {
 		return host, nil
 	}
 	if _, found, err := keyMetadata(queries, principal, host.Key); err != nil {
-		return hostEntry{}, err
+		return HostEntry{}, err
 	} else if !found {
-		return hostEntry{}, errSSHKeyNotFound
+		return HostEntry{}, errSSHKeyNotFound
 	}
 	return host, nil
 }
 
 // putHost resolves the host's key reference, then stores the resolved entry with store inside one config mutation.
-func (s Store) putHost(principal, configPath string, host hostEntry, store func(*Queries, hostEntry) error) (hostEntry, error) {
-	var resolved hostEntry
+func (s Store) putHost(principal, configPath string, host HostEntry, store func(*Queries, HostEntry) error) (HostEntry, error) {
+	var resolved HostEntry
 	err := s.mutateHosts(principal, configPath, func(queries *Queries) error {
 		var err error
 		if resolved, err = s.resolveSSHCredential(queries, principal, host); err != nil {
@@ -196,8 +196,8 @@ func (s Store) putHost(principal, configPath string, host hostEntry, store func(
 	return resolved, err
 }
 
-func (s Store) addHost(principal, configPath string, host hostEntry) (hostEntry, error) {
-	return s.putHost(principal, configPath, host, func(queries *Queries, resolved hostEntry) error {
+func (s Store) addHost(principal, configPath string, host HostEntry) (HostEntry, error) {
+	return s.putHost(principal, configPath, host, func(queries *Queries, resolved HostEntry) error {
 		payload, err := json.Marshal(resolved)
 		if err != nil {
 			return err
@@ -210,8 +210,8 @@ func (s Store) addHost(principal, configPath string, host hostEntry) (hostEntry,
 	})
 }
 
-func (s Store) updateHost(principal, configPath string, host hostEntry) (hostEntry, error) {
-	return s.putHost(principal, configPath, host, func(queries *Queries, resolved hostEntry) error {
+func (s Store) updateHost(principal, configPath string, host HostEntry) (HostEntry, error) {
+	return s.putHost(principal, configPath, host, func(queries *Queries, resolved HostEntry) error {
 		return replaceHost(queries, principal, resolved)
 	})
 }

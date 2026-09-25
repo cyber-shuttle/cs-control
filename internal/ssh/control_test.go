@@ -38,7 +38,7 @@ func waitProcessGone(t *testing.T, pid int) {
 }
 
 type authTestFrame struct {
-	serverFrame
+	ServerFrame
 	Output []byte
 }
 
@@ -48,15 +48,15 @@ func readAuthServerFrame(t *testing.T, connection *websocket.Conn) authTestFrame
 	messageType, data, err := connection.ReadMessage()
 	testutil.Check(t, err)
 	if messageType == websocket.BinaryMessage {
-		return authTestFrame{serverFrame: serverFrame{Type: "output"}, Output: data}
+		return authTestFrame{ServerFrame: ServerFrame{Type: "output"}, Output: data}
 	}
 	testutil.Equal(t, messageType, websocket.TextMessage, "auth WebSocket message type")
-	var frame serverFrame
+	var frame ServerFrame
 	testutil.Check(t, json.Unmarshal(data, &frame))
 	if frame.Type == "output" {
 		t.Fatal("auth output must use binary WebSocket messages")
 	}
-	return authTestFrame{serverFrame: frame}
+	return authTestFrame{ServerFrame: frame}
 }
 
 func dialAuth(t *testing.T, serverURL string) *websocket.Conn {
@@ -211,7 +211,7 @@ func TestSSHAuthWebSocketPromptReuseSingleFlightAndCleanup(t *testing.T) {
 	}
 	_ = secondResponse.Body.Close()
 
-	testutil.Check(t, connection.WriteJSON(clientFrame{Type: "resize", Cols: 120, Rows: 40}))
+	testutil.Check(t, connection.WriteJSON(ClientFrame{Type: "resize", Cols: 120, Rows: 40}))
 	secret := []byte("correct horse battery staple\n")
 	testutil.Check(t, connection.WriteMessage(websocket.BinaryMessage, secret))
 	ready, exited := false, false

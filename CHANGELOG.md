@@ -5,6 +5,11 @@ Notable changes to CyberShuttle Plane. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The request and response types of the API and the SSH login frames are exported, so clients generate their
+  TypeScript types from them with tygo. JSON shapes are unchanged.
+
 ### Fixed
 
 - An expired SSH login while preparing a session answers `409 ssh_authentication_required` instead of

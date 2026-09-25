@@ -30,7 +30,7 @@ type preparedSession struct {
 	linkspan string
 }
 
-func (s Service) Validate(ctx context.Context, principal security.Principal, request createRequest) (*validationResult, error) {
+func (s Service) Validate(ctx context.Context, principal security.Principal, request CreateRequest) (*ValidationResult, error) {
 	s = s.forPrincipal(principal)
 	s.logs = newSessionLogs()
 	request, err := assignSessionID(request, principal)
@@ -52,7 +52,7 @@ func (s Service) Validate(ctx context.Context, principal security.Principal, req
 	if result.Passed {
 		status = "PASSED"
 	}
-	return &validationResult{
+	return &ValidationResult{
 		SessionID: prepared.session.ID,
 		Script:    prepared.script,
 		Status:    status,
@@ -66,16 +66,16 @@ func invalidRootFolder(message string) error {
 	return security.New("invalid_root_folder", message, http.StatusBadRequest)
 }
 
-func resourcesFit(resources resources, partition partition) bool {
+func resourcesFit(resources Resources, partition Partition) bool {
 	return resources.Cores <= partition.CPUCount && resources.MemoryMB <= partition.MemoryMB
 }
 
-func hasGPU(partition partition) bool {
-	return slices.ContainsFunc(partition.GRES, func(g gres) bool { return g.Name == "gpu" || strings.HasPrefix(g.Name, "gpu:") })
+func hasGPU(partition Partition) bool {
+	return slices.ContainsFunc(partition.GRES, func(g Gres) bool { return g.Name == "gpu" || strings.HasPrefix(g.Name, "gpu:") })
 }
 
-func gpuSupports(partition partition, gpuType string, gpuCount int) bool {
-	return slices.ContainsFunc(partition.GRES, func(g gres) bool {
+func gpuSupports(partition Partition, gpuType string, gpuCount int) bool {
+	return slices.ContainsFunc(partition.GRES, func(g Gres) bool {
 		return g.Count >= gpuCount && (g.Name == "gpu" || strings.TrimPrefix(g.Name, "gpu:") == gpuType)
 	})
 }
@@ -108,23 +108,23 @@ func safeWorkspaceSuffix(value string) bool {
 	return true
 }
 
-func validatePartitionResources(values []partition, name string, resources resources) error {
-	matches := slices.DeleteFunc(slices.Clone(values), func(p partition) bool { return p.Name != name })
+func validatePartitionResources(values []Partition, name string, resources Resources) error {
+	matches := slices.DeleteFunc(slices.Clone(values), func(p Partition) bool { return p.Name != name })
 	if len(matches) == 0 {
 		return security.New("invalid_partition", "Slurm partition was not discovered for this host", http.StatusBadRequest)
 	}
-	fits := func(p partition) bool { return resourcesFit(resources, p) }
+	fits := func(p Partition) bool { return resourcesFit(resources, p) }
 	gpuRequested := resources.GPUCount != 0 || resources.GPUType != ""
 	if gpuRequested && (resources.GPUCount < 1 || !security.SafeName(resources.GPUType, 64)) {
 		return security.New("invalid_gpu", "gpuType and positive gpuCount must be supplied together", http.StatusBadRequest)
 	}
 	if !gpuRequested {
-		if slices.ContainsFunc(matches, func(p partition) bool { return !hasGPU(p) && fits(p) }) {
+		if slices.ContainsFunc(matches, func(p Partition) bool { return !hasGPU(p) && fits(p) }) {
 			return nil
 		}
 		return security.New("invalid_resource", "no CPU variant of the selected partition supports the requested resources", http.StatusBadRequest)
 	}
-	supported := slices.DeleteFunc(matches, func(p partition) bool { return !gpuSupports(p, resources.GPUType, resources.GPUCount) })
+	supported := slices.DeleteFunc(matches, func(p Partition) bool { return !gpuSupports(p, resources.GPUType, resources.GPUCount) })
 	switch {
 	case slices.ContainsFunc(supported, fits):
 		return nil
@@ -176,7 +176,7 @@ func canonicalTunnelModes(modes []string) ([]string, error) {
 	return modes, nil
 }
 
-func validateCreate(request *createRequest) (err error) {
+func validateCreate(request *CreateRequest) (err error) {
 	if request.ID == "" && request.IdempotencyKey == "" {
 		return security.New("invalid_idempotency_key", "idempotencyKey is required", http.StatusBadRequest)
 	}
@@ -225,23 +225,23 @@ func validateWorkspacePrivateLayout(home, workspace, privateRoot, sessionID, exp
 	return invalidRootFolder("workspace may contain private session state only at $HOME/.cybershuttle/sessions/{sessionId}")
 }
 
-func (s Service) discover(ctx context.Context, alias string) (resource, error) {
+func (s Service) discover(ctx context.Context, alias string) (Resource, error) {
 	discovered, err := slurm.Discover(ctx, s.runner, alias)
 	if failure, ok := errors.AsType[*slurm.DiscoveryError](err); ok {
-		return resource{}, security.New("slurm_discovery_failed", failure.Error(), http.StatusBadGateway)
+		return Resource{}, security.New("slurm_discovery_failed", failure.Error(), http.StatusBadGateway)
 	}
 	if err != nil {
-		return resource{}, err
+		return Resource{}, err
 	}
-	partitions := make([]partition, len(discovered.Partitions))
+	partitions := make([]Partition, len(discovered.Partitions))
 	for index, discovered := range discovered.Partitions {
-		values := make([]gres, len(discovered.GRES))
+		values := make([]Gres, len(discovered.GRES))
 		for resourceIndex, value := range discovered.GRES {
-			values[resourceIndex] = gres{Name: value.Name, Count: value.Count}
+			values[resourceIndex] = Gres{Name: value.Name, Count: value.Count}
 		}
-		partitions[index] = partition{Name: discovered.Name, CPUCount: discovered.CPUCount, MemoryMB: discovered.MemoryMB, GRES: values}
+		partitions[index] = Partition{Name: discovered.Name, CPUCount: discovered.CPUCount, MemoryMB: discovered.MemoryMB, GRES: values}
 	}
-	return resource{Host: alias, Accounts: discovered.Accounts, Partitions: partitions, HomeDir: discovered.Home}, nil
+	return Resource{Host: alias, Accounts: discovered.Accounts, Partitions: partitions, HomeDir: discovered.Home}, nil
 }
 
 const provisionTimeout = 5 * time.Minute
@@ -473,7 +473,7 @@ func (s Service) provisionSession(alias string, session Session, home, linkspan 
 	return nil
 }
 
-func (s Service) prepareSession(ctx context.Context, request createRequest) (_ *preparedSession, resultErr error) {
+func (s Service) prepareSession(ctx context.Context, request CreateRequest) (_ *preparedSession, resultErr error) {
 	s.sessionStatus(request.ID, "Preparing session")
 	defer func() {
 		if resultErr != nil {
@@ -506,7 +506,7 @@ func (s Service) prepareSession(ctx context.Context, request createRequest) (_ *
 		return nil, err
 	}
 	session := Session{
-		sessionResponse: sessionResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources, TunnelModes: request.TunnelModes},
+		SessionResponse: SessionResponse{ID: request.ID, SSHHost: request.SSHHost, Account: request.Account, Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources, TunnelModes: request.TunnelModes},
 		PrivateRoot:     privateRoot, WorkspaceRoot: workspaceRoot,
 	}
 	s.sessionStatus(request.ID, "Session preparation complete")

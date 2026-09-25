@@ -39,13 +39,13 @@ var (
 	authKeepAlive    = 20 * time.Second
 )
 
-type clientFrame struct {
+type ClientFrame struct {
 	Type string `json:"type"`
 	Cols uint16 `json:"cols,omitempty"`
 	Rows uint16 `json:"rows,omitempty"`
 }
 
-type serverFrame struct {
+type ServerFrame struct {
 	Type    string `json:"type"`
 	Code    *int   `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
@@ -53,7 +53,7 @@ type serverFrame struct {
 
 type authInputOp struct {
 	data   []byte
-	resize *clientFrame
+	resize *ClientFrame
 }
 
 type authAttempt struct {
@@ -90,8 +90,8 @@ type ControlManager struct {
 	wg     sync.WaitGroup
 }
 
-func exitFrame(code int, message string) serverFrame {
-	return serverFrame{Type: "exit", Code: &code, Message: message}
+func exitFrame(code int, message string) ServerFrame {
+	return ServerFrame{Type: "exit", Code: &code, Message: message}
 }
 
 func pumpPTY(ctx context.Context, master io.Reader, out chan<- []byte, size int) {
@@ -148,11 +148,11 @@ func cleanupFailedAttempt(attempt *authAttempt) {
 }
 
 func writeReady(conn *websocket.Conn) {
-	_ = writeJSON(conn, authWriteTimeout, serverFrame{Type: "ready"})
+	_ = writeJSON(conn, authWriteTimeout, ServerFrame{Type: "ready"})
 	_ = writeJSON(conn, authWriteTimeout, exitFrame(0, ""))
 }
 
-func masterExitFrame(err error) serverFrame {
+func masterExitFrame(err error) ServerFrame {
 	if err == nil {
 		return exitFrame(1, "SSH control master exited before becoming ready")
 	}
@@ -191,7 +191,7 @@ func readClientFrames(attempt *authAttempt, conn *websocket.Conn, input chan<- a
 					return
 				}
 			case websocket.TextMessage:
-				var frame clientFrame
+				var frame ClientFrame
 				if err := json.Unmarshal(data, &frame); err != nil {
 					return
 				}

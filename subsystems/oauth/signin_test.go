@@ -55,7 +55,7 @@ func TestSignInConfigAnswersCanonicalRoute(t *testing.T) {
 	request.Header.Set("Origin", "https://workspace.example.edu")
 	response := testutil.Serve(handler, request)
 	testutil.Equal(t, response.Code, http.StatusOK, "config status")
-	var body oauthConfigResponse
+	var body OAuthConfigResponse
 	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &body))
 	testutil.Equal(t, body.Issuer, server.URL, "issuer")
 	testutil.Equal(t, body.AuthorizationEndpoint, server.URL+"/authorize", "authorization endpoint")
@@ -87,7 +87,7 @@ func TestSignInExchangeRedeemsACode(t *testing.T) {
 	request.Header.Set("Origin", "https://workspace.example.edu")
 	response := testutil.Serve(handler, request)
 	testutil.Equal(t, response.Code, http.StatusOK, "exchange status")
-	var tokens tokenResponse
+	var tokens TokenResponse
 	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &tokens))
 	testutil.Equal(t, tokens.IDToken, "header.payload.signature", "id token")
 	testutil.Equal(t, tokens.RefreshToken, "a-refresh-token", "refresh token")
@@ -118,7 +118,7 @@ func TestSignInRefreshRotatesTokens(t *testing.T) {
 	request.Header.Set("Origin", "https://workspace.example.edu")
 	response := testutil.Serve(handler, request)
 	testutil.Equal(t, response.Code, http.StatusOK, "refresh status")
-	var tokens tokenResponse
+	var tokens TokenResponse
 	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &tokens))
 	testutil.Equal(t, tokens.RefreshToken, "new-refresh-token", "rotated refresh token")
 }

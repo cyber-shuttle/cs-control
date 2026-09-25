@@ -32,17 +32,17 @@ var (
 	errSSHKeyExists      = security.New("ssh_key_exists", "SSH key is already stored", http.StatusConflict)
 )
 
-type sshKey struct {
+type SSHKey struct {
 	Name        string `json:"id"`
 	Type        string `json:"type"`
 	Fingerprint string `json:"fingerprint"`
 }
 
-type sshKeyList struct {
-	Keys []sshKey `json:"keys"`
+type SSHKeyList struct {
+	Keys []SSHKey `json:"keys"`
 }
 
-type sshKeyRequest struct {
+type SSHKeyRequest struct {
 	Name       string `json:"id"`
 	PrivateKey string `json:"privateKey"`
 }
@@ -55,20 +55,20 @@ func (s Store) sshPath(principal, name string) string {
 	return filepath.Join(s.PrincipalDir, principal, "keys", name)
 }
 
-func keyMetadata(queries *Queries, principal, name string) (sshKey, bool, error) {
+func keyMetadata(queries *Queries, principal, name string) (SSHKey, bool, error) {
 	row, err := queries.GetKey(background, GetKeyParams{Principal: principal, Name: name})
 	if errors.Is(err, sql.ErrNoRows) {
-		return sshKey{}, false, nil
+		return SSHKey{}, false, nil
 	}
-	return sshKey(row), err == nil, err
+	return SSHKey(row), err == nil, err
 }
 
-func (s Store) listSSHKeys(principal string) ([]sshKey, error) {
-	keys := []sshKey{}
+func (s Store) listSSHKeys(principal string) ([]SSHKey, error) {
+	keys := []SSHKey{}
 	return keys, s.locked(func(queries *Queries) error {
 		rows, err := queries.ListKeys(background, principal)
 		for _, row := range rows {
-			keys = append(keys, sshKey(row))
+			keys = append(keys, SSHKey(row))
 		}
 		return err
 	})
@@ -170,7 +170,7 @@ func (s Store) recoverSSHChanges() error {
 	})
 }
 
-func (s Store) putSSHKey(principal string, key sshKey, private []byte) error {
+func (s Store) putSSHKey(principal string, key SSHKey, private []byte) error {
 	return s.locked(func(queries *Queries) error {
 		if _, exists, err := keyMetadata(queries, principal, key.Name); err != nil {
 			return err
@@ -239,16 +239,16 @@ func (s Store) stageSSHDelete(principal, name string) (func(bool) error, error) 
 	}, nil
 }
 
-func (s Service) writeSSHKey(principal security.Principal, name string, private []byte) (sshKey, error) {
+func (s Service) writeSSHKey(principal security.Principal, name string, private []byte) (SSHKey, error) {
 	name = strings.TrimSpace(name)
 	if !validSSHKeyName(name) {
-		return sshKey{}, errInvalidSSHKeyName
+		return SSHKey{}, errInvalidSSHKeyName
 	}
 	metadata, err := internalssh.InspectPrivateKey(private)
 	if err != nil {
-		return sshKey{}, security.New("invalid_ssh_key", "The file is not an SSH private key.", http.StatusBadRequest)
+		return SSHKey{}, security.New("invalid_ssh_key", "The file is not an SSH private key.", http.StatusBadRequest)
 	}
-	key := sshKey{Name: name, Type: metadata.Type, Fingerprint: metadata.Fingerprint}
+	key := SSHKey{Name: name, Type: metadata.Type, Fingerprint: metadata.Fingerprint}
 	private = append(bytes.TrimRight(private, "\r\n"), '\n')
 	return key, s.Store.putSSHKey(security.PrincipalDirName(principal), key, private)
 }
@@ -263,14 +263,14 @@ func (s Service) deleteSSHKey(principal security.Principal, name string) error {
 func (s Service) keyRoutes() router.Routes {
 	return router.Routes{
 		"/api/v1/keys/ssh": {
-			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (sshKeyList, error) {
+			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (SSHKeyList, error) {
 				keys, err := s.Store.listSSHKeys(security.PrincipalDirName(principal))
-				return sshKeyList{Keys: keys}, err
+				return SSHKeyList{Keys: keys}, err
 			}),
-			http.MethodPost: security.CreatedAsPrincipal(func(key sshKey) string { return "/api/v1/keys/ssh/" + url.PathEscape(key.Name) }, func(principal security.Principal, request *http.Request) (sshKey, error) {
-				var body sshKeyRequest
+			http.MethodPost: security.CreatedAsPrincipal(func(key SSHKey) string { return "/api/v1/keys/ssh/" + url.PathEscape(key.Name) }, func(principal security.Principal, request *http.Request) (SSHKey, error) {
+				var body SSHKeyRequest
 				if err := security.DecodeJSON(request, &body); err != nil {
-					return sshKey{}, err
+					return SSHKey{}, err
 				}
 				return s.writeSSHKey(principal, body.Name, []byte(body.PrivateKey))
 			}),

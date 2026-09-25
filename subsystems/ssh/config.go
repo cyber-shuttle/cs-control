@@ -18,7 +18,7 @@ import (
 	"github.com/cyber-shuttle/cs-plane/internal/ssh"
 )
 
-type hostEntry struct {
+type HostEntry struct {
 	Name            string   `json:"name"`
 	Hostname        string   `json:"hostname,omitempty"`
 	User            string   `json:"user,omitempty"`
@@ -28,11 +28,11 @@ type hostEntry struct {
 	Managed         bool     `json:"managed"`
 }
 
-type hostList struct {
-	Hosts []hostEntry `json:"hosts"`
+type HostList struct {
+	Hosts []HostEntry `json:"hosts"`
 }
 
-func (h hostEntry) stanza(identityFile string) []string {
+func (h HostEntry) stanza(identityFile string) []string {
 	config := map[string][]string{}
 	add := func(key, value string) { config[key] = append(config[key], value) }
 	if h.Hostname != "" {
@@ -102,15 +102,15 @@ func option(key, value string) (string, error) {
 	return key + " " + value, nil
 }
 
-func parseCommand(name, command string) (hostEntry, error) {
+func parseCommand(name, command string) (HostEntry, error) {
 	if !ssh.ValidAlias(name) {
-		return hostEntry{}, ssh.ErrInvalidAlias
+		return HostEntry{}, ssh.ErrInvalidAlias
 	}
 	fields := strings.Fields(command)
 	if len(fields) > 0 && strings.EqualFold(filepath.Base(fields[0]), "ssh") {
 		fields = fields[1:]
 	}
-	host := hostEntry{Name: name, Port: 22, ExtraDirectives: []string{}}
+	host := HostEntry{Name: name, Port: 22, ExtraDirectives: []string{}}
 	target := ""
 	for index := 0; index < len(fields); index++ {
 		field := fields[index]
@@ -119,18 +119,18 @@ func parseCommand(name, command string) (hostEntry, error) {
 		}
 		if !strings.HasPrefix(field, "-") {
 			if target != "" {
-				return hostEntry{}, invalid("Remove the remote command; the entry describes the connection only.")
+				return HostEntry{}, invalid("Remove the remote command; the entry describes the connection only.")
 			}
 			target = field
 			continue
 		}
 		if len(field) < 2 || !strings.ContainsRune("plJo", rune(field[1])) {
-			return hostEntry{}, invalid(fmt.Sprintf("%s is not supported here. Keep the command to the host, user, port, jump host, and -o options; keys are added under /keys/ssh and chosen by keyId.", field))
+			return HostEntry{}, invalid(fmt.Sprintf("%s is not supported here. Keep the command to the host, user, port, jump host, and -o options; keys are added under /keys/ssh and chosen by keyId.", field))
 		}
 		value := field[2:]
 		if value == "" {
 			if index+1 >= len(fields) {
-				return hostEntry{}, invalid(fmt.Sprintf("%s expects a value.", field))
+				return HostEntry{}, invalid(fmt.Sprintf("%s expects a value.", field))
 			}
 			index++
 			value = fields[index]
@@ -140,7 +140,7 @@ func parseCommand(name, command string) (hostEntry, error) {
 		case 'p':
 			host.Port, err = strconv.Atoi(value)
 			if err != nil || host.Port < 1 || host.Port > 65535 {
-				return hostEntry{}, invalid(fmt.Sprintf("%q is not a port.", value))
+				return HostEntry{}, invalid(fmt.Sprintf("%q is not a port.", value))
 			}
 		case 'l':
 			host.User, err = validText("user name", value)
@@ -154,27 +154,27 @@ func parseCommand(name, command string) (hostEntry, error) {
 				key, setting, found = strings.Cut(value, " ")
 			}
 			if !found {
-				return hostEntry{}, invalid(fmt.Sprintf("%q is not an ssh option.", value))
+				return HostEntry{}, invalid(fmt.Sprintf("%q is not an ssh option.", value))
 			}
 			canonical, ok := allowedOptions[strings.ToLower(strings.TrimSpace(key))]
 			if !ok {
-				return hostEntry{}, invalid(fmt.Sprintf("%s cannot be set from a pasted command.", strings.TrimSpace(key)))
+				return HostEntry{}, invalid(fmt.Sprintf("%s cannot be set from a pasted command.", strings.TrimSpace(key)))
 			}
 			var directive string
 			directive, err = option(canonical, strings.TrimSpace(setting))
 			host.ExtraDirectives = append(host.ExtraDirectives, directive)
 		}
 		if err != nil {
-			return hostEntry{}, err
+			return HostEntry{}, err
 		}
 	}
 	if target == "" {
-		return hostEntry{}, invalid("The command names no host.")
+		return HostEntry{}, invalid("The command names no host.")
 	}
 	var err error
 	if user, hostname, found := strings.Cut(target, "@"); found {
 		if host.User, err = validText("user name", user); err != nil {
-			return hostEntry{}, err
+			return HostEntry{}, err
 		}
 		target = hostname
 	}

@@ -82,13 +82,13 @@ func TestSSHResourcesArePrincipalScopedAndNeverReturnPrivateKeys(t *testing.T) {
 	service := isolatedService(t)
 	handler := serviceHandler(t, service)
 	private := testKey(t, "secret")
-	keyBody, err := json.Marshal(sshKeyRequest{Name: "delta-key", PrivateKey: string(private)})
+	keyBody, err := json.Marshal(SSHKeyRequest{Name: "delta-key", PrivateKey: string(private)})
 	testutil.Check(t, err)
 	createdKey := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/keys/ssh", keyBody))
 	if createdKey.Code != http.StatusCreated || strings.Contains(createdKey.Body.String(), "PRIVATE KEY") || !strings.Contains(createdKey.Body.String(), `"fingerprint":"SHA256:`) {
 		t.Fatalf("key create = %d %s", createdKey.Code, createdKey.Body.String())
 	}
-	replacement, err := json.Marshal(sshKeyRequest{Name: "delta-key", PrivateKey: string(testKey(t, ""))})
+	replacement, err := json.Marshal(SSHKeyRequest{Name: "delta-key", PrivateKey: string(testKey(t, ""))})
 	testutil.Check(t, err)
 	if response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/keys/ssh", replacement)); response.Code != http.StatusConflict {
 		t.Fatalf("key replacement = %d %s", response.Code, response.Body.String())
@@ -141,14 +141,14 @@ func TestConcurrentHostAssignmentAndKeyDeletionLeaveNoReference(t *testing.T) {
 		_, err := service.writeSSHKey(testPrincipal, name, private)
 		testutil.Check(t, err)
 		start := make(chan struct{})
-		var assigned hostEntry
+		var assigned HostEntry
 		var assignedErr, deletedErr error
 		var wait sync.WaitGroup
 		wait.Add(2)
 		go func() {
 			defer wait.Done()
 			<-start
-			assigned, assignedErr = service.addHost(testPrincipal, addHostRequest{Name: name, Command: "ssh login.example.edu", Key: name})
+			assigned, assignedErr = service.addHost(testPrincipal, AddHostRequest{Name: name, Command: "ssh login.example.edu", Key: name})
 		}()
 		go func() {
 			defer wait.Done()

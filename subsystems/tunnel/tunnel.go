@@ -50,14 +50,14 @@ type tunnelLink struct {
 	LinkedAt     time.Time `json:"linkedAt"`
 }
 
-type tunnelLinkStatus struct {
+type TunnelLinkStatus struct {
 	Linked   bool      `json:"linked"`
 	Provider string    `json:"provider,omitempty"`
 	Account  string    `json:"account,omitempty"`
 	LinkedAt time.Time `json:"linkedAt,omitzero"`
 }
 
-type tunnelLinkStart struct {
+type TunnelLinkStart struct {
 	Handle           string `json:"handle"`
 	UserCode         string `json:"userCode"`
 	VerificationURI  string `json:"verificationUri"`
@@ -65,13 +65,13 @@ type tunnelLinkStart struct {
 	IntervalSeconds  int64  `json:"intervalSeconds"`
 }
 
-type tunnelLinkPoll struct {
+type TunnelLinkPoll struct {
 	Status          string `json:"status"`
 	IntervalSeconds int64  `json:"intervalSeconds,omitempty"`
-	tunnelLinkStatus
+	TunnelLinkStatus
 }
 
-type startLinkRequest struct {
+type StartLinkRequest struct {
 	Provider string `json:"provider"`
 }
 
@@ -94,8 +94,8 @@ type Service struct {
 	now                func() time.Time
 }
 
-func (l tunnelLink) status() tunnelLinkStatus {
-	return tunnelLinkStatus{Linked: true, Provider: l.Provider, Account: l.Account, LinkedAt: l.LinkedAt}
+func (l tunnelLink) status() TunnelLinkStatus {
+	return TunnelLinkStatus{Linked: true, Provider: l.Provider, Account: l.Account, LinkedAt: l.LinkedAt}
 }
 
 func (s *Service) withCredentialLock(principal security.Principal, fn func() error) error {
@@ -202,35 +202,35 @@ func authorizationError(err error) error {
 	}
 }
 
-func (s *Service) status(principal security.Principal) (tunnelLinkStatus, error) {
+func (s *Service) status(principal security.Principal) (TunnelLinkStatus, error) {
 	link, ok, err := s.loadLink(principal)
 	if err != nil || !ok {
-		return tunnelLinkStatus{}, err
+		return TunnelLinkStatus{}, err
 	}
 	return link.status(), nil
 }
 
-func (s *Service) start(ctx context.Context, principal security.Principal, providerName string) (tunnelLinkStart, error) {
+func (s *Service) start(ctx context.Context, principal security.Principal, providerName string) (TunnelLinkStart, error) {
 	if !s.authorizer.Supports(providerName) {
-		return tunnelLinkStart{}, authorizationError(devtunnel.ErrUnknownProvider)
+		return TunnelLinkStart{}, authorizationError(devtunnel.ErrUnknownProvider)
 	}
 	now := s.now()
 	s.mu.Lock()
 	s.cleanupLocked(now)
 	if now.Before(s.nextPrincipalStart[principal]) {
 		s.mu.Unlock()
-		return tunnelLinkStart{}, security.New("rate_limited", "request rate exceeded", http.StatusTooManyRequests)
+		return TunnelLinkStart{}, security.New("rate_limited", "request rate exceeded", http.StatusTooManyRequests)
 	}
 	if len(s.entries) >= maxLinkBrokerEntries {
 		s.mu.Unlock()
-		return tunnelLinkStart{}, security.New("broker_capacity", "authorization service is busy", http.StatusServiceUnavailable)
+		return TunnelLinkStart{}, security.New("broker_capacity", "authorization service is busy", http.StatusServiceUnavailable)
 	}
 	s.nextPrincipalStart[principal] = now.Add(linkStartInterval)
 	s.mu.Unlock()
 
 	authorization, err := s.authorizer.Start(ctx, providerName)
 	if err != nil {
-		return tunnelLinkStart{}, authorizationError(err)
+		return TunnelLinkStart{}, authorizationError(err)
 	}
 	rawHandle := make([]byte, 32)
 	_, _ = rand.Read(rawHandle)
@@ -244,19 +244,19 @@ func (s *Service) start(ctx context.Context, principal security.Principal, provi
 	if len(s.entries) >= maxLinkBrokerEntries {
 		s.mu.Unlock()
 		authorization.Clear()
-		return tunnelLinkStart{}, security.New("broker_capacity", "authorization service is busy", http.StatusServiceUnavailable)
+		return TunnelLinkStart{}, security.New("broker_capacity", "authorization service is busy", http.StatusServiceUnavailable)
 	}
 	s.entries[handle] = entry
 	s.mu.Unlock()
-	return tunnelLinkStart{
+	return TunnelLinkStart{
 		Handle: handle, UserCode: authorization.UserCode, VerificationURI: authorization.VerificationURI,
 		ExpiresInSeconds: int64(authorization.ExpiresIn / time.Second), IntervalSeconds: int64(authorization.Interval / time.Second),
 	}, nil
 }
 
-func (s *Service) poll(ctx context.Context, principal security.Principal, handle string) (result tunnelLinkPoll, err error) {
+func (s *Service) poll(ctx context.Context, principal security.Principal, handle string) (result TunnelLinkPoll, err error) {
 	if !linkHandlePattern.MatchString(handle) {
-		return tunnelLinkPoll{}, security.New("not_found", "authorization was not found", http.StatusNotFound)
+		return TunnelLinkPoll{}, security.New("not_found", "authorization was not found", http.StatusNotFound)
 	}
 	err = s.withCredentialLock(principal, func() error {
 		result, err = s.pollCredentialLocked(ctx, principal, handle)
@@ -265,22 +265,22 @@ func (s *Service) poll(ctx context.Context, principal security.Principal, handle
 	return result, err
 }
 
-func (s *Service) pollCredentialLocked(ctx context.Context, principal security.Principal, handle string) (tunnelLinkPoll, error) {
+func (s *Service) pollCredentialLocked(ctx context.Context, principal security.Principal, handle string) (TunnelLinkPoll, error) {
 	now := s.now()
 	s.mu.Lock()
 	entry, ok := s.entries[handle]
 	if !ok || entry.principal != principal {
 		s.mu.Unlock()
-		return tunnelLinkPoll{}, security.New("not_found", "authorization was not found", http.StatusNotFound)
+		return TunnelLinkPoll{}, security.New("not_found", "authorization was not found", http.StatusNotFound)
 	}
 	if !now.Before(entry.expiresAt) {
 		s.deleteLocked(handle)
 		s.mu.Unlock()
-		return tunnelLinkPoll{}, security.New("authorization_expired", "authorization expired", http.StatusGone)
+		return TunnelLinkPoll{}, security.New("authorization_expired", "authorization expired", http.StatusGone)
 	}
 	if now.Before(entry.nextPoll) {
 		s.mu.Unlock()
-		return tunnelLinkPoll{}, security.New("rate_limited", "polling too quickly", http.StatusTooManyRequests)
+		return TunnelLinkPoll{}, security.New("rate_limited", "polling too quickly", http.StatusTooManyRequests)
 	}
 	authorization, remaining := entry.authorization, entry.expiresAt.Sub(now)
 	s.mu.Unlock()
@@ -288,11 +288,11 @@ func (s *Service) pollCredentialLocked(ctx context.Context, principal security.P
 	result, err := s.authorizer.Poll(ctx, authorization, remaining)
 	if err != nil {
 		s.finishPoll(handle, true, 0)
-		return tunnelLinkPoll{}, authorizationError(err)
+		return TunnelLinkPoll{}, authorizationError(err)
 	}
 	if result.Pending {
 		interval := s.finishPoll(handle, false, result.SlowDown)
-		return tunnelLinkPoll{Status: "pending", IntervalSeconds: int64(interval / time.Second)}, nil
+		return TunnelLinkPoll{Status: "pending", IntervalSeconds: int64(interval / time.Second)}, nil
 	}
 	s.finishPoll(handle, true, 0)
 	now = s.now()
@@ -304,9 +304,9 @@ func (s *Service) pollCredentialLocked(ctx context.Context, principal security.P
 		link.ExpiresAt = now.Add(result.Tokens.ExpiresIn)
 	}
 	if err = s.saveLink(principal, link); err != nil {
-		return tunnelLinkPoll{}, err
+		return TunnelLinkPoll{}, err
 	}
-	return tunnelLinkPoll{Status: "linked", tunnelLinkStatus: link.status()}, nil
+	return TunnelLinkPoll{Status: "linked", TunnelLinkStatus: link.status()}, nil
 }
 
 func (s *Service) Credential(ctx context.Context, principal security.Principal) (result devtunnel.Credential, err error) {
@@ -382,7 +382,7 @@ func newService(stateDir, principalDir string, box *security.SecretBox, authoriz
 func (s *Service) Routes() router.Routes {
 	return router.Routes{
 		"/api/v1/tunnel": {
-			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (tunnelLinkStatus, error) {
+			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (TunnelLinkStatus, error) {
 				return s.status(principal)
 			}),
 			http.MethodDelete: security.NoContentAsPrincipal(func(principal security.Principal, _ *http.Request) error {
@@ -390,16 +390,16 @@ func (s *Service) Routes() router.Routes {
 			}),
 		},
 		"/api/v1/tunnel/authorizations": {
-			http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (tunnelLinkStart, error) {
-				var body startLinkRequest
+			http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (TunnelLinkStart, error) {
+				var body StartLinkRequest
 				if err := security.DecodeJSON(request, &body); err != nil {
-					return tunnelLinkStart{}, err
+					return TunnelLinkStart{}, err
 				}
 				return s.start(request.Context(), principal, body.Provider)
 			}),
 		},
 		"/api/v1/tunnel/authorizations/{handle}/poll": {
-			http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (tunnelLinkPoll, error) {
+			http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (TunnelLinkPoll, error) {
 				return s.poll(request.Context(), principal, request.PathValue("handle"))
 			}),
 		},
