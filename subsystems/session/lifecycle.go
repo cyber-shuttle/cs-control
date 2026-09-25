@@ -468,20 +468,6 @@ func (s Service) abandonSubmitIntent(credential devtunnel.Credential, intent Ses
 	return errors.Join(compensateErr, stateErr)
 }
 
-type FinishedRun struct {
-	FinalState string         `json:"finalState"`
-	Error      string         `json:"error,omitempty"`
-	StartedAt  time.Time      `json:"startedAt,omitzero"`
-	EndedAt    time.Time      `json:"endedAt"`
-	Stats      *RunStats      `json:"stats,omitempty"`
-	Samples    []MetricSample `json:"samples,omitempty"`
-}
-
-type SessionHistory struct {
-	CreatedAt time.Time     `json:"createdAt,omitzero"`
-	Runs      []FinishedRun `json:"runs"`
-}
-
 func (s Service) Define(principal security.Principal, request CreateRequest) (*Session, bool, error) {
 	request, err := assignSessionID(request, principal)
 	if err != nil {

@@ -18,20 +18,6 @@ import (
 	"github.com/cyber-shuttle/cs-plane/internal/ssh"
 )
 
-type HostEntry struct {
-	Name            string   `json:"name"`
-	Hostname        string   `json:"hostname,omitempty"`
-	User            string   `json:"user,omitempty"`
-	Port            int      `json:"port,omitempty"`
-	Key             string   `json:"keyId,omitempty"`
-	ExtraDirectives []string `json:"extraDirectives"`
-	Managed         bool     `json:"managed"`
-}
-
-type HostList struct {
-	Hosts []HostEntry `json:"hosts"`
-}
-
 func (h HostEntry) stanza(identityFile string) []string {
 	config := map[string][]string{}
 	add := func(key, value string) { config[key] = append(config[key], value) }

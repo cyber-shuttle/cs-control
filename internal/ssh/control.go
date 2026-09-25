@@ -39,18 +39,6 @@ var (
 	authKeepAlive    = 20 * time.Second
 )
 
-type ClientFrame struct {
-	Type string `json:"type"`
-	Cols uint16 `json:"cols,omitempty"`
-	Rows uint16 `json:"rows,omitempty"`
-}
-
-type ServerFrame struct {
-	Type    string `json:"type"`
-	Code    *int   `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
-}
-
 type authInputOp struct {
 	data   []byte
 	resize *ClientFrame
