@@ -5,6 +5,11 @@ Notable changes to CyberShuttle Plane. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- An expired SSH login while preparing a session answers `409 ssh_authentication_required` instead of
+  `502 session_provisioning_failed`.
+
 ## [0.3.0] - 2026-09-24
 
 ### Changed
