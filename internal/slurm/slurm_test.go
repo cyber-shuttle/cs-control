@@ -5,6 +5,7 @@ package slurm
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,15 +46,26 @@ if [ "$1" = "-G" ]; then
   exit 0
 fi
 for command; do :; done
+printf '%s\n' "$command" >> "$FAKE_ARGV"
 case "$FAKE_SLURM_MODE" in
   check) printf 'job would run\n' ;;
-  submit) printf '8123;cluster\n' ;;
+  submit) eval "set -- $command"; PATH="$FAKE_BIN:$PATH" exec "$@" ;;
   fail) printf '%s\n' "$command" >&2; exit 255 ;;
   reject) printf '%s\n' "$command" >&2; exit 1 ;;
 esac
 `
 	testutil.WriteScript(t, bin, script)
+	testutil.WriteScript(t, filepath.Join(filepath.Dir(bin), "sbatch"), `#!/bin/sh
+{ printf '%s|%s\n' "$*" "$TOKEN"; cat; } > "$FAKE_SBATCH_LOG"
+printf '8123;cluster\n'
+`)
+	sbatchLog, argv := filepath.Join(t.TempDir(), "sbatch"), filepath.Join(t.TempDir(), "argv")
+	t.Setenv("FAKE_BIN", filepath.Dir(bin))
+	t.Setenv("FAKE_SBATCH_LOG", sbatchLog)
+	t.Setenv("FAKE_ARGV", argv)
 	runner := ssh.Runner{SSHBin: bin, Timeout: time.Second}
+	const secret = "it's top-secret"
+	read := func(path string) string { data, _ := os.ReadFile(path); return string(data) }
 
 	t.Setenv("FAKE_SLURM_MODE", "check")
 	checked, err := Check(context.Background(), runner, "delta", "#!/bin/sh\ntrue\n")
@@ -62,21 +74,27 @@ esac
 	}
 
 	t.Setenv("FAKE_SLURM_MODE", "submit")
-	jobID, err := Submit(context.Background(), runner, "delta", SubmitRequest{JobName: "cs-session", Script: "#!/bin/sh\ntrue\n", Environment: map[string]string{"TOKEN": "top-secret", "PORT": "20000"}})
+	jobID, err := Submit(context.Background(), runner, "delta", SubmitRequest{JobName: "cs-session", Script: "#!/bin/sh\ntrue\n", Environment: map[string]string{"TOKEN": secret, "PORT": "20000"}})
 	if err != nil || jobID != "8123" {
 		t.Fatalf("submit = %q, %v", jobID, err)
 	}
+	if got, want := read(sbatchLog), "--job-name=cs-session --export=ALL --parsable|"+secret+"\n#!/bin/sh\ntrue\n"; got != want {
+		t.Fatalf("sbatch saw %q, want %q", got, want)
+	}
 
 	t.Setenv("FAKE_SLURM_MODE", "fail")
-	_, err = Submit(context.Background(), runner, "delta", SubmitRequest{JobName: "cs-session", Script: "#!/bin/sh\ntrue\n", Environment: map[string]string{"TOKEN": "top-secret"}})
-	if !AmbiguousSubmission(err) || strings.Contains(err.Error(), "top-secret") {
+	_, err = Submit(context.Background(), runner, "delta", SubmitRequest{JobName: "cs-session", Script: "#!/bin/sh\ntrue\n", Environment: map[string]string{"TOKEN": secret}})
+	if !AmbiguousSubmission(err) || strings.Contains(err.Error(), secret) {
 		t.Fatalf("ambiguous submit error leaked its environment: %v", err)
 	}
 
 	t.Setenv("FAKE_SLURM_MODE", "reject")
-	_, err = Submit(context.Background(), runner, "delta", SubmitRequest{JobName: "cs-session", Script: "#!/bin/sh\ntrue\n", Environment: map[string]string{"TOKEN": "top-secret"}})
-	if err == nil || AmbiguousSubmission(err) || strings.Contains(err.Error(), "top-secret") {
+	_, err = Submit(context.Background(), runner, "delta", SubmitRequest{JobName: "cs-session", Script: "#!/bin/sh\ntrue\n", Environment: map[string]string{"TOKEN": secret}})
+	if err == nil || AmbiguousSubmission(err) || strings.Contains(err.Error(), secret) {
 		t.Fatalf("conclusive submit error = %v", err)
+	}
+	if strings.Contains(read(argv), "top-secret") {
+		t.Fatalf("a submission put its environment on the command line:\n%s", read(argv))
 	}
 }
 
