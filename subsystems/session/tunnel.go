@@ -176,7 +176,7 @@ func (s Service) reachable(session Session) (sessionCapability, error) {
 	return sessionCapability{}, security.New("session_access_unavailable", "Session access is unavailable: "+reason, http.StatusConflict)
 }
 
-func (s Service) Access(principal security.Principal, id string) (*sessionAccessResponse, error) {
+func (s Service) Access(principal security.Principal, id string) (*SessionAccessResponse, error) {
 	session, err := s.Get(principal, id)
 	if err != nil {
 		return nil, err
@@ -185,9 +185,9 @@ func (s Service) Access(principal security.Principal, id string) (*sessionAccess
 	if err != nil {
 		return nil, err
 	}
-	return &sessionAccessResponse{
+	return &SessionAccessResponse{
 		SessionID: session.ID, Seq: session.Seq, ExpiresAt: cmp.Or(session.StartedAt, s.utcNow()).Add(time.Duration(session.Resources.WallMinutes) * time.Minute),
-		Jupyter: sessionJupyterAccess{URI: s.PublicURL + "/api/v1/sessions/" + session.ID + "/jupyter/", Token: capability.JupyterToken},
+		Jupyter: SessionJupyterAccess{URI: s.PublicURL + "/api/v1/sessions/" + session.ID + "/jupyter/", Token: capability.JupyterToken},
 	}, nil
 }
 

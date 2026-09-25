@@ -23,7 +23,7 @@ import (
 	"github.com/cyber-shuttle/cs-plane/internal/slurm"
 )
 
-func assignSessionID(request createRequest, principal security.Principal) (createRequest, error) {
+func assignSessionID(request CreateRequest, principal security.Principal) (CreateRequest, error) {
 	if err := validateCreate(&request); err != nil {
 		return request, err
 	}
@@ -37,7 +37,7 @@ func assignSessionID(request createRequest, principal security.Principal) (creat
 	return request, nil
 }
 
-func sameCreateRequest(session *Session, request createRequest) bool {
+func sameCreateRequest(session *Session, request CreateRequest) bool {
 	return session.SSHHost == request.SSHHost && session.Account == request.Account && session.Partition == request.Partition && session.RootFolder == request.RootFolder && session.Resources == request.Resources && slices.Equal(session.TunnelModes, request.TunnelModes)
 }
 
@@ -52,7 +52,7 @@ func (s Service) tunnelCredential(ctx context.Context, principal security.Princi
 	return credential, err
 }
 
-func (s Service) launch(ctx context.Context, principal security.Principal, request createRequest) (_ *Session, resultErr error) {
+func (s Service) launch(ctx context.Context, principal security.Principal, request CreateRequest) (_ *Session, resultErr error) {
 	defer func() {
 		if resultErr != nil {
 			s.forgetUnpersistedBuffers(request.ID)
@@ -75,7 +75,7 @@ func (s Service) serialized(id string, fn func() error) error {
 	return security.WithFileLock(filepath.Join(s.Store.Dir, fmt.Sprintf(".session-create-%02x.lock", slot)), fn)
 }
 
-func (s Service) launchSerialized(ctx context.Context, request createRequest, principal security.Principal) (*Session, error) {
+func (s Service) launchSerialized(ctx context.Context, request CreateRequest, principal security.Principal) (*Session, error) {
 	credential, err := s.tunnelCredential(ctx, principal, request.TunnelModes)
 	if err != nil {
 		return nil, err
@@ -190,7 +190,7 @@ func (s Service) persistSubmitIntent(previous *Session, intent Session) error {
 	})
 }
 
-func (s Service) validateForCreate(ctx context.Context, request createRequest, script string) error {
+func (s Service) validateForCreate(ctx context.Context, request CreateRequest, script string) error {
 	s.sessionStatus(request.ID, "Validating session with Slurm")
 	checked, err := slurm.Check(ctx, s.runner, request.SSHHost, script)
 	if err == nil && !checked.Passed {
@@ -280,13 +280,13 @@ func (s Service) Start(ctx context.Context, principal security.Principal, id str
 	if err != nil {
 		return nil, err
 	}
-	return s.launch(ctx, principal, createRequest{
+	return s.launch(ctx, principal, CreateRequest{
 		ID: id, SSHHost: session.SSHHost, Account: session.Account,
 		Partition: session.Partition, RootFolder: session.RootFolder, Resources: session.Resources, TunnelModes: session.TunnelModes,
 	})
 }
 
-func (s Service) Attach(ctx context.Context, principal security.Principal, id string, modes []string) (*attachResponse, error) {
+func (s Service) Attach(ctx context.Context, principal security.Principal, id string, modes []string) (*AttachResponse, error) {
 	previous, err := s.retireFinished(ctx, principal, id)
 	if err != nil {
 		return nil, err
@@ -316,12 +316,12 @@ func (s Service) Attach(ctx context.Context, principal security.Principal, id st
 		return nil, err
 	}
 	s.sessionStatus(id, "Waiting for the client's Linkspan to connect")
-	response := &attachResponse{Session: intent.sessionResponse}
+	response := &AttachResponse{Session: intent.SessionResponse}
 	if slices.Contains(intent.TunnelModes, modeWebsocket) {
-		response.Link = &linkAccess{URL: s.linkURL(id), Token: capability.LinkToken}
+		response.Link = &LinkAccess{URL: s.linkURL(id), Token: capability.LinkToken}
 	}
 	if slices.Contains(intent.TunnelModes, modeDevtunnel) {
-		response.Devtunnel = &devtunnelAccess{ID: intent.Tunnel.ID, Cluster: intent.Tunnel.ClusterID, HostToken: hostToken}
+		response.Devtunnel = &DevtunnelAccess{ID: intent.Tunnel.ID, Cluster: intent.Tunnel.ClusterID, HostToken: hostToken}
 	}
 	return response, nil
 }
@@ -468,26 +468,26 @@ func (s Service) abandonSubmitIntent(credential devtunnel.Credential, intent Ses
 	return errors.Join(compensateErr, stateErr)
 }
 
-type finishedRun struct {
+type FinishedRun struct {
 	FinalState string         `json:"finalState"`
 	Error      string         `json:"error,omitempty"`
 	StartedAt  time.Time      `json:"startedAt,omitzero"`
 	EndedAt    time.Time      `json:"endedAt"`
-	Stats      *runStats      `json:"stats,omitempty"`
-	Samples    []metricSample `json:"samples,omitempty"`
+	Stats      *RunStats      `json:"stats,omitempty"`
+	Samples    []MetricSample `json:"samples,omitempty"`
 }
 
-type sessionHistory struct {
+type SessionHistory struct {
 	CreatedAt time.Time     `json:"createdAt,omitzero"`
-	Runs      []finishedRun `json:"runs"`
+	Runs      []FinishedRun `json:"runs"`
 }
 
-func (s Service) Define(principal security.Principal, request createRequest) (*Session, bool, error) {
+func (s Service) Define(principal security.Principal, request CreateRequest) (*Session, bool, error) {
 	request, err := assignSessionID(request, principal)
 	if err != nil {
 		return nil, false, err
 	}
-	session := &Session{sessionResponse: sessionResponse{
+	session := &Session{SessionResponse: SessionResponse{
 		ID: request.ID, State: "STOPPED", Launcher: launcherPlane, SSHHost: request.SSHHost, Account: request.Account,
 		Partition: request.Partition, RootFolder: request.RootFolder, Resources: request.Resources, TunnelModes: request.TunnelModes,
 		CreatedAt: s.utcNow(), UpdatedAt: s.utcNow(),
@@ -512,8 +512,8 @@ func (s Service) Define(principal security.Principal, request createRequest) (*S
 	return session, created, err
 }
 
-func (s Service) AdoptRuns(principal security.Principal, id string, history sessionHistory) (*Session, error) {
-	if len(history.Runs) == 0 || len(history.Runs) > 50 || slices.ContainsFunc(history.Runs, func(run finishedRun) bool {
+func (s Service) AdoptRuns(principal security.Principal, id string, history SessionHistory) (*Session, error) {
+	if len(history.Runs) == 0 || len(history.Runs) > 50 || slices.ContainsFunc(history.Runs, func(run FinishedRun) bool {
 		return !terminalSession(run.FinalState) || run.EndedAt.IsZero() || len(run.Samples) > maxSessionMetricSamples
 	}) {
 		return nil, security.New("invalid_runs", fmt.Sprintf("runs must be 1 to 50 terminal runs, each with endedAt and at most %d samples", maxSessionMetricSamples), http.StatusBadRequest)

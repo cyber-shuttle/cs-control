@@ -18,41 +18,41 @@ import (
 
 const signInScope = "openid email profile offline_access"
 
-type oauthConfigResponse struct {
+type OAuthConfigResponse struct {
 	Issuer                string `json:"issuer"`
 	AuthorizationEndpoint string `json:"authorizationEndpoint"`
 	ClientID              string `json:"clientId"`
 	Scope                 string `json:"scope"`
 }
 
-type exchangeRequest struct {
+type ExchangeRequest struct {
 	Code         string `json:"code"`
 	CodeVerifier string `json:"codeVerifier"`
 	RedirectURI  string `json:"redirectUri"`
 }
 
-type deviceResponse struct {
+type DeviceResponse struct {
 	DeviceCode      string `json:"deviceCode"`
 	UserCode        string `json:"userCode"`
 	CompleteURI     string `json:"verificationUriComplete"`
 	IntervalSeconds int64  `json:"intervalSeconds"`
 }
 
-type devicePollRequest struct {
+type DevicePollRequest struct {
 	DeviceCode string `json:"deviceCode"`
 }
 
-type devicePoll struct {
+type DevicePoll struct {
 	Status          string `json:"status"`
 	IntervalSeconds int64  `json:"intervalSeconds,omitempty"`
-	*tokenResponse
+	*TokenResponse
 }
 
-type refreshRequest struct {
+type RefreshRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
-type tokenResponse struct {
+type TokenResponse struct {
 	IDToken          string `json:"idToken"`
 	RefreshToken     string `json:"refreshToken,omitempty"`
 	ExpiresInSeconds int64  `json:"expiresInSeconds"`
@@ -79,11 +79,11 @@ func (s *Service) handleConfig(writer http.ResponseWriter, request *http.Request
 		security.WriteError(writer, security.New("upstream_unavailable", "the identity provider is unavailable", http.StatusBadGateway))
 		return
 	}
-	security.WriteJSON(writer, http.StatusOK, oauthConfigResponse{Issuer: metadata.Issuer, AuthorizationEndpoint: metadata.AuthorizationEndpoint, ClientID: s.clientID, Scope: signInScope})
+	security.WriteJSON(writer, http.StatusOK, OAuthConfigResponse{Issuer: metadata.Issuer, AuthorizationEndpoint: metadata.AuthorizationEndpoint, ClientID: s.clientID, Scope: signInScope})
 }
 
 func (s *Service) handleExchange(writer http.ResponseWriter, request *http.Request) {
-	var body exchangeRequest
+	var body ExchangeRequest
 	if err := security.DecodeJSON(request, &body); err != nil {
 		security.WriteError(writer, err)
 		return
@@ -97,7 +97,7 @@ func (s *Service) handleExchange(writer http.ResponseWriter, request *http.Reque
 }
 
 func (s *Service) handleRefresh(writer http.ResponseWriter, request *http.Request) {
-	var body refreshRequest
+	var body RefreshRequest
 	if err := security.DecodeJSON(request, &body); err != nil {
 		security.WriteError(writer, err)
 		return
@@ -120,8 +120,8 @@ func tokenError(err error) error {
 	return security.New("upstream_unavailable", "the identity provider is unavailable", http.StatusBadGateway)
 }
 
-func tokenBody(tokens identity.Tokens) *tokenResponse {
-	return &tokenResponse{IDToken: tokens.IDToken, RefreshToken: tokens.RefreshToken, ExpiresInSeconds: tokens.ExpiresIn}
+func tokenBody(tokens identity.Tokens) *TokenResponse {
+	return &TokenResponse{IDToken: tokens.IDToken, RefreshToken: tokens.RefreshToken, ExpiresInSeconds: tokens.ExpiresIn}
 }
 
 func (s *Service) writeTokens(writer http.ResponseWriter, tokens identity.Tokens, err error) {
@@ -138,11 +138,11 @@ func (s *Service) handleDevice(writer http.ResponseWriter, request *http.Request
 		security.WriteError(writer, tokenError(err))
 		return
 	}
-	security.WriteJSON(writer, http.StatusOK, deviceResponse{DeviceCode: device.DeviceCode, UserCode: device.UserCode, CompleteURI: device.CompleteURI, IntervalSeconds: device.Interval})
+	security.WriteJSON(writer, http.StatusOK, DeviceResponse{DeviceCode: device.DeviceCode, UserCode: device.UserCode, CompleteURI: device.CompleteURI, IntervalSeconds: device.Interval})
 }
 
 func (s *Service) handleDevicePoll(writer http.ResponseWriter, request *http.Request) {
-	var body devicePollRequest
+	var body DevicePollRequest
 	if err := security.DecodeJSON(request, &body); err != nil || body.DeviceCode == "" {
 		security.WriteError(writer, security.New("invalid_json", "request body is invalid", http.StatusBadRequest))
 		return
@@ -150,11 +150,11 @@ func (s *Service) handleDevicePoll(writer http.ResponseWriter, request *http.Req
 	tokens, err := s.oidc.RedeemDevice(request.Context(), s.clientSecret, body.DeviceCode)
 	switch {
 	case errors.Is(err, identity.ErrAuthorizationPending):
-		security.WriteJSON(writer, http.StatusOK, devicePoll{Status: "pending", IntervalSeconds: identity.MinDeviceInterval})
+		security.WriteJSON(writer, http.StatusOK, DevicePoll{Status: "pending", IntervalSeconds: identity.MinDeviceInterval})
 	case err != nil:
 		security.WriteError(writer, tokenError(err))
 	default:
-		security.WriteJSON(writer, http.StatusOK, devicePoll{Status: "complete", tokenResponse: tokenBody(tokens)})
+		security.WriteJSON(writer, http.StatusOK, DevicePoll{Status: "complete", TokenResponse: tokenBody(tokens)})
 	}
 }
 

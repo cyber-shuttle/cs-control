@@ -38,21 +38,21 @@ var sessionCredentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`/[^\s'\"]*\.cybershuttle/sessions/s-[a-f0-9]{12}(?:/[^\s'\"]*)?`),
 }
 
-type sessionLogLine struct {
+type SessionLogLine struct {
 	Stream string    `json:"stream"`
 	Text   string    `json:"text"`
 	At     time.Time `json:"at"`
 }
 
-type sessionLogTail struct {
+type SessionLogTail struct {
 	SessionID string           `json:"sessionId"`
-	Lines     []sessionLogLine `json:"lines"`
+	Lines     []SessionLogLine `json:"lines"`
 }
 
 type sessionLogBuffer struct {
 	statusBytes int
-	status      []sessionLogLine
-	remote      []sessionLogLine
+	status      []SessionLogLine
+	remote      []SessionLogLine
 }
 
 type sessionLogs struct {
@@ -190,7 +190,7 @@ func (l *sessionLogs) append(sessionID, text string, now time.Time) {
 	defer l.mu.Unlock()
 	buffer := l.bufferLocked(sessionID)
 	for _, line := range lines {
-		entry := sessionLogLine{Stream: "status", Text: line, At: now}
+		entry := SessionLogLine{Stream: "status", Text: line, At: now}
 		if last := len(buffer.status) - 1; last >= 0 && buffer.status[last].Stream == entry.Stream && buffer.status[last].Text == entry.Text {
 			continue
 		}
@@ -208,10 +208,10 @@ func (l *sessionLogs) mergeRemote(sessionID, stdout, stderr string, now time.Tim
 		return false
 	}
 	sensitive := l.sensitiveFor(sessionID)
-	remote := make([]sessionLogLine, 0, maxSessionLogLines)
+	remote := make([]SessionLogLine, 0, maxSessionLogLines)
 	for _, source := range []struct{ stream, text string }{{"stdout", stdout}, {"stderr", stderr}} {
 		for _, line := range sanitizedSessionLogLines(source.text, sensitive) {
-			remote = append(remote, sessionLogLine{Stream: source.stream, Text: line})
+			remote = append(remote, SessionLogLine{Stream: source.stream, Text: line})
 		}
 	}
 	if len(remote) > maxSessionLogLines {
@@ -239,18 +239,18 @@ func (l *sessionLogs) bufferLocked(sessionID string) *sessionLogBuffer {
 	return buffer
 }
 
-func (l *sessionLogs) tail(sessionID string) (sessionLogTail, bool) {
+func (l *sessionLogs) tail(sessionID string) (SessionLogTail, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	buffer := l.tails[sessionID]
 	if buffer == nil {
-		return sessionLogTail{}, false
+		return SessionLogTail{}, false
 	}
 	lines := slices.Concat(buffer.status, buffer.remote)
 	if len(lines) == 0 {
-		return sessionLogTail{}, false
+		return SessionLogTail{}, false
 	}
-	return sessionLogTail{SessionID: sessionID, Lines: lines}, true
+	return SessionLogTail{SessionID: sessionID, Lines: lines}, true
 }
 
 func (l *sessionLogs) setSessionSensitive(sessionID string, values ...string) {
@@ -364,31 +364,31 @@ const (
 	metricSampleInterval    = 5 * time.Second
 )
 
-type gpuSample struct {
+type GPUSample struct {
 	Index       int `json:"index"`
 	UtilPct     int `json:"utilPct"`
 	MemUsedMiB  int `json:"memUsedMiB"`
 	MemTotalMiB int `json:"memTotalMiB"`
 }
 
-type metricSample struct {
+type MetricSample struct {
 	At           time.Time   `json:"at"`
 	MemBytes     *int64      `json:"memBytes,omitempty"`
 	CPUUsageUsec *int64      `json:"cpuUsageUsec,omitempty"`
-	GPUs         []gpuSample `json:"gpus,omitempty"`
+	GPUs         []GPUSample `json:"gpus,omitempty"`
 }
 
-type sessionSeries struct {
+type SessionSeries struct {
 	SessionID string         `json:"sessionId"`
-	Samples   []metricSample `json:"samples"`
+	Samples   []MetricSample `json:"samples"`
 }
 
 type sessionMetrics struct {
 	mu     sync.RWMutex
-	series map[string][]metricSample
+	series map[string][]MetricSample
 }
 
-func (m *sessionMetrics) append(sessionID string, sample metricSample) {
+func (m *sessionMetrics) append(sessionID string, sample MetricSample) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.series[sessionID] = append(m.series[sessionID], sample)
@@ -397,7 +397,7 @@ func (m *sessionMetrics) append(sessionID string, sample metricSample) {
 	}
 }
 
-func (m *sessionMetrics) samples(sessionID string) []metricSample {
+func (m *sessionMetrics) samples(sessionID string) []MetricSample {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return slices.Clone(m.series[sessionID])
@@ -448,20 +448,20 @@ func (s Service) sampleOnce(parent context.Context) {
 }
 
 func newSessionMetrics() *sessionMetrics {
-	return &sessionMetrics{series: make(map[string][]metricSample)}
+	return &sessionMetrics{series: make(map[string][]MetricSample)}
 }
 
-func (s Service) sampleSession(ctx context.Context, session Session) (metricSample, error) {
+func (s Service) sampleSession(ctx context.Context, session Session) (MetricSample, error) {
 	body, status, err := s.linkspan(ctx, session, http.MethodGet, "/api/v1/metrics", nil, maxMetricBodyBytes)
 	if err != nil {
-		return metricSample{}, err
+		return MetricSample{}, err
 	}
 	if status != http.StatusOK {
-		return metricSample{}, errors.New("linkspan did not answer with a sample")
+		return MetricSample{}, errors.New("linkspan did not answer with a sample")
 	}
-	var sample metricSample
+	var sample MetricSample
 	if err := json.Unmarshal(body, &sample); err != nil {
-		return metricSample{}, errors.New("linkspan returned no sample")
+		return MetricSample{}, errors.New("linkspan returned no sample")
 	}
 	sample.At = s.utcNow()
 	return sample, nil
@@ -476,15 +476,15 @@ type Run struct {
 	Account     string           `json:"account,omitempty"`
 	Partition   string           `json:"partition"`
 	RootFolder  string           `json:"rootFolder"`
-	Resources   resources        `json:"resources"`
+	Resources   Resources        `json:"resources"`
 	TunnelModes []string         `json:"tunnelModes"`
 	FinalState  string           `json:"finalState"`
 	Error       string           `json:"error,omitempty"`
 	StartedAt   time.Time        `json:"startedAt,omitzero"`
 	EndedAt     time.Time        `json:"endedAt"`
-	Stats       *runStats        `json:"stats,omitempty"`
-	Samples     []metricSample   `json:"samples,omitempty"`
-	Logs        []sessionLogLine `json:"logs,omitempty"`
+	Stats       *RunStats        `json:"stats,omitempty"`
+	Samples     []MetricSample   `json:"samples,omitempty"`
+	Logs        []SessionLogLine `json:"logs,omitempty"`
 }
 
 type runRecord struct {
@@ -495,7 +495,7 @@ type runRecord struct {
 
 const runStatsWindow = 10 * time.Minute
 
-type runStats struct {
+type RunStats struct {
 	Cores               int     `json:"cores,omitempty"`
 	RequestedMemory     string  `json:"requestedMemory,omitempty"`
 	ElapsedSeconds      int64   `json:"elapsedSeconds,omitempty"`
@@ -504,7 +504,7 @@ type runStats struct {
 	MemoryEfficiencyPct float64 `json:"memoryEfficiencyPct,omitempty"`
 }
 
-func (s runStats) complete() bool { return s.MaxRSS != "" }
+func (s RunStats) complete() bool { return s.MaxRSS != "" }
 
 func recordRun(current *state, record runRecord) bool {
 	if record.Seq == 0 || slices.ContainsFunc(current.Runs, func(existing runRecord) bool {
@@ -562,12 +562,12 @@ func (s Service) freezeIfTerminal(current *state, session *Session) (bool, error
 	return true, nil
 }
 
-func (s Service) readRunStats(ctx context.Context, host, name string, startedAt time.Time) (runStats, error) {
+func (s Service) readRunStats(ctx context.Context, host, name string, startedAt time.Time) (RunStats, error) {
 	usage, err := slurm.Account(ctx, s.runner, host, name, startedAt, s.utcNow())
-	return runStats(usage), err
+	return RunStats(usage), err
 }
 
-func (s Service) attachRunStats(sessionID string, seq int, stats runStats) error {
+func (s Service) attachRunStats(sessionID string, seq int, stats RunStats) error {
 	return s.Store.locked(func(current *state) error {
 		for index := range current.Runs {
 			run := &current.Runs[index]

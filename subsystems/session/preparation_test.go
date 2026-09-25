@@ -60,7 +60,7 @@ func TestStartRejectsWorkspaceInsidePrivateSession(t *testing.T) {
 func TestDefineRejectsSessionsBelowTheFloor(t *testing.T) {
 	service := testService(t)
 	request := newTestCreateRequest()
-	for _, below := range []resources{
+	for _, below := range []Resources{
 		{Cores: minCores - 1, MemoryMB: minMemoryMB, WallMinutes: 60},
 		{Cores: minCores, MemoryMB: minMemoryMB - 1, WallMinutes: 60},
 	} {
@@ -69,7 +69,7 @@ func TestDefineRejectsSessionsBelowTheFloor(t *testing.T) {
 			t.Fatalf("%d cores / %d MB was not rejected: %v", below.Cores, below.MemoryMB, err)
 		}
 	}
-	request.Resources = resources{Cores: minCores, MemoryMB: minMemoryMB, WallMinutes: 60}
+	request.Resources = Resources{Cores: minCores, MemoryMB: minMemoryMB, WallMinutes: 60}
 	if _, _, err := service.Define(testPrincipal, request); err != nil {
 		t.Fatalf("the floor itself was rejected: %v", err)
 	}
@@ -108,7 +108,7 @@ printf '%s\n' "$JUPYTER_TOKEN" "$LINKSPAN_LINK_TOKEN" "$LINKSPAN_TUNNEL_HOST_TOK
 exit 7
 `)
 		session := Session{
-			sessionResponse: sessionResponse{ID: "s-012345abcdef", Seq: 1, Partition: "cpu", Resources: resources{Cores: 1, MemoryMB: 128, WallMinutes: 1}, TunnelModes: test.modes},
+			SessionResponse: SessionResponse{ID: "s-012345abcdef", Seq: 1, Partition: "cpu", Resources: Resources{Cores: 1, MemoryMB: 128, WallMinutes: 1}, TunnelModes: test.modes},
 			JobName:         jobName("s-012345abcdef", 1), PrivateRoot: dir + "/private", WorkspaceRoot: dir,
 		}
 		script := buildScript(session, linkspan)
@@ -260,7 +260,7 @@ func TestProvisionReportsAnExpiredSSHLoginAsLoginRequired(t *testing.T) {
 	sshBin := filepath.Join(t.TempDir(), "ssh")
 	testutil.Check(t, os.WriteFile(sshBin, []byte("#!/bin/sh\n[ \"$1\" = -G ] && echo 'hostname delta' && exit 0\necho 'Permission denied (publickey,password).' >&2\nexit 255\n"), 0o700))
 	service := newTestService(t, ssh.Runner{SSHBin: sshBin, Timeout: 5 * time.Second}, Store{})
-	if code := security.For(service.provisionSession("delta", Session{sessionResponse: sessionResponse{ID: "s-000000000001"}}, "/home/u", "/home/u/.cybershuttle/bin/linkspan")).Code; code != "ssh_authentication_required" {
+	if code := security.For(service.provisionSession("delta", Session{SessionResponse: SessionResponse{ID: "s-000000000001"}}, "/home/u", "/home/u/.cybershuttle/bin/linkspan")).Code; code != "ssh_authentication_required" {
 		t.Fatalf("expired login provisioned as %q, want ssh_authentication_required", code)
 	}
 }

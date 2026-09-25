@@ -35,26 +35,26 @@ var (
 	createLocks       [64]sync.Mutex
 )
 
-type gres struct {
+type Gres struct {
 	Name  string `json:"name"`
 	Count int    `json:"count"`
 }
 
-type partition struct {
+type Partition struct {
 	Name     string `json:"name"`
 	CPUCount int    `json:"cpuCount"`
 	MemoryMB int    `json:"memoryMb"`
-	GRES     []gres `json:"gres"`
+	GRES     []Gres `json:"gres"`
 }
 
-type resource struct {
+type Resource struct {
 	Host       string      `json:"host"`
 	Accounts   []string    `json:"accounts"`
-	Partitions []partition `json:"partitions"`
+	Partitions []Partition `json:"partitions"`
 	HomeDir    string      `json:"homeDir"`
 }
 
-type resources struct {
+type Resources struct {
 	Cores       int    `json:"cores"`
 	MemoryMB    int    `json:"memoryMb"`
 	WallMinutes int    `json:"wallMinutes"`
@@ -62,14 +62,14 @@ type resources struct {
 	GPUCount    int    `json:"gpuCount,omitempty"`
 }
 
-type createRequest struct {
+type CreateRequest struct {
 	ID             string    `json:"-"`
 	IdempotencyKey string    `json:"idempotencyKey,omitempty"`
 	SSHHost        string    `json:"sshHost"`
 	Account        string    `json:"account,omitempty"`
 	Partition      string    `json:"partition"`
 	RootFolder     string    `json:"rootFolder"`
-	Resources      resources `json:"resources"`
+	Resources      Resources `json:"resources"`
 	TunnelModes    []string  `json:"tunnelModes,omitempty"`
 }
 
@@ -79,7 +79,7 @@ type tunnelMetadata struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-type sessionResponse struct {
+type SessionResponse struct {
 	ID          string    `json:"id"`
 	Seq         int       `json:"seq"`
 	State       string    `json:"state"`
@@ -88,7 +88,7 @@ type sessionResponse struct {
 	Account     string    `json:"account,omitempty"`
 	Partition   string    `json:"partition"`
 	RootFolder  string    `json:"rootFolder"`
-	Resources   resources `json:"resources"`
+	Resources   Resources `json:"resources"`
 	TunnelModes []string  `json:"tunnelModes"`
 	Error       string    `json:"error,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
@@ -97,7 +97,7 @@ type sessionResponse struct {
 }
 
 type Session struct {
-	sessionResponse
+	SessionResponse
 	Owner         security.Principal `json:"owner"`
 	Tunnel        tunnelMetadata     `json:"tunnel"`
 	JobID         string             `json:"jobId,omitempty"`
@@ -107,41 +107,41 @@ type Session struct {
 	WorkspaceRoot string             `json:"workspaceRoot"`
 }
 
-type sessionList struct {
-	Sessions []sessionResponse `json:"sessions"`
-	Logs     []sessionLogTail  `json:"logs"`
+type SessionList struct {
+	Sessions []SessionResponse `json:"sessions"`
+	Logs     []SessionLogTail  `json:"logs"`
 }
 
-type linkAccess struct {
+type LinkAccess struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
 }
 
-type devtunnelAccess struct {
+type DevtunnelAccess struct {
 	ID        string `json:"id"`
 	Cluster   string `json:"cluster"`
 	HostToken string `json:"hostToken"`
 }
 
-type attachResponse struct {
-	Session   sessionResponse  `json:"session"`
-	Link      *linkAccess      `json:"link,omitempty"`
-	Devtunnel *devtunnelAccess `json:"devtunnel,omitempty"`
+type AttachResponse struct {
+	Session   SessionResponse  `json:"session"`
+	Link      *LinkAccess      `json:"link,omitempty"`
+	Devtunnel *DevtunnelAccess `json:"devtunnel,omitempty"`
 }
 
-type sessionAccessResponse struct {
+type SessionAccessResponse struct {
 	SessionID string               `json:"sessionId"`
 	Seq       int                  `json:"seq"`
 	ExpiresAt time.Time            `json:"expiresAt"`
-	Jupyter   sessionJupyterAccess `json:"jupyter"`
+	Jupyter   SessionJupyterAccess `json:"jupyter"`
 }
 
-type sessionJupyterAccess struct {
+type SessionJupyterAccess struct {
 	URI   string `json:"uri"`
 	Token string `json:"token"`
 }
 
-type validationResult struct {
+type ValidationResult struct {
 	SessionID string `json:"sessionId"`
 	Script    string `json:"script"`
 	Status    string `json:"status"`
@@ -352,11 +352,11 @@ func (s Service) Get(principal security.Principal, id string) (*Session, error) 
 	return session, err
 }
 
-func (s Service) List(principal security.Principal) (sessionList, error) {
+func (s Service) List(principal security.Principal) (SessionList, error) {
 	sessions, err := s.sessionsOf(principal)
-	list := sessionList{Sessions: make([]sessionResponse, 0, len(sessions)), Logs: []sessionLogTail{}}
+	list := SessionList{Sessions: make([]SessionResponse, 0, len(sessions)), Logs: []SessionLogTail{}}
 	for _, session := range sessions {
-		list.Sessions = append(list.Sessions, session.sessionResponse)
+		list.Sessions = append(list.Sessions, session.SessionResponse)
 		if tail, ok := s.logs.tail(session.ID); ok {
 			list.Logs = append(list.Logs, tail)
 		}
@@ -364,23 +364,23 @@ func (s Service) List(principal security.Principal) (sessionList, error) {
 	return list, err
 }
 
-func (s Service) Discover(ctx context.Context, principal security.Principal, alias string) (resource, error) {
+func (s Service) Discover(ctx context.Context, principal security.Principal, alias string) (Resource, error) {
 	return s.forPrincipal(principal).discover(ctx, alias)
 }
 
-func (s Service) Metrics(principal security.Principal, id string) (sessionSeries, error) {
+func (s Service) Metrics(principal security.Principal, id string) (SessionSeries, error) {
 	session, err := s.Get(principal, id)
 	if err != nil {
-		return sessionSeries{}, err
+		return SessionSeries{}, err
 	}
-	return sessionSeries{SessionID: session.ID, Samples: s.metrics.samples(session.ID)}, nil
+	return SessionSeries{SessionID: session.ID, Samples: s.metrics.samples(session.ID)}, nil
 }
 
-func view(session *Session, err error) (sessionResponse, error) {
+func view(session *Session, err error) (SessionResponse, error) {
 	if err != nil {
-		return sessionResponse{}, err
+		return SessionResponse{}, err
 	}
-	return session.sessionResponse, nil
+	return session.SessionResponse, nil
 }
 
 func decoded[T any](request *http.Request) (T, error) {
@@ -394,7 +394,7 @@ func (s Service) defineSession(writer http.ResponseWriter, request *http.Request
 		security.WriteError(writer, err)
 		return
 	}
-	body, err := decoded[createRequest](request)
+	body, err := decoded[CreateRequest](request)
 	if err != nil {
 		security.WriteError(writer, err)
 		return
@@ -409,7 +409,7 @@ func (s Service) defineSession(writer http.ResponseWriter, request *http.Request
 		status = http.StatusCreated
 		writer.Header().Set("Location", "/api/v1/sessions/"+session.ID)
 	}
-	security.WriteJSON(writer, status, session.sessionResponse)
+	security.WriteJSON(writer, status, session.SessionResponse)
 }
 
 func (s Service) listSessions(writer http.ResponseWriter, request *http.Request) {
@@ -439,26 +439,26 @@ func (s Service) listSessions(writer http.ResponseWriter, request *http.Request)
 	security.WriteJSONBytes(writer, http.StatusOK, body)
 }
 
-type runList struct {
+type RunList struct {
 	Runs []Run `json:"runs"`
 }
 
 func (s Service) Routes() router.Routes {
 	id := func(request *http.Request) string { return request.PathValue("id") }
 	return router.Routes{
-		"/api/v1/hosts/{alias}/slurm": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (resource, error) {
+		"/api/v1/hosts/{alias}/slurm": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (Resource, error) {
 			return s.Discover(request.Context(), principal, request.PathValue("alias"))
 		})},
 		"/api/v1/sessions": {http.MethodGet: s.listSessions, http.MethodPost: s.defineSession},
-		"/api/v1/sessions/validate": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*validationResult, error) {
-			body, err := decoded[createRequest](request)
+		"/api/v1/sessions/validate": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*ValidationResult, error) {
+			body, err := decoded[CreateRequest](request)
 			if err != nil {
 				return nil, err
 			}
 			return s.Validate(request.Context(), principal, body)
 		})},
 		"/api/v1/sessions/{id}": {
-			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
+			http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (SessionResponse, error) {
 				return view(s.Get(principal, id(request)))
 			}),
 			http.MethodDelete: security.NoContentAsPrincipal(func(principal security.Principal, request *http.Request) error {
@@ -466,10 +466,10 @@ func (s Service) Routes() router.Routes {
 				return err
 			}),
 		},
-		"/api/v1/sessions/{id}/start": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
+		"/api/v1/sessions/{id}/start": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (SessionResponse, error) {
 			return view(s.Start(request.Context(), principal, id(request)))
 		})},
-		"/api/v1/sessions/{id}/attach": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*attachResponse, error) {
+		"/api/v1/sessions/{id}/attach": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*AttachResponse, error) {
 			var body struct {
 				TunnelModes []string `json:"tunnelModes"`
 			}
@@ -478,20 +478,20 @@ func (s Service) Routes() router.Routes {
 			}
 			return s.Attach(request.Context(), principal, id(request), body.TunnelModes)
 		})},
-		"/api/v1/sessions/{id}/stop": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
+		"/api/v1/sessions/{id}/stop": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (SessionResponse, error) {
 			return view(s.Stop(principal, id(request)))
 		})},
-		"/api/v1/sessions/{id}/runs": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionResponse, error) {
-			body, err := decoded[sessionHistory](request)
+		"/api/v1/sessions/{id}/runs": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (SessionResponse, error) {
+			body, err := decoded[SessionHistory](request)
 			if err != nil {
-				return sessionResponse{}, err
+				return SessionResponse{}, err
 			}
 			return view(s.AdoptRuns(principal, id(request), body))
 		})},
-		"/api/v1/sessions/{id}/access": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*sessionAccessResponse, error) {
+		"/api/v1/sessions/{id}/access": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*SessionAccessResponse, error) {
 			return s.Access(principal, id(request))
 		})},
-		"/api/v1/sessions/{id}/ssh": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*sshAccessResponse, error) {
+		"/api/v1/sessions/{id}/ssh": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*SSHAccessResponse, error) {
 			body, err := decoded[struct {
 				PublicKey string `json:"publicKey"`
 			}](request)
@@ -500,12 +500,12 @@ func (s Service) Routes() router.Routes {
 			}
 			return s.StartSSH(request.Context(), principal, id(request), body.PublicKey)
 		})},
-		"/api/v1/sessions/{id}/metrics": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (sessionSeries, error) {
+		"/api/v1/sessions/{id}/metrics": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (SessionSeries, error) {
 			return s.Metrics(principal, id(request))
 		})},
-		"/api/v1/telemetry": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (runList, error) {
+		"/api/v1/telemetry": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, _ *http.Request) (RunList, error) {
 			runs, err := s.Runs(principal)
-			return runList{Runs: runs}, err
+			return RunList{Runs: runs}, err
 		})},
 	}
 }

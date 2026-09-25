@@ -125,7 +125,7 @@ func TestSessionAccessNamesTheJupyterProxyWithoutCallingTheSession(t *testing.T)
 	if err := json.Unmarshal(raw["jupyter"], &jupyter); err != nil || len(jupyter) != 2 || jupyter["uri"] == nil || jupyter["token"] == nil {
 		t.Fatalf("Jupyter access JSON is not narrow: %s (%v)", raw["jupyter"], err)
 	}
-	var access sessionAccessResponse
+	var access SessionAccessResponse
 	testutil.Check(t, json.Unmarshal(response.Body.Bytes(), &access))
 	if access.SessionID != session.ID || access.Seq != session.Seq || !access.ExpiresAt.After(time.Now()) || access.Jupyter.URI != "https://plane.example.edu/api/v1/sessions/"+session.ID+"/jupyter/" || access.Jupyter.Token != testJupyterToken {
 		t.Fatalf("access = %#v", access)
@@ -152,7 +152,7 @@ func TestSessionListDropsAnotherOwnersSessionsAndLogs(t *testing.T) {
 
 	response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodGet, "/api/v1/sessions", nil))
 	body := response.Body.String()
-	var list sessionList
+	var list SessionList
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &list) != nil {
 		t.Fatalf("session list = %d %s", response.Code, body)
 	}
@@ -190,10 +190,10 @@ func TestSessionListDropsAnotherOwnersSessionsAndLogs(t *testing.T) {
 }
 
 func TestSessionPublicJSONContractIsNarrow(t *testing.T) {
-	value := sessionResponse{
+	value := SessionResponse{
 		ID: "s-012345abcdef", Seq: 1,
 		State: "READY", Launcher: launcherPlane, SSHHost: "delta", Account: "project-a", Partition: "cpu",
-		RootFolder: "$HOME/project", Resources: resources{Cores: 2, MemoryMB: 4096, WallMinutes: 60}, TunnelModes: []string{modeWebsocket},
+		RootFolder: "$HOME/project", Resources: Resources{Cores: 2, MemoryMB: 4096, WallMinutes: 60}, TunnelModes: []string{modeWebsocket},
 		CreatedAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), StartedAt: time.Date(2030, 1, 1, 0, 0, 30, 0, time.UTC), UpdatedAt: time.Date(2030, 1, 1, 0, 1, 0, 0, time.UTC),
 	}
 	encoded, err := json.MarshalIndent(value, "", "  ")
@@ -215,9 +215,9 @@ func TestDefineRecordsAStoppedSessionOnce(t *testing.T) {
 	service := testService(t)
 	handler := serviceHandler(t, &service)
 	defined := newTestCreateRequest()
-	post := func(body string) (sessionResponse, *httptest.ResponseRecorder) {
+	post := func(body string) (SessionResponse, *httptest.ResponseRecorder) {
 		response := testutil.Serve(handler, requestAs(testPrincipal, http.MethodPost, "/api/v1/sessions", []byte(body)))
-		var session sessionResponse
+		var session SessionResponse
 		_ = json.Unmarshal(response.Body.Bytes(), &session)
 		return session, response
 	}
@@ -246,17 +246,17 @@ func TestAdoptRunsAttachesAFinishedHistoryOnce(t *testing.T) {
 	handler := serviceHandler(t, &service)
 	defined, _, err := service.Define(testPrincipal, newTestCreateRequest())
 	testutil.Check(t, err)
-	adopt := func(principal security.Principal, history sessionHistory) *httptest.ResponseRecorder {
+	adopt := func(principal security.Principal, history SessionHistory) *httptest.ResponseRecorder {
 		body, err := json.Marshal(history)
 		testutil.Check(t, err)
 		return testutil.Serve(handler, requestAs(principal, http.MethodPost, "/api/v1/sessions/"+defined.ID+"/runs", body))
 	}
-	history := sessionHistory{CreatedAt: time.Unix(50, 0), Runs: []finishedRun{
-		{FinalState: "STOPPED", EndedAt: time.Unix(100, 0), Stats: &runStats{CPUEfficiencyPct: 9.5}, Samples: []metricSample{{At: time.Unix(90, 0).UTC()}}},
+	history := SessionHistory{CreatedAt: time.Unix(50, 0), Runs: []FinishedRun{
+		{FinalState: "STOPPED", EndedAt: time.Unix(100, 0), Stats: &RunStats{CPUEfficiencyPct: 9.5}, Samples: []MetricSample{{At: time.Unix(90, 0).UTC()}}},
 		{FinalState: "FAILED", Error: "node failure", StartedAt: time.Unix(150, 0), EndedAt: time.Unix(200, 0)},
 	}}
-	for _, invalid := range [][]finishedRun{nil, {{FinalState: "READY", EndedAt: time.Unix(1, 0)}}} {
-		if response := adopt(testPrincipal, sessionHistory{Runs: invalid}); response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_runs") {
+	for _, invalid := range [][]FinishedRun{nil, {{FinalState: "READY", EndedAt: time.Unix(1, 0)}}} {
+		if response := adopt(testPrincipal, SessionHistory{Runs: invalid}); response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_runs") {
 			t.Fatalf("invalid runs %v = %d %s", invalid, response.Code, response.Body.String())
 		}
 	}
@@ -264,7 +264,7 @@ func TestAdoptRunsAttachesAFinishedHistoryOnce(t *testing.T) {
 		t.Fatalf("another principal's adopt = %d %s", response.Code, response.Body.String())
 	}
 	response := adopt(testPrincipal, history)
-	var adopted sessionResponse
+	var adopted SessionResponse
 	_ = json.Unmarshal(response.Body.Bytes(), &adopted)
 	if response.Code != http.StatusOK || adopted.State != "FAILED" || adopted.Seq != 2 || adopted.Error != "node failure" || !adopted.CreatedAt.Equal(time.Unix(50, 0)) {
 		t.Fatalf("adopt = %d %s", response.Code, response.Body.String())
@@ -283,6 +283,6 @@ func TestAdoptRunsAttachesAFinishedHistoryOnce(t *testing.T) {
 	started, err := service.Start(context.Background(), testPrincipal, defined.ID)
 	testutil.Check(t, err)
 	if started.State != "QUEUED" || started.Seq != 3 || len(runs()) != 2 {
-		t.Fatalf("start after adopt = %#v with %d runs", started.sessionResponse, len(runs()))
+		t.Fatalf("start after adopt = %#v with %d runs", started.SessionResponse, len(runs()))
 	}
 }

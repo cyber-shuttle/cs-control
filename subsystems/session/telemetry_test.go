@@ -38,7 +38,7 @@ func sessionLogText(t *testing.T, logs *sessionLogs, sessionID string) string {
 	return strings.Join(texts, "\n")
 }
 
-func sameLogLine(line sessionLogLine, stream, text string) bool {
+func sameLogLine(line SessionLogLine, stream, text string) bool {
 	return line.Stream == stream && line.Text == text && !line.At.IsZero()
 }
 
@@ -206,7 +206,7 @@ func TestSampleWindowIsBoundedAndNewestLast(t *testing.T) {
 	metrics := newSessionMetrics()
 	for index := 0; index < maxSessionMetricSamples+5; index++ {
 		used := int64(index)
-		metrics.append("s-111111111111", metricSample{At: time.Unix(int64(index), 0), MemBytes: &used})
+		metrics.append("s-111111111111", MetricSample{At: time.Unix(int64(index), 0), MemBytes: &used})
 	}
 	series := metrics.samples("s-111111111111")
 	testutil.Equal(t, len(series), maxSessionMetricSamples, "window sample count")
@@ -236,7 +236,7 @@ func TestARunOutlivesTheSessionThatEnded(t *testing.T) {
 	session.State = "READY"
 	putSessions(t, service, session)
 	used := int64(4096)
-	service.metrics.append(session.ID, metricSample{At: time.Now(), MemBytes: &used})
+	service.metrics.append(session.ID, MetricSample{At: time.Now(), MemBytes: &used})
 
 	t.Setenv("FAKE_STATUS_LINES", "101|COMPLETED|node1|"+session.JobName+"|3600")
 	testutil.Check(t, service.reconcileAll(context.Background()))

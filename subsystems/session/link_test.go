@@ -110,7 +110,7 @@ func TestTheLinkCarriesJupyterSSHAndMetricsOnDemand(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/metrics":
 			used := int64(2048)
-			_ = json.NewEncoder(w).Encode(metricSample{MemBytes: &used})
+			_ = json.NewEncoder(w).Encode(MetricSample{MemBytes: &used})
 		case "/api/v1/vscode/sessions":
 			var body map[string]string
 			if json.NewDecoder(r.Body).Decode(&body) != nil || body["authorized_key"] != "ssh-ed25519 AAAA" || body["ref"] != "ssh-9de8a23119db6492" {
@@ -238,7 +238,7 @@ func TestALinkForTheCurrentSeqMakesTheRunReady(t *testing.T) {
 	testutil.Check(t, err)
 	attached, err := service.Attach(context.Background(), testPrincipal, defined.ID, nil)
 	testutil.Check(t, err)
-	session := Session{sessionResponse: attached.Session}
+	session := Session{SessionResponse: attached.Session}
 	fakeLinkspan(t, planeServer(t, &service), service, session, nil)
 	testutil.Eventually(t, 3*time.Second, "the linked run to become READY", func() bool {
 		current, err := service.loadSession(session.ID)
@@ -261,7 +261,7 @@ func TestADevtunnelOnlyAttachIsReadyAndReachableThroughItsTunnel(t *testing.T) {
 	testutil.Check(t, err)
 	attached, err := service.Attach(context.Background(), testPrincipal, defined.ID, []string{modeDevtunnel})
 	testutil.Check(t, err)
-	if attached.Link != nil || attached.Devtunnel == nil || *attached.Devtunnel != (devtunnelAccess{ID: defined.ID + "-1", Cluster: "use", HostToken: testHostToken}) {
+	if attached.Link != nil || attached.Devtunnel == nil || *attached.Devtunnel != (DevtunnelAccess{ID: defined.ID + "-1", Cluster: "use", HostToken: testHostToken}) {
 		t.Fatalf("devtunnel attach = %#v %#v", attached.Link, attached.Devtunnel)
 	}
 	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -270,7 +270,7 @@ func TestADevtunnelOnlyAttachIsReadyAndReachableThroughItsTunnel(t *testing.T) {
 		}
 	}))
 	defer health.Close()
-	control := sessionHost(Session{sessionResponse: attached.Session}, ports(defined.ID, 1).Control)
+	control := sessionHost(Session{SessionResponse: attached.Session}, ports(defined.ID, 1).Control)
 	service.transport = newSessionTransport(func(ctx context.Context, _, address string) (net.Conn, error) {
 		if current, err := service.loadSession(defined.ID); err != nil || address != control || service.link(*current) != nil || current.Tunnel.ID == "" {
 			return nil, errNoRoute

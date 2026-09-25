@@ -43,7 +43,7 @@ var (
 	linkUpgrader    = websocket.Upgrader{Subprotocols: []string{ssh.ControlWebSocketProtocol}, CheckOrigin: func(*http.Request) bool { return true }}
 )
 
-type sshAccessResponse struct {
+type SSHAccessResponse struct {
 	Port int `json:"port"`
 }
 
@@ -179,7 +179,7 @@ func (s Service) Mount(mux *http.ServeMux) {
 	}
 }
 
-func (s Service) StartSSH(ctx context.Context, principal security.Principal, id, publicKey string) (*sshAccessResponse, error) {
+func (s Service) StartSSH(ctx context.Context, principal security.Principal, id, publicKey string) (*SSHAccessResponse, error) {
 	session, err := s.Get(principal, id)
 	if err != nil {
 		return nil, err
@@ -199,7 +199,7 @@ func (s Service) StartSSH(ctx context.Context, principal security.Principal, id,
 	if err != nil || status != http.StatusOK && status != http.StatusCreated || json.Unmarshal(answer, &started) != nil || started.Port < 1 || started.Port > 65535 {
 		return nil, security.New("upstream_failure", "Linkspan did not start an SSH server", http.StatusBadGateway)
 	}
-	return &sshAccessResponse{Port: started.Port}, nil
+	return &SSHAccessResponse{Port: started.Port}, nil
 }
 
 func (s Service) linkspan(ctx context.Context, session Session, method, path string, body io.Reader, limit int64) ([]byte, int, error) {
