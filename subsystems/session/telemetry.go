@@ -38,17 +38,6 @@ var sessionCredentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`/[^\s'\"]*\.cybershuttle/sessions/s-[a-f0-9]{12}(?:/[^\s'\"]*)?`),
 }
 
-type SessionLogLine struct {
-	Stream string    `json:"stream"`
-	Text   string    `json:"text"`
-	At     time.Time `json:"at"`
-}
-
-type SessionLogTail struct {
-	SessionID string           `json:"sessionId"`
-	Lines     []SessionLogLine `json:"lines"`
-}
-
 type sessionLogBuffer struct {
 	statusBytes int
 	status      []SessionLogLine
@@ -364,25 +353,6 @@ const (
 	metricSampleInterval    = 5 * time.Second
 )
 
-type GPUSample struct {
-	Index       int `json:"index"`
-	UtilPct     int `json:"utilPct"`
-	MemUsedMiB  int `json:"memUsedMiB"`
-	MemTotalMiB int `json:"memTotalMiB"`
-}
-
-type MetricSample struct {
-	At           time.Time   `json:"at"`
-	MemBytes     *int64      `json:"memBytes,omitempty"`
-	CPUUsageUsec *int64      `json:"cpuUsageUsec,omitempty"`
-	GPUs         []GPUSample `json:"gpus,omitempty"`
-}
-
-type SessionSeries struct {
-	SessionID string         `json:"sessionId"`
-	Samples   []MetricSample `json:"samples"`
-}
-
 type sessionMetrics struct {
 	mu     sync.RWMutex
 	series map[string][]MetricSample
@@ -469,24 +439,6 @@ func (s Service) sampleSession(ctx context.Context, session Session) (MetricSamp
 
 const maxRunRecords = 200
 
-type Run struct {
-	SessionID   string           `json:"sessionId"`
-	Seq         int              `json:"seq"`
-	SSHHost     string           `json:"sshHost"`
-	Account     string           `json:"account,omitempty"`
-	Partition   string           `json:"partition"`
-	RootFolder  string           `json:"rootFolder"`
-	Resources   Resources        `json:"resources"`
-	TunnelModes []string         `json:"tunnelModes"`
-	FinalState  string           `json:"finalState"`
-	Error       string           `json:"error,omitempty"`
-	StartedAt   time.Time        `json:"startedAt,omitzero"`
-	EndedAt     time.Time        `json:"endedAt"`
-	Stats       *RunStats        `json:"stats,omitempty"`
-	Samples     []MetricSample   `json:"samples,omitempty"`
-	Logs        []SessionLogLine `json:"logs,omitempty"`
-}
-
 type runRecord struct {
 	Run
 	Owner    security.Principal `json:"owner"`
@@ -494,15 +446,6 @@ type runRecord struct {
 }
 
 const runStatsWindow = 10 * time.Minute
-
-type RunStats struct {
-	Cores               int     `json:"cores,omitempty"`
-	RequestedMemory     string  `json:"requestedMemory,omitempty"`
-	ElapsedSeconds      int64   `json:"elapsedSeconds,omitempty"`
-	MaxRSS              string  `json:"maxRss,omitempty"`
-	CPUEfficiencyPct    float64 `json:"cpuEfficiencyPct,omitempty"`
-	MemoryEfficiencyPct float64 `json:"memoryEfficiencyPct,omitempty"`
-}
 
 func (s RunStats) complete() bool { return s.MaxRSS != "" }
 

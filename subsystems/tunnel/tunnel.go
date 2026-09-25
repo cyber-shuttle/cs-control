@@ -50,31 +50,6 @@ type tunnelLink struct {
 	LinkedAt     time.Time `json:"linkedAt"`
 }
 
-type TunnelLinkStatus struct {
-	Linked   bool      `json:"linked"`
-	Provider string    `json:"provider,omitempty"`
-	Account  string    `json:"account,omitempty"`
-	LinkedAt time.Time `json:"linkedAt,omitzero"`
-}
-
-type TunnelLinkStart struct {
-	Handle           string `json:"handle"`
-	UserCode         string `json:"userCode"`
-	VerificationURI  string `json:"verificationUri"`
-	ExpiresInSeconds int64  `json:"expiresInSeconds"`
-	IntervalSeconds  int64  `json:"intervalSeconds"`
-}
-
-type TunnelLinkPoll struct {
-	Status          string `json:"status"`
-	IntervalSeconds int64  `json:"intervalSeconds,omitempty"`
-	TunnelLinkStatus
-}
-
-type StartLinkRequest struct {
-	Provider string `json:"provider"`
-}
-
 type linkBrokerEntry struct {
 	principal     security.Principal
 	authorization *devtunnel.DeviceAuthorization

@@ -43,10 +43,6 @@ var (
 	linkUpgrader    = websocket.Upgrader{Subprotocols: []string{ssh.ControlWebSocketProtocol}, CheckOrigin: func(*http.Request) bool { return true }}
 )
 
-type SSHAccessResponse struct {
-	Port int `json:"port"`
-}
-
 type sessionLink struct {
 	seq int
 	mux *yamux.Session

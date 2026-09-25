@@ -32,21 +32,6 @@ var (
 	errSSHKeyExists      = security.New("ssh_key_exists", "SSH key is already stored", http.StatusConflict)
 )
 
-type SSHKey struct {
-	Name        string `json:"id"`
-	Type        string `json:"type"`
-	Fingerprint string `json:"fingerprint"`
-}
-
-type SSHKeyList struct {
-	Keys []SSHKey `json:"keys"`
-}
-
-type SSHKeyRequest struct {
-	Name       string `json:"id"`
-	PrivateKey string `json:"privateKey"`
-}
-
 func validSSHKeyName(value string) bool {
 	return security.SafeName(value, 64) && !strings.HasSuffix(value, ".pub")
 }

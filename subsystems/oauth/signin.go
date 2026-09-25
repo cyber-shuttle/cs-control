@@ -18,46 +18,6 @@ import (
 
 const signInScope = "openid email profile offline_access"
 
-type OAuthConfigResponse struct {
-	Issuer                string `json:"issuer"`
-	AuthorizationEndpoint string `json:"authorizationEndpoint"`
-	ClientID              string `json:"clientId"`
-	Scope                 string `json:"scope"`
-}
-
-type ExchangeRequest struct {
-	Code         string `json:"code"`
-	CodeVerifier string `json:"codeVerifier"`
-	RedirectURI  string `json:"redirectUri"`
-}
-
-type DeviceResponse struct {
-	DeviceCode      string `json:"deviceCode"`
-	UserCode        string `json:"userCode"`
-	CompleteURI     string `json:"verificationUriComplete"`
-	IntervalSeconds int64  `json:"intervalSeconds"`
-}
-
-type DevicePollRequest struct {
-	DeviceCode string `json:"deviceCode"`
-}
-
-type DevicePoll struct {
-	Status          string `json:"status"`
-	IntervalSeconds int64  `json:"intervalSeconds,omitempty"`
-	*TokenResponse
-}
-
-type RefreshRequest struct {
-	RefreshToken string `json:"refreshToken"`
-}
-
-type TokenResponse struct {
-	IDToken          string `json:"idToken"`
-	RefreshToken     string `json:"refreshToken,omitempty"`
-	ExpiresInSeconds int64  `json:"expiresInSeconds"`
-}
-
 type Service struct {
 	oidc         *identity.OIDC
 	custos       *identity.Custos

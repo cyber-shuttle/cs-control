@@ -35,65 +35,10 @@ var (
 	createLocks       [64]sync.Mutex
 )
 
-type Gres struct {
-	Name  string `json:"name"`
-	Count int    `json:"count"`
-}
-
-type Partition struct {
-	Name     string `json:"name"`
-	CPUCount int    `json:"cpuCount"`
-	MemoryMB int    `json:"memoryMb"`
-	GRES     []Gres `json:"gres"`
-}
-
-type Resource struct {
-	Host       string      `json:"host"`
-	Accounts   []string    `json:"accounts"`
-	Partitions []Partition `json:"partitions"`
-	HomeDir    string      `json:"homeDir"`
-}
-
-type Resources struct {
-	Cores       int    `json:"cores"`
-	MemoryMB    int    `json:"memoryMb"`
-	WallMinutes int    `json:"wallMinutes"`
-	GPUType     string `json:"gpuType,omitempty"`
-	GPUCount    int    `json:"gpuCount,omitempty"`
-}
-
-type CreateRequest struct {
-	ID             string    `json:"-"`
-	IdempotencyKey string    `json:"idempotencyKey,omitempty"`
-	SSHHost        string    `json:"sshHost"`
-	Account        string    `json:"account,omitempty"`
-	Partition      string    `json:"partition"`
-	RootFolder     string    `json:"rootFolder"`
-	Resources      Resources `json:"resources"`
-	TunnelModes    []string  `json:"tunnelModes,omitempty"`
-}
-
 type tunnelMetadata struct {
 	ID        string    `json:"id"`
 	ClusterID string    `json:"clusterId"`
 	ExpiresAt time.Time `json:"expiresAt"`
-}
-
-type SessionResponse struct {
-	ID          string    `json:"id"`
-	Seq         int       `json:"seq"`
-	State       string    `json:"state"`
-	Launcher    string    `json:"launcher"`
-	SSHHost     string    `json:"sshHost"`
-	Account     string    `json:"account,omitempty"`
-	Partition   string    `json:"partition"`
-	RootFolder  string    `json:"rootFolder"`
-	Resources   Resources `json:"resources"`
-	TunnelModes []string  `json:"tunnelModes"`
-	Error       string    `json:"error,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
-	StartedAt   time.Time `json:"startedAt,omitzero"`
-	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type Session struct {
@@ -105,49 +50,6 @@ type Session struct {
 	Node          string             `json:"node,omitempty"`
 	PrivateRoot   string             `json:"privateRoot"`
 	WorkspaceRoot string             `json:"workspaceRoot"`
-}
-
-type SessionList struct {
-	Sessions []SessionResponse `json:"sessions"`
-	Logs     []SessionLogTail  `json:"logs"`
-}
-
-type LinkAccess struct {
-	URL   string `json:"url"`
-	Token string `json:"token"`
-}
-
-type DevtunnelAccess struct {
-	ID        string `json:"id"`
-	Cluster   string `json:"cluster"`
-	HostToken string `json:"hostToken"`
-}
-
-type AttachResponse struct {
-	Session   SessionResponse  `json:"session"`
-	Link      *LinkAccess      `json:"link,omitempty"`
-	Devtunnel *DevtunnelAccess `json:"devtunnel,omitempty"`
-}
-
-type SessionAccessResponse struct {
-	SessionID string               `json:"sessionId"`
-	Seq       int                  `json:"seq"`
-	ExpiresAt time.Time            `json:"expiresAt"`
-	Jupyter   SessionJupyterAccess `json:"jupyter"`
-}
-
-type SessionJupyterAccess struct {
-	URI   string `json:"uri"`
-	Token string `json:"token"`
-}
-
-type ValidationResult struct {
-	SessionID string `json:"sessionId"`
-	Script    string `json:"script"`
-	Status    string `json:"status"`
-	Message   string `json:"message"`
-	Stdout    string `json:"stdout,omitempty"`
-	Stderr    string `json:"stderr,omitempty"`
 }
 
 type state struct {
@@ -437,10 +339,6 @@ func (s Service) listSessions(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	security.WriteJSONBytes(writer, http.StatusOK, body)
-}
-
-type RunList struct {
-	Runs []Run `json:"runs"`
 }
 
 func (s Service) Routes() router.Routes {

@@ -28,23 +28,6 @@ type Service struct {
 	Control *internalssh.ControlManager
 }
 
-type AddHostRequest struct {
-	Name    string `json:"name"`
-	Command string `json:"command"`
-	Key     string `json:"keyId"`
-}
-
-type UpdateHostRequest struct {
-	Command string `json:"command"`
-	Key     string `json:"keyId"`
-}
-
-type HostHealth struct {
-	Host    string `json:"host"`
-	OK      bool   `json:"ok"`
-	Message string `json:"message"`
-}
-
 func NewService(database *db.DB, configs internalssh.Configurations, control *internalssh.ControlManager) (*Service, error) {
 	if database == nil || configs.Dir == "" || control == nil {
 		return nil, errors.New("SSH service dependencies are required")
