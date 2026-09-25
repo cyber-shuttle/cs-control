@@ -458,6 +458,9 @@ func (s Service) provisionSession(alias string, session Session, home, linkspan 
 		if ctx.Err() != nil {
 			return security.New("session_provisioning_failed", "Preparing the session environment on "+alias+" timed out.", http.StatusGatewayTimeout)
 		}
+		if ssh.AuthenticationFailure(errText) {
+			return ssh.ClassifyFailure(alias, errText, runErr)
+		}
 		return security.New("session_provisioning_failed", provisionMessage(alias, report["error"], errText), http.StatusBadGateway)
 	}
 	if report["provision"] != "complete" {

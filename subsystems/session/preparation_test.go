@@ -255,3 +255,12 @@ func TestStartValidationFailureLeavesTheSessionUnlaunched(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestProvisionReportsAnExpiredSSHLoginAsLoginRequired(t *testing.T) {
+	sshBin := filepath.Join(t.TempDir(), "ssh")
+	testutil.Check(t, os.WriteFile(sshBin, []byte("#!/bin/sh\n[ \"$1\" = -G ] && echo 'hostname delta' && exit 0\necho 'Permission denied (publickey,password).' >&2\nexit 255\n"), 0o700))
+	service := newTestService(t, ssh.Runner{SSHBin: sshBin, Timeout: 5 * time.Second}, Store{})
+	if code := security.For(service.provisionSession("delta", Session{sessionResponse: sessionResponse{ID: "s-000000000001"}}, "/home/u", "/home/u/.cybershuttle/bin/linkspan")).Code; code != "ssh_authentication_required" {
+		t.Fatalf("expired login provisioned as %q, want ssh_authentication_required", code)
+	}
+}
