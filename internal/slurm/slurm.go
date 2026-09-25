@@ -31,6 +31,7 @@ const (
 	markerErrorAccounts   = discoveryMarkerPrefix + "ERROR_ACCOUNTS__"
 	markerErrorPartitions = discoveryMarkerPrefix + "ERROR_PARTITIONS__"
 	markerErrorHome       = discoveryMarkerPrefix + "ERROR_HOME__"
+	submitScriptEnd       = "CS_JOB_SCRIPT_END"
 
 	statusMarkerPrefix     = "__CS_S"
 	statusMarkerCancel     = statusMarkerPrefix + "CANCEL__"
@@ -299,17 +300,28 @@ func Check(ctx context.Context, runner ssh.Runner, host, script string) (CheckRe
 	return CheckResult{}, ssh.ClassifyFailure(host, stderr, err)
 }
 
-func Submit(ctx context.Context, runner ssh.Runner, host string, request SubmitRequest) (string, error) {
-	keys := slices.Sorted(maps.Keys(request.Environment))
-	exports := make([]string, 1, len(keys)+1)
-	exports[0] = "ALL"
-	secrets := make([]string, 0, len(keys))
-	for _, key := range keys {
-		exports = append(exports, key+"="+request.Environment[key])
-		secrets = append(secrets, request.Environment[key])
+// submitProgram exports the environment and feeds the script to sbatch from stdin, so no value reaches an argv
+// on the shared login node, where any user can list processes.
+func submitProgram(request SubmitRequest) (string, error) {
+	if !strings.HasSuffix(request.Script, "\n") || strings.Contains(request.Script, "\n"+submitScriptEnd+"\n") {
+		return "", errors.New("submission script is not newline-terminated or contains its terminator")
 	}
-	stdout, stderr, runErr := runner.RunOutput(ctx, host, runner.EffectiveTimeout(), strings.NewReader(request.Script),
-		"sbatch", "--job-name="+request.JobName, "--export="+strings.Join(exports, ","), "--parsable")
+	var program strings.Builder
+	for _, key := range slices.Sorted(maps.Keys(request.Environment)) {
+		program.WriteString("export " + key + "=" + ssh.ShellQuote(request.Environment[key]) + "\n")
+	}
+	program.WriteString(`exec sbatch --job-name="$2" --export=ALL --parsable <<'` + submitScriptEnd + "'\n" + request.Script + submitScriptEnd + "\n")
+	return program.String(), nil
+}
+
+func Submit(ctx context.Context, runner ssh.Runner, host string, request SubmitRequest) (string, error) {
+	program, err := submitProgram(request)
+	if err != nil {
+		return "", err
+	}
+	secrets := slices.Collect(maps.Values(request.Environment))
+	stdout, stderr, runErr := runner.RunOutput(ctx, host, runner.EffectiveTimeout(), strings.NewReader(program),
+		"sh", "-s", "--", "cs-submit", request.JobName)
 	if runErr != nil {
 		cause := security.Redact(fmt.Sprintf("submit %s failed", request.JobName), errors.New(ssh.FailureMessage(stderr, runErr)), secrets...)
 		return "", &submissionError{cause: cause, ambiguous: ssh.AmbiguousExit(runErr)}

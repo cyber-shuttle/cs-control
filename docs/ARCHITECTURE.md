@@ -46,7 +46,8 @@ A launch runs in this order:
 2. A creator-owned Dev Tunnel for the seq, when the session's `tunnelModes` holds `devtunnel`; then the seq capability
    written to disk and the record persisted as `SUBMITTING`.
 3. Login-node preparation: Linkspan and the workflow document, in one constant script.
-4. `sbatch` with the job name and the session environment on the command line.
+4. `sbatch`, fed from stdin by a program that exports the session environment first, so no value reaches an
+   argv any login-node user can list.
 
 The record is durable before preparation, so preparation narrates into the log tail the client already polls. A
 conclusive submission failure releases the tunnel and capability and marks the session `FAILED`. An ambiguous one,
@@ -64,7 +65,7 @@ another caller's preparation of the same host proceeds.
 The batch script execs Linkspan and names no application. The workflow, one `on: start` task with a
 `jupyter.sessions.start` step, carries only validated paths and the Jupyter port. Secrets never enter script text:
 `JUPYTER_TOKEN` and `CS_CONTROL_PORT`, with `websocket` `CS_LINK_URL` and `LINKSPAN_LINK_TOKEN`, and with `devtunnel`
-`CS_TUNNEL_ID`, `CS_TUNNEL_CLUSTER` and `LINKSPAN_TUNNEL_HOST_TOKEN` travel in `sbatch --export`. Linkspan runs with
+`CS_TUNNEL_ID`, `CS_TUNNEL_CLUSTER` and `LINKSPAN_TUNNEL_HOST_TOKEN` reach the job through `sbatch --export=ALL`. Linkspan runs with
 `--tunnel-enable --tunnel-mode <modes>` and, per selected mode, `--tunnel-websocket-args "--url $CS_LINK_URL"` or
 `--tunnel-devtunnel-args "--id $CS_TUNNEL_ID --cluster $CS_TUNNEL_CLUSTER"`. The control and Jupyter ports are
 derived from session ID and seq, so a tunnel can declare the control port before the job starts.

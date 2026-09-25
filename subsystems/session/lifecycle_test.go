@@ -126,13 +126,8 @@ case "$command" in
     [ -z "${FAKE_VALIDATION_STDERR:-}" ] || printf '%s\n' "$FAKE_VALIDATION_STDERR" >&2
     [ "${FAKE_VALIDATION_FAIL:-0}" = 0 ] || exit "${FAKE_VALIDATION_FAIL}"
     ;;
-  "sbatch --job-name="*" --export=ALL,"*" --parsable")
-    cat > "$FAKE_SCRIPT_LOG"
-    [ -z "${FAKE_SUBMIT_STARTED:-}" ] || : > "$FAKE_SUBMIT_STARTED"
-    while [ -n "${FAKE_SUBMIT_RELEASE:-}" ] && [ ! -e "$FAKE_SUBMIT_RELEASE" ]; do sleep .01; done
-    printf '%s\n' "${2#--job-name=}" > "$FAKE_ACCEPTED_JOB_NAME"
-    printf '%s\n' "${FAKE_JOB_ID:-12345}" > "$FAKE_ACCEPTED_JOB_ID"
-    printf '%s;cluster\n' "${FAKE_JOB_ID:-12345}"
+  "sh -s -- cs-submit "*)
+    PATH="$FAKE_BIN:$PATH" exec "$@"
     ;;
   "scancel "*)
     [ -z "${FAKE_SCANCEL_LOG:-}" ] || printf '%s\n' "$command" >> "$FAKE_SCANCEL_LOG"
@@ -163,6 +158,18 @@ case "$command" in
 esac
 `
 	testutil.WriteScript(t, path, script)
+	testutil.Check(t, os.Mkdir(filepath.Join(dir, "bin"), 0o700))
+	testutil.WriteScript(t, filepath.Join(dir, "bin", "sbatch"), `#!/bin/sh
+cat > "$FAKE_SCRIPT_LOG"
+env | grep -E '^(CS_|LINKSPAN_|JUPYTER_)' | sort > "$FAKE_SUBMIT_ENV"
+[ -z "${FAKE_SUBMIT_STARTED:-}" ] || : > "$FAKE_SUBMIT_STARTED"
+while [ -n "${FAKE_SUBMIT_RELEASE:-}" ] && [ ! -e "$FAKE_SUBMIT_RELEASE" ]; do sleep .01; done
+printf '%s\n' "${1#--job-name=}" > "$FAKE_ACCEPTED_JOB_NAME"
+printf '%s\n' "${FAKE_JOB_ID:-12345}" > "$FAKE_ACCEPTED_JOB_ID"
+printf '%s;cluster\n' "${FAKE_JOB_ID:-12345}"
+`)
+	t.Setenv("FAKE_BIN", filepath.Join(dir, "bin"))
+	t.Setenv("FAKE_SUBMIT_ENV", filepath.Join(dir, "submit-env"))
 	t.Setenv("FAKE_STATUS", status)
 	t.Setenv("FAKE_SCRIPT_LOG", scriptLog)
 	t.Setenv("FAKE_VALIDATION_SCRIPT_LOG", validationScriptLog)
@@ -294,14 +301,17 @@ func TestOnlyTheDevtunnelModeMakesATunnelAndItNeedsALinkedAccount(t *testing.T) 
 	if session.State != "QUEUED" || session.Tunnel.ID != "" || len(manager.creates) != 0 {
 		t.Fatalf("a websocket session made a tunnel: %#v, %d creates", session, len(manager.creates))
 	}
-	commands := string(mustRead(t, commandLog))
+	submitted := string(mustRead(t, os.Getenv("FAKE_SUBMIT_ENV")))
 	for _, want := range []string{"CS_LINK_URL=wss://plane.example.edu/api/v1/sessions/" + session.ID + "/link", "LINKSPAN_LINK_TOKEN="} {
-		if !strings.Contains(commands, want) {
-			t.Fatalf("submission is missing %q:\n%s", want, commands)
+		if !strings.Contains(submitted, want) {
+			t.Fatalf("submission is missing %q:\n%s", want, submitted)
 		}
 	}
-	if strings.Contains(commands, "CS_TUNNEL_ID=") {
-		t.Fatalf("submission named a tunnel it does not have:\n%s", commands)
+	if strings.Contains(submitted, "CS_TUNNEL_ID=") {
+		t.Fatalf("submission named a tunnel it does not have:\n%s", submitted)
+	}
+	if commands := string(mustRead(t, commandLog)); strings.Contains(commands, "TOKEN=") {
+		t.Fatalf("submission put a token on the command line:\n%s", commands)
 	}
 
 	service.TunnelCredentials = &testLinkBroker{}

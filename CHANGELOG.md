@@ -5,6 +5,11 @@ Notable changes to CyberShuttle Plane. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- Job submission no longer puts the session environment, including the link and Dev Tunnel host tokens, on
+  `sbatch`'s command line, where any user of the login node could list it; a stdin program exports it instead.
+
 ### Changed
 
 - The request and response types of the API and the SSH login frames are exported, so clients generate their

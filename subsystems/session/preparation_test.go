@@ -213,7 +213,7 @@ func TestStartRevalidatesExactScriptBeforeSubmit(t *testing.T) {
 		t.Fatalf("submitted and validated scripts differ beyond the log path:\nsubmitted:\n%s\nvalidated:\n%s", submitted, validated)
 	}
 	commands, _ := os.ReadFile(commandLog)
-	if strings.Count(string(commands), "'sbatch' '--test-only'") != 2 || strings.Count(string(commands), "'sbatch' '--job-name=") != 1 {
+	if strings.Count(string(commands), "'sbatch' '--test-only'") != 2 || strings.Count(string(commands), "'cs-submit'") != 1 {
 		t.Fatalf("expected validation, create revalidation, then one submit:\n%s", commands)
 	}
 	before, _ := service.logs.tail(created.ID)
@@ -243,7 +243,7 @@ func TestStartValidationFailureLeavesTheSessionUnlaunched(t *testing.T) {
 		return nil
 	}))
 	commands, _ := os.ReadFile(commandLog)
-	if strings.Contains(string(commands), "--parsable") {
+	if strings.Contains(string(commands), "cs-submit") {
 		t.Fatalf("failed validation submitted a job:\n%s", commands)
 	}
 	if len(manager.creates) != 0 {
