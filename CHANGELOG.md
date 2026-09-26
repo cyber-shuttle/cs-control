@@ -10,10 +10,20 @@ Notable changes to CyberShuttle Plane. The format follows
 - Job submission no longer puts the session environment, including the link and Dev Tunnel host tokens, on
   `sbatch`'s command line, where any user of the login node could list it; a stdin program exports it instead.
 
+### Added
+
+- `attach` answers the `port` the client's Linkspan must serve its API on, and a telemetry run names its
+  `launcher`, `cs-plane` (JupyterLab) or `client` (CS Bridge); runs recorded before 0.3.0 have none.
+
 ### Changed
 
 - The request and response types of the API and the SSH login frames are exported, so clients generate their
   TypeScript types from them with tygo. JSON shapes are unchanged.
+- Stopping a session without a Dev Tunnel no longer reads the linked Dev Tunnels account.
+
+### Removed
+
+- `POST /api/v1/sessions/{id}/runs`, which only moved CS Bridge's local history into cs-plane.
 
 ### Fixed
 

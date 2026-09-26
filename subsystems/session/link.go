@@ -223,6 +223,9 @@ func dialForward(ctx context.Context, endpoint tunnelEndpoint, port uint16, time
 func (s Service) dial(ctx context.Context, session Session, port uint16) (net.Conn, error) {
 	mux := s.link(session)
 	if mux == nil {
+		if session.Tunnel.ID == "" {
+			return nil, errNoRoute
+		}
 		endpoint, err := s.sessionEndpoint(ctx, session, ports(session.ID, session.Seq).Control)
 		if err != nil {
 			return nil, err

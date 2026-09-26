@@ -1,13 +1,12 @@
 // The session state machine. Define records a stopped session under an ID derived from the idempotency key, so a
-// replay answers it; AdoptRuns attaches runs another client finished to a session that never ran, once. Start
-// launches a run through Slurm, serialized across processes before tunnel side effects, and persists intent before
-// provisioning. A conclusive submission failure compensates through abandonSubmitIntent; an ambiguous one stays
-// durable. A stop proceeds locally without a usable link: releaseTunnel skips Dev Tunnels when the token is empty.
+// replay answers it. Start launches a run through Slurm, serialized across processes before tunnel side effects, and
+// persists intent before provisioning. A conclusive submission failure compensates through abandonSubmitIntent; an
+// ambiguous one stays durable. A stop proceeds locally without a usable link, and reads the Dev Tunnels account only
+// for a session that has a tunnel.
 // Attach admits a run the client launches itself, which cs-plane never schedules or cancels.
 package session
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -316,7 +315,7 @@ func (s Service) Attach(ctx context.Context, principal security.Principal, id st
 		return nil, err
 	}
 	s.sessionStatus(id, "Waiting for the client's Linkspan to connect")
-	response := &AttachResponse{Session: intent.SessionResponse}
+	response := &AttachResponse{Session: intent.SessionResponse, Port: ports(id, intent.Seq).Control}
 	if slices.Contains(intent.TunnelModes, modeWebsocket) {
 		response.Link = &LinkAccess{URL: s.linkURL(id), Token: capability.LinkToken}
 	}
@@ -358,7 +357,10 @@ func (s Service) Stop(principal security.Principal, id string) (*Session, error)
 	if !alreadyStopped {
 		s.sessionStatus(id, "Stopping session")
 	}
-	credential, _ := s.TunnelCredentials.Credential(operationCtx, principal)
+	var credential devtunnel.Credential
+	if snapshot.Tunnel.ID != "" {
+		credential, _ = s.TunnelCredentials.Credential(operationCtx, principal)
+	}
 	managementErr := s.releaseTunnel(credential, snapshot.ID, snapshot.Seq, snapshot.Tunnel)
 	if link, ok := s.links.LoadAndDelete(id); ok {
 		_ = link.(*sessionLink).mux.Close()
@@ -496,38 +498,4 @@ func (s Service) Define(principal security.Principal, request CreateRequest) (*S
 		return s.Store.save(current)
 	})
 	return session, created, err
-}
-
-func (s Service) AdoptRuns(principal security.Principal, id string, history SessionHistory) (*Session, error) {
-	if len(history.Runs) == 0 || len(history.Runs) > 50 || slices.ContainsFunc(history.Runs, func(run FinishedRun) bool {
-		return !terminalSession(run.FinalState) || run.EndedAt.IsZero() || len(run.Samples) > maxSessionMetricSamples
-	}) {
-		return nil, security.New("invalid_runs", fmt.Sprintf("runs must be 1 to 50 terminal runs, each with endedAt and at most %d samples", maxSessionMetricSamples), http.StatusBadRequest)
-	}
-	var adopted *Session
-	err := s.Store.locked(func(current *state) error {
-		session := current.Sessions[id]
-		switch {
-		case session == nil:
-			return errSessionNotFound
-		case session.Owner != principal:
-			return errOwnerMismatch
-		case session.Seq != 0 || slices.ContainsFunc(current.Runs, func(run runRecord) bool { return run.SessionID == id }):
-			return errSessionHasHistory
-		}
-		last := history.Runs[len(history.Runs)-1]
-		session.Seq, session.State, session.Error, session.StartedAt = len(history.Runs), last.FinalState, security.TruncateUTF8(last.Error, maxSessionError), last.StartedAt.UTC()
-		session.CreatedAt, session.UpdatedAt = cmp.Or(history.CreatedAt.UTC(), session.CreatedAt), s.utcNow()
-		for index, run := range history.Runs {
-			recordRun(current, runRecord{Run: Run{
-				SessionID: session.ID, Seq: index + 1, SSHHost: session.SSHHost, Account: session.Account,
-				Partition: session.Partition, RootFolder: session.RootFolder, Resources: session.Resources, TunnelModes: session.TunnelModes,
-				FinalState: run.FinalState, Error: security.TruncateUTF8(run.Error, maxSessionError),
-				StartedAt: run.StartedAt.UTC(), EndedAt: run.EndedAt.UTC(), Stats: run.Stats, Samples: run.Samples,
-			}, Owner: principal})
-		}
-		adopted = detached(session)
-		return s.Store.save(current)
-	})
-	return adopted, err
 }

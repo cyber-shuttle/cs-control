@@ -78,6 +78,7 @@ type DevtunnelAccess struct {
 
 type AttachResponse struct {
 	Session   SessionResponse  `json:"session"`
+	Port      uint16           `json:"port"`
 	Link      *LinkAccess      `json:"link,omitempty"`
 	Devtunnel *DevtunnelAccess `json:"devtunnel,omitempty"`
 }
@@ -105,20 +106,6 @@ type ValidationResult struct {
 
 type RunList struct {
 	Runs []Run `json:"runs"`
-}
-
-type FinishedRun struct {
-	FinalState string         `json:"finalState"`
-	Error      string         `json:"error,omitempty"`
-	StartedAt  time.Time      `json:"startedAt,omitzero"`
-	EndedAt    time.Time      `json:"endedAt"`
-	Stats      *RunStats      `json:"stats,omitempty"`
-	Samples    []MetricSample `json:"samples,omitempty"`
-}
-
-type SessionHistory struct {
-	CreatedAt time.Time     `json:"createdAt,omitzero"`
-	Runs      []FinishedRun `json:"runs"`
 }
 
 type SSHAccessResponse struct {
@@ -167,6 +154,7 @@ type RunStats struct {
 type Run struct {
 	SessionID   string           `json:"sessionId"`
 	Seq         int              `json:"seq"`
+	Launcher    string           `json:"launcher,omitempty"`
 	SSHHost     string           `json:"sshHost"`
 	Account     string           `json:"account,omitempty"`
 	Partition   string           `json:"partition"`

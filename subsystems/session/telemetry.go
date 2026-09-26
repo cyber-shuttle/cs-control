@@ -441,8 +441,7 @@ const maxRunRecords = 200
 
 type runRecord struct {
 	Run
-	Owner    security.Principal `json:"owner"`
-	Launcher string             `json:"launcher,omitempty"`
+	Owner security.Principal `json:"owner"`
 }
 
 const runStatsWindow = 10 * time.Minute
@@ -466,14 +465,14 @@ func (s Service) runOf(session *Session) runRecord {
 	logTail, _ := s.logs.tail(session.ID)
 	return runRecord{
 		Run: Run{
-			SessionID: session.ID, Seq: session.Seq, SSHHost: session.SSHHost,
+			SessionID: session.ID, Seq: session.Seq, Launcher: session.Launcher, SSHHost: session.SSHHost,
 			Account: session.Account, Partition: session.Partition, RootFolder: session.RootFolder,
 			Resources: session.Resources, TunnelModes: session.TunnelModes,
 			FinalState: session.State, Error: session.Error, StartedAt: session.StartedAt,
 			EndedAt: session.UpdatedAt, Samples: s.metrics.samples(session.ID),
 			Logs: logTail.Lines,
 		},
-		Owner: session.Owner, Launcher: session.Launcher,
+		Owner: session.Owner,
 	}
 }
 
