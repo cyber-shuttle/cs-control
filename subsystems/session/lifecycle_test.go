@@ -834,17 +834,28 @@ func defineAndStart(ctx context.Context, service Service, request CreateRequest)
 	return service.Start(ctx, testPrincipal, session.ID)
 }
 
-func TestAttachAdmitsAClientLaunchedRunThatNeverReachesTheScheduler(t *testing.T) {
+type refusingCredentials struct{ t *testing.T }
+
+func (r refusingCredentials) Credential(context.Context, security.Principal) (devtunnel.Credential, error) {
+	r.t.Error("a websocket-only session read the Dev Tunnels credential")
+	return devtunnel.Credential{}, nil
+}
+
+func TestAttachAdmitsAClientLaunchedRunThatNeverReachesTheSchedulerOrDevTunnels(t *testing.T) {
 	sshBin, _, commandLog := fakeSSH(t)
 	service := fakeSSHService(t, sshBin)
 	manager := configureTestTunnel(t, &service)
+	service.TunnelCredentials = refusingCredentials{t}
 	session, _, err := service.Define(testPrincipal, newTestCreateRequest())
 	testutil.Check(t, err)
 	response := testutil.Serve(serviceHandler(t, &service), requestAs(testPrincipal, http.MethodPost, "/api/v1/sessions/"+session.ID+"/attach", []byte(`{"tunnelModes":["websocket"]}`)))
 	var attached AttachResponse
 	_ = json.Unmarshal(response.Body.Bytes(), &attached)
-	if response.Code != http.StatusOK || attached.Session.State != "QUEUED" || attached.Session.Launcher != launcherClient || attached.Session.Seq != 1 || attached.Link == nil || attached.Devtunnel != nil || !slices.Equal(attached.Session.TunnelModes, []string{modeWebsocket}) {
-		t.Fatalf("attach = %d %#v", response.Code, attached.Session)
+	if response.Code != http.StatusOK || attached.Session.State != "QUEUED" || attached.Session.Launcher != launcherClient || attached.Session.Seq != 1 || attached.Link == nil || attached.Devtunnel != nil || !slices.Equal(attached.Session.TunnelModes, []string{modeWebsocket}) || attached.Port != ports(session.ID, 1).Control {
+		t.Fatalf("attach = %d %#v, port %d", response.Code, attached.Session, attached.Port)
+	}
+	if _, err := service.dial(context.Background(), Session{SessionResponse: attached.Session}, 1); !errors.Is(err, errNoRoute) {
+		t.Fatalf("a session with no link and no tunnel dialed something: %v", err)
 	}
 	capability, err := getCapability(service.CapabilityDir, session.ID, 1)
 	if err != nil || attached.Link.Token != capability.LinkToken || attached.Link.URL != "wss://plane.example.edu/api/v1/sessions/"+session.ID+"/link" {
@@ -866,7 +877,7 @@ func TestAttachAdmitsAClientLaunchedRunThatNeverReachesTheScheduler(t *testing.T
 		t.Fatalf("stop = %#v %v", stopped, err)
 	}
 	runs, err := service.Runs(testPrincipal)
-	if err != nil || len(runs) != 1 || runs[0].Seq != 1 || runs[0].FinalState != "STOPPED" || !slices.Equal(runs[0].TunnelModes, []string{modeWebsocket}) {
+	if err != nil || len(runs) != 1 || runs[0].Seq != 1 || runs[0].Launcher != launcherClient || runs[0].FinalState != "STOPPED" || !slices.Equal(runs[0].TunnelModes, []string{modeWebsocket}) {
 		t.Fatalf("stop did not freeze the run: %#v %v", runs, err)
 	}
 	if _, err := os.Stat(commandLog); !errors.Is(err, os.ErrNotExist) {

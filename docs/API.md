@@ -26,7 +26,6 @@ relative to that URL.
 | `/api/v1/sessions/{id}/jupyter/{path}` (Jupyter Server) | any |
 | `/api/v1/sessions/{id}/link` (WebSocket, Linkspan) | `GET` |
 | `/api/v1/sessions/{id}/metrics` | `GET` |
-| `/api/v1/sessions/{id}/runs` | `POST` |
 | `/api/v1/sessions/{id}/ssh` | `POST` |
 | `/api/v1/sessions/{id}/start` | `POST` |
 | `/api/v1/sessions/{id}/stop` | `POST` |
@@ -92,12 +91,12 @@ detail logged, not returned.
 
 | Code | Status |
 | --- | --- |
-| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_id`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `invalid_tunnel_modes`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider`, `invalid_runs` | 400 |
+| `invalid_json`, `invalid_websocket_auth`, `invalid_ssh_alias`, `invalid_ssh_command`, `invalid_ssh_key_id`, `invalid_ssh_key`, `invalid_root_folder`, `invalid_partition`, `invalid_account`, `invalid_gpu`, `invalid_resource`, `invalid_resources`, `invalid_idempotency_key`, `invalid_session_id`, `invalid_tunnel_modes`, `slurm_validation_failed`, `invalid_grant`, `unknown_provider` | 400 |
 | `unauthorized`, `identity_not_linked` | 401 |
 | `session_owner_mismatch`, `origin_required`, `origin_not_allowed`, `preflight_not_allowed`, `authorization_denied` | 403 |
 | `not_found`, `session_not_found`, `ssh_host_not_found`, `ssh_key_not_found` | 404 |
 | `method_not_allowed` | 405 |
-| `session_running`, `session_not_stopped`, `session_has_history`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_key_exists`, `ssh_authentication_required`, `ssh_authentication_in_progress`, `tunnel_link_required` | 409 |
+| `session_running`, `session_not_stopped`, `idempotency_conflict`, `session_provisioning_in_progress`, `session_access_unavailable`, `ssh_host_exists`, `ssh_key_exists`, `ssh_authentication_required`, `ssh_authentication_in_progress`, `tunnel_link_required` | 409 |
 | `authorization_expired` | 410 |
 | `upgrade_required` | 426 |
 | `rate_limited` | 429 |
@@ -418,6 +417,7 @@ A conclusive submission failure leaves the session `FAILED` at the new seq.
 ```json
 {
   "session": { "id": "s-012345abcdef", "seq": 2, "state": "QUEUED", "launcher": "client", "...": "..." },
+  "port": 31337,
   "link": { "url": "wss://api.example.edu/api/v1/sessions/s-012345abcdef/link", "token": "<43-character token>" },
   "devtunnel": { "id": "s-012345abcdef-2", "cluster": "usw3", "hostToken": "<host token>" }
 }
@@ -428,11 +428,11 @@ Admits a job the client submits itself. Takes an optional body `{ "tunnelModes":
 takes the next seq and a new capability, creates a Dev Tunnel with the owner's account only for `devtunnel`, and
 persists the session `QUEUED` with `launcher: "client"`. `link` is present only with `websocket`, `devtunnel` only
 with `devtunnel`; attach is the only route that returns the host token. The client runs Linkspan with
-`--tunnel-enable --tunnel-mode <modes>`, plus `--tunnel-websocket-args "--url <url>"` and
-`LINKSPAN_LINK_TOKEN=<token>` for `websocket`, and `--tunnel-devtunnel-args "--id <id> --cluster <cluster>"` and
-`LINKSPAN_TUNNEL_HOST_TOKEN=<hostToken>` for `devtunnel`. The link, or Linkspan answering through the tunnel, moves
-the session to `READY`. A session that is not terminal is `409 session_running`; `devtunnel` without a linked
-account is `409 tunnel_link_required`.
+`--port <port>`, the port cs-plane dials its API on, and `--tunnel-enable --tunnel-mode <modes>`, plus
+`--tunnel-websocket-args "--url <url>"` and `LINKSPAN_LINK_TOKEN=<token>` for `websocket`, and
+`--tunnel-devtunnel-args "--id <id> --cluster <cluster>"` and `LINKSPAN_TUNNEL_HOST_TOKEN=<hostToken>` for
+`devtunnel`. The link, or Linkspan answering through the tunnel, moves the session to `READY`. A session that is not
+terminal is `409 session_running`; `devtunnel` without a linked account is `409 tunnel_link_required`.
 
 ### `POST /api/v1/sessions/{id}/stop` → 200
 
@@ -444,28 +444,6 @@ terminal session answers it unchanged.
 
 Removes a terminal session's record and capability; its runs stay in telemetry. A session that is not terminal is
 `409 session_not_stopped`.
-
-### `POST /api/v1/sessions/{id}/runs` → 200
-
-```json
-{
-  "createdAt": "2026-09-10T04:22:00Z",
-  "runs": [
-    { "finalState": "STOPPED", "startedAt": "2026-09-10T04:23:00Z", "endedAt": "2026-09-10T04:26:06Z",
-      "stats": { "cpuEfficiencyPct": 9.76, "memoryEfficiencyPct": 47.34 },
-      "samples": [{ "at": "2026-09-10T04:24:24Z", "memBytes": 84418560, "cpuUsageUsec": 4669597 }] }
-  ]
-}
-```
-
-Adopts runs another client finished, oldest first, into a session at seq 0 with no runs. Each run joins telemetry
-under seq 1, 2, and so on. Answers the session record with `seq` equal to the run count, the last run's state,
-`error` and `startedAt`, and `createdAt` from the body when given.
-
-| Refusal | Code |
-| --- | --- |
-| No runs, more than 50, a `finalState` other than `STOPPED` or `FAILED`, no `endedAt`, or more than 20 samples | `400 invalid_runs` |
-| Session has run or already adopted a history | `409 session_has_history` |
 
 ### `GET /api/v1/sessions/{id}/access` → 200
 
@@ -557,6 +535,7 @@ Starts an SSH server in the owner's `READY` session authorizing `publicKey`, and
     {
       "sessionId": "s-012345abcdef",
       "seq": 1,
+      "launcher": "cs-plane",
       "sshHost": "delta",
       "partition": "cpu",
       "rootFolder": "$HOME/project",
@@ -584,8 +563,8 @@ Starts an SSH server in the owner's `READY` session authorizing `publicKey`, and
 The caller's finished runs, newest first, one per `(sessionId, seq)`; they survive relaunch and delete of the
 session. cs-plane keeps the newest 200 runs across all callers. Each run is frozen when it ends with its log tail
 (`logs`) and last metric samples (`samples`). `stats` is Slurm accounting, absent until it lands; cs-plane retries
-for ten minutes after the run ends. `account`, `error`, `startedAt`, `stats`, `samples` and `logs` are omitted when
-empty.
+for ten minutes after the run ends. `launcher`, `account`, `error`, `startedAt`, `stats`, `samples` and `logs` are
+omitted when empty; a run recorded before 0.3.0 has no `launcher`.
 
 ## Dev Tunnels link
 

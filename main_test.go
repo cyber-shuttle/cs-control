@@ -152,7 +152,6 @@ func TestCanonicalRouteManifest(t *testing.T) {
 		"/api/v1/sessions/{id}/start":                 "POST",
 		"/api/v1/sessions/{id}/attach":                "POST",
 		"/api/v1/sessions/{id}/stop":                  "POST",
-		"/api/v1/sessions/{id}/runs":                  "POST",
 		"/api/v1/sessions/{id}/access":                "GET",
 		"/api/v1/sessions/{id}/metrics":               "GET",
 		"/api/v1/telemetry":                           "GET",

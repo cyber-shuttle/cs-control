@@ -224,7 +224,6 @@ var (
 	errSessionRunning      = security.New("session_running", "session is still running; stop it before running it again", http.StatusConflict)
 	errIdempotencyConflict = security.New("idempotency_conflict", "idempotency key was already used for another request", http.StatusConflict)
 	errServiceStopping     = security.New("service_stopping", "The session service is stopping.", http.StatusServiceUnavailable)
-	errSessionHasHistory   = security.New("session_has_history", "session already has a run history", http.StatusConflict)
 	errTunnelLinkRequired  = security.New("tunnel_link_required", "the devtunnel mode requires a linked Dev Tunnels account", http.StatusConflict)
 )
 
@@ -378,13 +377,6 @@ func (s Service) Routes() router.Routes {
 		})},
 		"/api/v1/sessions/{id}/stop": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (SessionResponse, error) {
 			return view(s.Stop(principal, id(request)))
-		})},
-		"/api/v1/sessions/{id}/runs": {http.MethodPost: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (SessionResponse, error) {
-			body, err := decoded[SessionHistory](request)
-			if err != nil {
-				return SessionResponse{}, err
-			}
-			return view(s.AdoptRuns(principal, id(request), body))
 		})},
 		"/api/v1/sessions/{id}/access": {http.MethodGet: security.AnswerAsPrincipal(http.StatusOK, func(principal security.Principal, request *http.Request) (*SessionAccessResponse, error) {
 			return s.Access(principal, id(request))
